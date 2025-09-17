@@ -233,6 +233,8 @@ type MenuManager struct {
 	serverActionItems     map[string]*systray.MenuItem // server name -> enable/disable action menu item
 	serverQuarantineItems map[string]*systray.MenuItem // server name -> quarantine action menu item
 	serverOAuthItems      map[string]*systray.MenuItem // server name -> OAuth login menu item
+	serverLogItems        map[string]*systray.MenuItem // server name -> open log menu item
+	serverRepoItems       map[string]*systray.MenuItem // server name -> open repo menu item
 	quarantineInfoEmpty   *systray.MenuItem            // "No servers" info item
 	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
 
@@ -256,6 +258,8 @@ func NewMenuManager(upstreamMenu, quarantineMenu *systray.MenuItem, logger *zap.
 		serverActionItems:     make(map[string]*systray.MenuItem),
 		serverQuarantineItems: make(map[string]*systray.MenuItem),
 		serverOAuthItems:      make(map[string]*systray.MenuItem),
+		serverLogItems:        make(map[string]*systray.MenuItem),
+		serverRepoItems:       make(map[string]*systray.MenuItem),
 	}
 }
 
@@ -300,7 +304,26 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 			currentServerNames = append(currentServerNames, name)
 		}
 	}
-	sort.Strings(currentServerNames)
+
+	// Sort servers by status categories
+	var activeWorking, activeNotWorking, disabled []string
+	for _, name := range currentServerNames {
+		server := currentServerMap[name]
+		enabled, _ := server["enabled"].(bool)
+		connected, _ := server["connected"].(bool)
+		if enabled && connected {
+			activeWorking = append(activeWorking, name)
+		} else if enabled {
+			activeNotWorking = append(activeNotWorking, name)
+		} else {
+			disabled = append(disabled, name)
+		}
+	}
+	sort.Strings(activeWorking)
+	sort.Strings(activeNotWorking)
+	sort.Strings(disabled)
+	currentServerNames = append(activeWorking, activeNotWorking...)
+	currentServerNames = append(currentServerNames, disabled...)
 
 	// --- Check if we need to rebuild the menu (new servers added) ---
 	var newServerNames []string
@@ -327,6 +350,12 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 			if oauthItem, ok := m.serverOAuthItems[serverName]; ok {
 				oauthItem.Hide()
 			}
+			if logItem, ok := m.serverLogItems[serverName]; ok {
+				logItem.Hide()
+			}
+			if repoItem, ok := m.serverRepoItems[serverName]; ok {
+				repoItem.Hide()
+			}
 		}
 
 		// Clear the tracking maps
@@ -334,6 +363,8 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 		m.serverActionItems = make(map[string]*systray.MenuItem)
 		m.serverQuarantineItems = make(map[string]*systray.MenuItem)
 		m.serverOAuthItems = make(map[string]*systray.MenuItem)
+		m.serverLogItems = make(map[string]*systray.MenuItem)
+		m.serverRepoItems = make(map[string]*systray.MenuItem)
 
 		// Create all servers in sorted order
 		for _, serverName := range currentServerNames {
@@ -374,6 +405,12 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 				}
 				if quarantineActionItem, ok := m.serverQuarantineItems[serverName]; ok {
 					quarantineActionItem.Hide()
+				}
+				if logItem, ok := m.serverLogItems[serverName]; ok {
+					logItem.Hide()
+				}
+				if repoItem, ok := m.serverRepoItems[serverName]; ok {
+					repoItem.Hide()
 				}
 			}
 		}
@@ -653,6 +690,30 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 				}
 			}
 		}(serverName, quarantineItem)
+	}
+
+	// Log viewer action
+	logItem := serverMenuItem.AddSubMenuItem("Open Log", fmt.Sprintf("Open log for %s", serverName))
+	m.serverLogItems[serverName] = logItem
+	go func(name string, item *systray.MenuItem) {
+		for range item.ClickedCh {
+			if m.onServerAction != nil {
+				go m.onServerAction(name, "open_log")
+			}
+		}
+	}(serverName, logItem)
+
+	// Repository action if URL is available
+	if urlStr, ok := server["url"].(string); ok && urlStr != "" {
+		repoItem := serverMenuItem.AddSubMenuItem("Open Repo", fmt.Sprintf("Open repository for %s", serverName))
+		m.serverRepoItems[serverName] = repoItem
+		go func(name string, item *systray.MenuItem) {
+			for range item.ClickedCh {
+				if m.onServerAction != nil {
+					go m.onServerAction(name, "open_repo")
+				}
+			}
+		}(serverName, repoItem)
 	}
 
 	// Set up enable/disable click handler

@@ -362,6 +362,7 @@ func (a *App) onReady() {
 	// --- Other Menu Items ---
 	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
 	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
+	editConfigItem := systray.AddMenuItem("Edit config", "Edit the configuration file")
 	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
 	systray.AddSeparator()
 
@@ -393,6 +394,8 @@ func (a *App) onReady() {
 				go a.checkForUpdates()
 			case <-openConfigItem.ClickedCh:
 				a.openConfigDir()
+			case <-editConfigItem.ClickedCh:
+				a.editConfigFile()
 			case <-openLogsItem.ClickedCh:
 				a.openLogsDir()
 			case <-quitItem.ClickedCh:
@@ -1002,6 +1005,51 @@ func (a *App) openLogsDir() {
 	a.openDirectory(logDir, "logs directory")
 }
 
+// editConfigFile opens the configuration file in the default editor
+func (a *App) editConfigFile() {
+	if a.configPath == "" {
+		a.logger.Warn("Config path is not set, cannot open")
+		return
+	}
+	a.openFile(a.configPath, "config file")
+}
+
+// openServerLog opens the log file for a specific server
+func (a *App) openServerLog(serverName string) error {
+	if a.server == nil {
+		return fmt.Errorf("server interface not available")
+	}
+	logDir := a.server.GetLogDir()
+	if logDir == "" {
+		return fmt.Errorf("log directory path is not set")
+	}
+	logPath := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+	a.openFile(logPath, "server log")
+	return nil
+}
+
+// openServerRepo opens the repository/URL for a specific server
+func (a *App) openServerRepo(serverName string) error {
+	allServers, err := a.stateManager.GetAllServers()
+	if err != nil {
+		return fmt.Errorf("failed to get servers: %w", err)
+	}
+	var url string
+	for _, srv := range allServers {
+		if name, ok := srv["name"].(string); ok && name == serverName {
+			if u, ok := srv["url"].(string); ok {
+				url = u
+			}
+			break
+		}
+	}
+	if url == "" {
+		return fmt.Errorf("no repository URL for server %s", serverName)
+	}
+	a.openFile(url, "server repository")
+	return nil
+}
+
 // openDirectory opens a directory using the OS-specific file manager
 func (a *App) openDirectory(dirPath, dirType string) {
 	var cmd *exec.Cmd
@@ -1021,6 +1069,28 @@ func (a *App) openDirectory(dirPath, dirType string) {
 		a.logger.Error("Failed to open directory", zap.Error(err), zap.String("dir_type", dirType), zap.String("path", dirPath))
 	} else {
 		a.logger.Info("Successfully opened directory", zap.String("dir_type", dirType), zap.String("path", dirPath))
+	}
+}
+
+// openFile opens a file or URL using the OS-specific handler
+func (a *App) openFile(path, fileType string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case osDarwin:
+		cmd = exec.Command("open", path)
+	case "linux":
+		cmd = exec.Command("xdg-open", path)
+	case osWindows:
+		cmd = exec.Command("cmd", "/c", "start", "", path)
+	default:
+		a.logger.Warn("Unsupported OS for opening file", zap.String("os", runtime.GOOS))
+		return
+	}
+
+	if err := cmd.Run(); err != nil {
+		a.logger.Error("Failed to open file", zap.Error(err), zap.String("file_type", fileType), zap.String("path", path))
+	} else {
+		a.logger.Info("Successfully opened file", zap.String("file_type", fileType), zap.String("path", path))
 	}
 }
 
@@ -1079,6 +1149,12 @@ func (a *App) handleServerAction(serverName, action string) {
 
 	case "unquarantine":
 		err = a.syncManager.HandleServerUnquarantine(serverName)
+
+	case "open_log":
+		err = a.openServerLog(serverName)
+
+	case "open_repo":
+		err = a.openServerRepo(serverName)
 
 	default:
 		a.logger.Warn("Unknown server action requested", zap.String("action", action))
