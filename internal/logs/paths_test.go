@@ -42,7 +42,7 @@ func TestOSSpecificLogDirs(t *testing.T) {
 		{
 			name:     "Linux",
 			os:       "linux",
-			expected: []string{"mcpproxy", "logs"},
+			expected: []string{"mcpproxy", "log"},
 		},
 	}
 
