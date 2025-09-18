@@ -651,6 +651,16 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		return nil, err
 	}
 
+	// Debug: Log server count discrepancy
+	configServerCount := len(s.config.Servers)
+	dbServerCount := len(servers)
+	if configServerCount != dbServerCount {
+		s.logger.Warn("Server count mismatch detected", 
+			zap.Int("config_servers", configServerCount),
+			zap.Int("db_servers", dbServerCount),
+			zap.Int("missing", configServerCount-dbServerCount))
+	}
+
 	var result []map[string]interface{}
 	for _, server := range servers {
 		// Get connection status and tool count from upstream manager
@@ -695,6 +705,39 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"tool_count":     toolCount,
 			"last_error":     lastError,
 		})
+	}
+
+	return result, nil
+}
+
+// GetServerTools returns tools for a specific server for configuration dialog
+func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	if s.upstreamManager == nil {
+		return []map[string]interface{}{}, nil
+	}
+
+	// Get the specific upstream client for this server
+	client, exists := s.upstreamManager.GetClient(serverName)
+	if !exists || client == nil {
+		return nil, fmt.Errorf("server %s not found or not connected", serverName)
+	}
+
+	// Get tools from the client
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tools for server %s: %w", serverName, err)
+	}
+
+	var result []map[string]interface{}
+	for _, tool := range tools {
+		toolMap := map[string]interface{}{
+			"name":        tool.Name,
+			"description": tool.Description,
+		}
+		result = append(result, toolMap)
 	}
 
 	return result, nil

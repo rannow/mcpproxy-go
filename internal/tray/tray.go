@@ -97,6 +97,7 @@ type ServerInterface interface {
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
 	GetAllServers() ([]map[string]interface{}, error)
+	GetServerTools(serverName string) ([]map[string]interface{}, error)
 
 	// Config management for file watching
 	ReloadConfiguration() error
@@ -420,7 +421,7 @@ func (a *App) onReady() {
 	// --- Initialize Managers ---
 	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.disabledServersMenu, a.quarantineMenu, a.upstreamServersMenu, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
-	a.diagnosticAgent = NewDiagnosticAgent(a.logger)
+	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar())
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
@@ -456,8 +457,11 @@ func (a *App) onReady() {
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
 
 	// --- Set Initial State & Start Sync ---
-	// Initial sync removed - using lazy loading (data loads only when menu is clicked)
-	a.logger.Debug("Lazy loading enabled - server menus will load data on first click")
+	a.updateStatus()
+
+	if err := a.syncManager.SyncNow(); err != nil {
+		a.logger.Error("Initial menu sync failed", zap.Error(err))
+	}
 
 	a.syncManager.Start()
 
@@ -705,7 +709,6 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 
 	// Note: We no longer update server count here because we want to show
 	// the static count from config, not the dynamic count from server status
-}
 }
 
 // updateServerCountDisplay updates the server count menu item

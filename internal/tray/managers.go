@@ -1270,10 +1270,9 @@ func NewSynchronizationManager(stateManager *ServerStateManager, menuManager *Me
 	}
 }
 
-// Start begins background synchronization - DISABLED for lazy loading
+// Start begins background synchronization
 func (m *SynchronizationManager) Start() {
-	// Background sync disabled - menus will only update on user interaction
-	m.logger.Debug("Background sync disabled - using lazy loading for menu updates")
+	go m.syncLoop()
 }
 
 // Stop stops background synchronization

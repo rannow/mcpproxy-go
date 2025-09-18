@@ -2,7 +2,6 @@ package tray
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/config"
 	"go.uber.org/zap"
 )
 
@@ -72,7 +71,7 @@ func (d *DiagnosticAgent) DiagnoseServer(serverName string) (*DiagnosticReport, 
 	}
 
 	// Load server configuration
-	cfg, server, err := d.loadServerConfig(serverName)
+	_, server, err := d.loadServerConfig(serverName)
 	if err != nil {
 		report.Issues = append(report.Issues, fmt.Sprintf("Failed to load server config: %v", err))
 		return report, nil

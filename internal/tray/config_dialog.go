@@ -260,6 +260,12 @@ const configDialogTemplate = `<!DOCTYPE html>
             max-height: 400px;
             overflow-y: auto;
         }
+        .connection-status {
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 3px;
+            font-weight: bold;
+        }
 
         .list-item {
             display: flex;
@@ -425,6 +431,15 @@ const configDialogTemplate = `<!DOCTYPE html>
             <button type="button" class="btn btn-secondary" onclick="cancel()">Cancel</button>
             <button type="button" class="btn btn-info" onclick="runDiagnostic()">🔍 Diagnostic</button>
             <button type="button" class="btn btn-primary" onclick="save()">Save</button>
+        </div>
+    </div>
+
+    <!-- Connection Status Section -->
+    <div id="connectionSection" class="section" style="margin-top: 20px;">
+        <h3>🔗 Connection Status</h3>
+        <div id="connectionStatus" class="connection-status">
+            <span id="statusIndicator">⚪</span>
+            <span id="statusText">Checking connection...</span>
         </div>
     </div>
 
@@ -677,11 +692,36 @@ const configDialogTemplate = `<!DOCTYPE html>
             loadTools();
         }
 
+        function loadConnectionStatus() {
+            const statusIndicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+            
+            // Check if server is connected by trying to load tools
+            fetch(window.location.origin + '/tools')
+            .then(function(response) { return response.json(); })
+            .then(function(data) {
+                if (data.tools && data.tools.length > 0) {
+                    statusIndicator.textContent = '🟢';
+                    statusText.textContent = 'Connected (' + data.tools.length + ' tools available)';
+                } else if (data.error) {
+                    statusIndicator.textContent = '🔴';
+                    statusText.textContent = 'Disconnected - ' + data.error;
+                } else {
+                    statusIndicator.textContent = '🟡';
+                    statusText.textContent = 'Connected (no tools available)';
+                }
+            })
+            .catch(function(error) {
+                statusIndicator.textContent = '🔴';
+                statusText.textContent = 'Connection failed - ' + error.message;
+            });
+        }
+
         function loadTools() {
             const toolsSection = document.getElementById('toolsSection');
             const toolsList = document.getElementById('toolsList');
             
-            fetch('/tools')
+            fetch(window.location.origin + '/tools')
             .then(function(response) { return response.json(); })
             .then(function(data) {
                 if (data.tools && data.tools.length > 0) {
@@ -707,8 +747,11 @@ const configDialogTemplate = `<!DOCTYPE html>
             });
         }
 
-        // Load tools on page load if server is connected
-        window.addEventListener('load', loadTools);
+        // Load initial data on page load
+        window.addEventListener('load', function() {
+            loadConnectionStatus();
+            loadTools();
+        });
     </script>
 </body>
 </html>`
