@@ -679,17 +679,21 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		result = append(result, map[string]interface{}{
-			"name":        server.Name,
-			"url":         server.URL,
-			"command":     server.Command,
-			"protocol":    server.Protocol,
-			"enabled":     server.Enabled,
-			"quarantined": server.Quarantined,
-			"created":     server.Created,
-			"connected":   connected,
-			"connecting":  connecting,
-			"tool_count":  toolCount,
-			"last_error":  lastError,
+			"name":           server.Name,
+			"url":            server.URL,
+			"command":        server.Command,
+			"args":           server.Args,
+			"working_dir":    server.WorkingDir,
+			"env":            server.Env,
+			"protocol":       server.Protocol,
+			"repository_url": server.RepositoryURL,
+			"enabled":        server.Enabled,
+			"quarantined":    server.Quarantined,
+			"created":        server.Created,
+			"connected":      connected,
+			"connecting":     connecting,
+			"tool_count":     toolCount,
+			"last_error":     lastError,
 		})
 	}
 
@@ -1289,4 +1293,13 @@ func (s *Server) GetLogDir() string {
 	}
 	// Last resort fallback to data directory
 	return s.config.DataDir
+}
+
+// GetGitHubURL returns the configured GitHub URL
+func (s *Server) GetGitHubURL() string {
+	if s.config.GitHubURL != "" {
+		return s.config.GitHubURL
+	}
+	// Fallback to default GitHub URL if not configured
+	return "https://github.com/smart-mcp-proxy/mcpproxy-go"
 }

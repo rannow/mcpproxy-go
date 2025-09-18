@@ -233,6 +233,11 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 	return nil
 }
 
+// SaveToFile saves configuration to a specific file (alias for SaveConfig)
+func SaveToFile(cfg *Config, path string) error {
+	return SaveConfig(cfg, path)
+}
+
 // SaveConfig saves configuration to file
 func SaveConfig(cfg *Config, path string) error {
 	fmt.Printf("[DEBUG] SaveConfig called with path: %s\n", path)

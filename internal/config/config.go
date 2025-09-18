@@ -75,6 +75,9 @@ type Config struct {
 
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
+
+	// GitHub repository URL for the project
+	GitHubURL string `json:"github_url,omitempty" mapstructure:"github-url"`
 }
 
 // LogConfig represents logging configuration
@@ -93,20 +96,21 @@ type LogConfig struct {
 
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
-	Name        string            `json:"name,omitempty" mapstructure:"name"`
-	URL         string            `json:"url,omitempty" mapstructure:"url"`
-	Protocol    string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
-	Command     string            `json:"command,omitempty" mapstructure:"command"`
-	Args        []string          `json:"args,omitempty" mapstructure:"args"`
-	WorkingDir  string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
-	Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
-	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
-	OAuth       *OAuthConfig      `json:"oauth,omitempty" mapstructure:"oauth"`     // OAuth configuration
-	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
-	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
-	Created     time.Time         `json:"created" mapstructure:"created"`
-	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation   *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
+	Name          string            `json:"name,omitempty" mapstructure:"name"`
+	URL           string            `json:"url,omitempty" mapstructure:"url"`
+	Protocol      string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
+	Command       string            `json:"command,omitempty" mapstructure:"command"`
+	Args          []string          `json:"args,omitempty" mapstructure:"args"`
+	WorkingDir    string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
+	Env           map[string]string `json:"env,omitempty" mapstructure:"env"`
+	Headers       map[string]string `json:"headers,omitempty" mapstructure:"headers"`        // For HTTP servers
+	OAuth         *OAuthConfig      `json:"oauth,omitempty" mapstructure:"oauth"`            // OAuth configuration
+	RepositoryURL string            `json:"repository_url,omitempty" mapstructure:"repository_url"` // GitHub/Repository URL for the MCP server
+	Enabled       bool              `json:"enabled" mapstructure:"enabled"`
+	Quarantined   bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
+	Created       time.Time         `json:"created" mapstructure:"created"`
+	Updated       time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation     *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -164,11 +168,12 @@ type CursorMCPConfig struct {
 
 // CursorServerConfig represents a single server configuration in Cursor format
 type CursorServerConfig struct {
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
+	Command       string            `json:"command,omitempty"`
+	Args          []string          `json:"args,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	RepositoryURL string            `json:"repository_url,omitempty"`
 }
 
 // ConvertFromCursorFormat converts Cursor IDE format to our internal format
@@ -177,9 +182,10 @@ func ConvertFromCursorFormat(cursorConfig *CursorMCPConfig) []*ServerConfig {
 
 	for name, serverConfig := range cursorConfig.MCPServers {
 		server := &ServerConfig{
-			Name:    name,
-			Enabled: true,
-			Created: time.Now(),
+			Name:          name,
+			Enabled:       true,
+			Created:       time.Now(),
+			RepositoryURL: serverConfig.RepositoryURL,
 		}
 
 		if serverConfig.Command != "" {
@@ -381,6 +387,9 @@ func DefaultConfig() *Config {
 				Protocol:    "custom/remote",
 			},
 		},
+
+		// Default GitHub repository URL
+		GitHubURL: "https://github.com/smart-mcp-proxy/mcpproxy-go",
 	}
 }
 

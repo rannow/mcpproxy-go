@@ -40,6 +40,36 @@ const (
 //go:embed icon-mono-44.png
 var iconData []byte
 
+// ServerGroup represents a custom group of servers with color coding
+type ServerGroup struct {
+	Name        string   `json:"name"`
+	Color       string   `json:"color"`       // Color emoji or hex code
+	ColorEmoji  string   `json:"color_emoji"` // Color emoji for display
+	Description string   `json:"description"`
+	ServerNames []string `json:"server_names"`
+	Enabled     bool     `json:"enabled"`
+}
+
+// Predefined color options for groups
+var GroupColors = []struct {
+	Emoji string
+	Name  string
+	Code  string
+}{
+	{"🔴", "Red", "#FF0000"},
+	{"🟠", "Orange", "#FFA500"},
+	{"🟡", "Yellow", "#FFFF00"},
+	{"🟢", "Green", "#00FF00"},
+	{"🔵", "Blue", "#0000FF"},
+	{"🟣", "Purple", "#800080"},
+	{"🟤", "Brown", "#A52A2A"},
+	{"⚫", "Black", "#000000"},
+	{"⚪", "White", "#FFFFFF"},
+	{"🔸", "Diamond Orange", "#FFB366"},
+	{"🔹", "Diamond Blue", "#66B2FF"},
+	{"⭐", "Star", "#FFD700"},
+}
+
 // GitHubRelease represents a GitHub release
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
@@ -72,6 +102,7 @@ type ServerInterface interface {
 	ReloadConfiguration() error
 	GetConfigPath() string
 	GetLogDir() string
+	GetGitHubURL() string
 
 	// OAuth control
 	TriggerOAuthLogin(serverName string) error
@@ -87,13 +118,22 @@ type App struct {
 	// Menu items for dynamic updates
 	statusItem          *systray.MenuItem
 	startStopItem       *systray.MenuItem
+	serverCountItem     *systray.MenuItem
+
+	// Status-based server menus
+	connectedServersMenu    *systray.MenuItem
+	disconnectedServersMenu *systray.MenuItem
+	disabledServersMenu     *systray.MenuItem
+	quarantineMenu          *systray.MenuItem
+
+	// Legacy upstream menu (for backward compatibility if needed)
 	upstreamServersMenu *systray.MenuItem
-	quarantineMenu      *systray.MenuItem
 
 	// Managers for proper synchronization
 	stateManager *ServerStateManager
 	menuManager  *MenuManager
 	syncManager  *SynchronizationManager
+	diagnosticAgent *DiagnosticAgent
 
 	// Autostart manager
 	autostartManager *AutostartManager
@@ -118,9 +158,20 @@ type App struct {
 	serverMenus       map[string]*systray.MenuItem // Track server menu items
 	serverActionMenus map[string]*systray.MenuItem // Track server action menu items
 
+	// Server count state
+	serverCountFromConfig int  // Static server count from config
+	serverCountInitialized bool // Flag to prevent overwriting the static count
+
 	// Quarantine menu tracking fields
 	lastQuarantineList    []string                     // Track last known quarantine list for change detection
 	quarantineServerMenus map[string]*systray.MenuItem // Track quarantine server menu items
+
+	// Group management fields
+	groupManagementMenu *systray.MenuItem            // Group management menu
+	groupedServersMenu  *systray.MenuItem            // Menu showing servers organized by groups
+	serverGroups        map[string]*ServerGroup      // Custom server groups
+	groupMenuItems      map[string]*systray.MenuItem // Group menu items
+	groupServerMenus    map[string]*systray.MenuItem // Group-based server list menus
 }
 
 // New creates a new tray application
@@ -148,6 +199,11 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 	app.quarantineServerMenus = make(map[string]*systray.MenuItem)
 	app.lastServerList = []string{}
 	app.lastQuarantineList = []string{}
+
+	// Initialize group management
+	app.serverGroups = make(map[string]*ServerGroup)
+	app.groupMenuItems = make(map[string]*systray.MenuItem)
+	app.groupServerMenus = make(map[string]*systray.MenuItem)
 
 	return app
 }
@@ -340,30 +396,54 @@ func (a *App) onReady() {
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
 	a.statusItem.Disable() // Initially disabled as it's just for display
 	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
+	a.serverCountItem = systray.AddMenuItem("📊 Servers: Loading...", "Total number of configured servers")
+	a.serverCountItem.Disable() // Display only
 
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
 	a.logger.Debug("Core menu items initialized successfully - background processes can now start")
 	systray.AddSeparator()
 
-	// --- Upstream & Quarantine Menus ---
-	a.upstreamServersMenu = systray.AddMenuItem("Upstream Servers", "Manage upstream servers")
-	a.quarantineMenu = systray.AddMenuItem("Security Quarantine", "Manage quarantined servers")
+	// --- Status-Based Server Menus ---
+	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "Connected and ready servers")
+	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "Servers that are enabled but not connected")
+	a.disabledServersMenu = systray.AddMenuItem("⏸️ Disabled Servers", "Servers that are disabled")
+	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "Servers in security quarantine")
+	systray.AddSeparator()
+
+	// --- Legacy and Group Menus ---
+	a.upstreamServersMenu = systray.AddMenuItem("📋 All Servers (Legacy)", "View all servers in one list")
+	a.groupedServersMenu = systray.AddMenuItem("🏷️ Grouped Servers", "View servers organized by groups")
+	a.groupManagementMenu = systray.AddMenuItem("📝 Server Groups", "Create and manage custom server groups")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
+	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.disabledServersMenu, a.quarantineMenu, a.upstreamServersMenu, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
+	a.diagnosticAgent = NewDiagnosticAgent(a.logger)
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
 	a.menuManager.SetActionCallback(a.handleServerAction)
+
+	// --- Set Server Count Callback ---
+	// Set callback but with protection against smaller counts
+	a.menuManager.SetServerCountCallback(a.updateServerCountDisplay)
+
+	// --- Set Server Groups Reference ---
+	// Allow MenuManager to access server groups for color display
+	a.menuManager.SetServerGroups(&a.serverGroups)
+
+	// --- Initialize Server Count Display ---
+	// Load initial server count from config
+	a.updateServerCountFromConfig()
 
 	// --- Other Menu Items ---
 	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
 	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
 	editConfigItem := systray.AddMenuItem("Edit config", "Edit the configuration file")
 	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
+	githubItem := systray.AddMenuItem("🔗 GitHub Repository", "Open the project on GitHub")
 	systray.AddSeparator()
 
 	// --- Autostart Menu Item (macOS only) ---
@@ -376,11 +456,8 @@ func (a *App) onReady() {
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
 
 	// --- Set Initial State & Start Sync ---
-	a.updateStatus()
-
-	if err := a.syncManager.SyncNow(); err != nil {
-		a.logger.Error("Initial menu sync failed", zap.Error(err))
-	}
+	// Initial sync removed - using lazy loading (data loads only when menu is clicked)
+	a.logger.Debug("Lazy loading enabled - server menus will load data on first click")
 
 	a.syncManager.Start()
 
@@ -398,6 +475,22 @@ func (a *App) onReady() {
 				a.editConfigFile()
 			case <-openLogsItem.ClickedCh:
 				a.openLogsDir()
+			case <-githubItem.ClickedCh:
+				a.openGitHubRepository()
+			case <-a.groupedServersMenu.ClickedCh:
+				a.handleGroupedServers()
+			case <-a.groupManagementMenu.ClickedCh:
+				a.handleGroupManagement()
+			case <-a.connectedServersMenu.ClickedCh:
+				a.handleServerMenuClick("connected")
+			case <-a.disconnectedServersMenu.ClickedCh:
+				a.handleServerMenuClick("disconnected")
+			case <-a.disabledServersMenu.ClickedCh:
+				a.handleServerMenuClick("disabled")
+			case <-a.quarantineMenu.ClickedCh:
+				a.handleServerMenuClick("quarantine")
+			case <-a.upstreamServersMenu.ClickedCh:
+				a.handleServerMenuClick("upstream")
 			case <-quitItem.ClickedCh:
 				a.logger.Info("Quit item clicked, shutting down")
 				if a.shutdown != nil {
@@ -431,6 +524,7 @@ func (a *App) onReady() {
 func (a *App) updateTooltip() {
 	if a.server == nil {
 		systray.SetTooltip("mcpproxy is stopped")
+		a.updateServerCountFromConfig()
 		return
 	}
 
@@ -444,6 +538,7 @@ func (a *App) updateTooltip() {
 			systray.SetTooltip(fmt.Sprintf("mcpproxy is running on %s", a.server.GetListenAddress()))
 		} else {
 			systray.SetTooltip("mcpproxy is stopped")
+			a.updateServerCountFromConfig()
 		}
 	}
 }
@@ -607,6 +702,69 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 
 	tooltip := strings.Join(tooltipLines, "\n")
 	systray.SetTooltip(tooltip)
+
+	// Note: We no longer update server count here because we want to show
+	// the static count from config, not the dynamic count from server status
+}
+}
+
+// updateServerCountDisplay updates the server count menu item
+func (a *App) updateServerCountDisplay(totalServers int) {
+	a.logger.Debug("updateServerCountDisplay called", zap.Int("total_servers", totalServers))
+
+	if a.serverCountItem == nil {
+		a.logger.Debug("serverCountItem is nil, skipping update")
+		return
+	}
+
+	// If we have a config count and this is a smaller dynamic count, ignore it
+	if a.serverCountFromConfig > 0 && totalServers < a.serverCountFromConfig {
+		a.logger.Debug("Ignoring smaller dynamic count, keeping config count", 
+			zap.Int("config_count", a.serverCountFromConfig), 
+			zap.Int("dynamic_count", totalServers))
+		totalServers = a.serverCountFromConfig
+	}
+
+	var displayText string
+	if totalServers > 0 {
+		displayText = fmt.Sprintf("📊 Servers: %d total", totalServers)
+	} else {
+		displayText = "📊 Servers: none configured"
+	}
+
+	a.logger.Debug("Setting server count display", zap.String("display_text", displayText))
+	a.serverCountItem.SetTitle(displayText)
+	a.serverCountItem.SetTooltip(fmt.Sprintf("%d servers configured in total", totalServers))
+}
+
+// updateServerCountFromConfig reads the config file and updates server count display
+func (a *App) updateServerCountFromConfig() {
+	a.logger.Debug("updateServerCountFromConfig called")
+	
+	// Try to load config from default location
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		a.logger.Warnf("Failed to get home directory: %v", err)
+		return
+	}
+
+	configPath := filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
+	a.logger.Debugf("Loading config from: %s", configPath)
+	
+	cfg, err := config.LoadFromFile(configPath)
+	if err != nil {
+		a.logger.Debugf("Failed to load config for server count: %v", err)
+		return
+	}
+
+	serverCount := len(cfg.Servers)
+	a.logger.Debugf("Loaded %d servers from config", serverCount)
+	
+	// Store the config count
+	a.serverCountFromConfig = serverCount
+	a.serverCountInitialized = true
+	
+	a.updateServerCountDisplay(serverCount)
 }
 
 // updateServersMenuFromStatusData is a legacy method, functionality is now in MenuManager
@@ -1014,6 +1172,19 @@ func (a *App) editConfigFile() {
 	a.openFile(a.configPath, "config file")
 }
 
+// openGitHubRepository opens the GitHub repository URL in the default browser
+func (a *App) openGitHubRepository() {
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+
+	githubURL := a.server.GetGitHubURL()
+
+	a.logger.Info("Opening GitHub repository", zap.String("url", githubURL))
+	a.openFile(githubURL, "GitHub repository")
+}
+
 // openServerLog opens the log file for a specific server
 func (a *App) openServerLog(serverName string) error {
 	if a.server == nil {
@@ -1030,6 +1201,11 @@ func (a *App) openServerLog(serverName string) error {
 
 // openServerRepo opens the repository/URL for a specific server
 func (a *App) openServerRepo(serverName string) error {
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+
 	allServers, err := a.stateManager.GetAllServers()
 	if err != nil {
 		return fmt.Errorf("failed to get servers: %w", err)
@@ -1037,7 +1213,11 @@ func (a *App) openServerRepo(serverName string) error {
 	var url string
 	for _, srv := range allServers {
 		if name, ok := srv["name"].(string); ok && name == serverName {
-			if u, ok := srv["url"].(string); ok {
+			// Prefer repository_url over url
+			if repoURL, ok := srv["repository_url"].(string); ok && repoURL != "" {
+				url = repoURL
+			} else if u, ok := srv["url"].(string); ok && u != "" {
+				// Fallback to server URL for HTTP servers
 				url = u
 			}
 			break
@@ -1046,6 +1226,7 @@ func (a *App) openServerRepo(serverName string) error {
 	if url == "" {
 		return fmt.Errorf("no repository URL for server %s", serverName)
 	}
+	a.logger.Info("Opening server repository", zap.String("server", serverName), zap.String("url", url))
 	a.openFile(url, "server repository")
 	return nil
 }
@@ -1110,10 +1291,28 @@ func (a *App) refreshMenusImmediate() {
 	}
 }
 
-// handleServerAction is the centralized handler for all server-related menu actions.
+// handleServerMenuClick handles lazy loading when server menus are clicked
+func (a *App) handleServerMenuClick(menuType string) {
+	a.logger.Info("Server menu clicked, loading data", zap.String("menu_type", menuType))
+	
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+	
+	// Trigger immediate sync to load current data
+	if err := a.syncManager.SyncNow(); err != nil {
+		a.logger.Error("Failed to sync menu data on click", zap.Error(err))
+	}
+}
 func (a *App) handleServerAction(serverName, action string) {
 	var err error
 	a.logger.Info("Handling server action", zap.String("server", serverName), zap.String("action", action))
+
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
 
 	switch action {
 	case "toggle_enable":
@@ -1156,8 +1355,34 @@ func (a *App) handleServerAction(serverName, action string) {
 	case "open_repo":
 		err = a.openServerRepo(serverName)
 
+	case "diagnose":
+		// Run diagnostic analysis for the server
+		go func() {
+			a.logger.Info("Running diagnostic analysis", zap.String("server", serverName))
+			report, err := a.diagnosticAgent.DiagnoseServer(serverName)
+			if err != nil {
+				a.logger.Error("Diagnostic analysis failed", zap.String("server", serverName), zap.Error(err))
+				return
+			}
+			
+			// Display the diagnostic report
+			a.diagnosticAgent.ShowDiagnosticReport(report)
+		}()
+		
+	case "configure":
+		err = a.handleServerConfiguration(serverName)
+
 	default:
-		a.logger.Warn("Unknown server action requested", zap.String("action", action))
+		// Check if it's a group action
+		if strings.HasPrefix(action, "assign_to_group:") {
+			groupName := strings.TrimPrefix(action, "assign_to_group:")
+			err = a.handleAssignServerToGroup(serverName, groupName)
+		} else if strings.HasPrefix(action, "remove_from_group:") {
+			groupName := strings.TrimPrefix(action, "remove_from_group:")
+			err = a.handleRemoveServerFromGroup(serverName, groupName)
+		} else {
+			a.logger.Warn("Unknown server action requested", zap.String("action", action))
+		}
 	}
 
 	if err != nil {
@@ -1313,4 +1538,835 @@ func (a *App) handleAutostartToggle() {
 	} else {
 		a.logger.Info("Autostart disabled - mcpproxy will not start automatically at login")
 	}
+}
+
+// handleGroupedServers handles clicks on the grouped servers menu
+func (a *App) handleGroupedServers() {
+	a.logger.Info("Opening grouped servers view")
+
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+
+	// Clear existing group server menu items if they exist
+	if a.groupedServersMenu != nil {
+		// Remove all submenu items
+		for _, item := range a.groupServerMenus {
+			if item != nil {
+				item.Hide()
+			}
+		}
+		a.groupServerMenus = make(map[string]*systray.MenuItem)
+	}
+
+	// Create server lists organized by groups
+	a.refreshGroupedServersMenu()
+}
+
+// handleGroupManagement handles clicks on the group management menu
+func (a *App) handleGroupManagement() {
+	a.logger.Info("Opening group management interface")
+
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+
+	// Clear existing group menu items if they exist
+	if a.groupManagementMenu != nil {
+		// Remove all submenu items
+		for _, item := range a.groupMenuItems {
+			if item != nil {
+				// Note: systray doesn't have a direct way to remove items, so we hide them
+				item.Hide()
+			}
+		}
+		a.groupMenuItems = make(map[string]*systray.MenuItem)
+	}
+
+	// Add group management options
+	createGroupItem := a.groupManagementMenu.AddSubMenuItem("➕ Create New Group", "Create a new server group with color assignment")
+	manageGroupsItem := a.groupManagementMenu.AddSubMenuItem("⚙️ Manage Groups", "Edit existing server groups")
+	a.groupManagementMenu.AddSeparator()
+
+	// Show existing groups
+	a.refreshGroupsMenu()
+
+	// Handle clicks on group management items
+	go func() {
+		for {
+			select {
+			case <-createGroupItem.ClickedCh:
+				a.handleCreateGroup()
+			case <-manageGroupsItem.ClickedCh:
+				a.handleManageGroups()
+			case <-a.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// handleCreateGroup handles creating a new server group
+func (a *App) handleCreateGroup() {
+	a.logger.Info("Creating new server group")
+
+	// In a real implementation, this would open a dialog or use a simple input system
+	// For now, we'll create a sample group to demonstrate the functionality
+	groupName := fmt.Sprintf("Group-%d", len(a.serverGroups)+1)
+
+	// Select a color from the predefined options
+	colorIndex := len(a.serverGroups) % len(GroupColors)
+	selectedColor := GroupColors[colorIndex]
+
+	// Create the new group
+	newGroup := &ServerGroup{
+		Name:        groupName,
+		Color:       selectedColor.Code,
+		ColorEmoji:  selectedColor.Emoji,
+		Description: fmt.Sprintf("Custom group for organizing servers - %s", selectedColor.Name),
+		ServerNames: []string{}, // Start with empty group
+		Enabled:     true,
+	}
+
+	// Add to groups map
+	a.serverGroups[groupName] = newGroup
+
+	// Refresh the groups menu to show the new group
+	a.refreshGroupsMenu()
+
+	a.logger.Info("Created new server group",
+		zap.String("group_name", groupName),
+		zap.String("color", selectedColor.Name),
+		zap.String("emoji", selectedColor.Emoji))
+}
+
+// handleManageGroups handles managing existing groups
+func (a *App) handleManageGroups() {
+	a.logger.Info("Managing existing server groups")
+
+	if len(a.serverGroups) == 0 {
+		a.logger.Info("No groups exist to manage")
+		return
+	}
+
+	// For now, just log the existing groups
+	// In a full implementation, this would open a management interface
+	for name, group := range a.serverGroups {
+		a.logger.Info("Existing group",
+			zap.String("name", name),
+			zap.String("color", group.ColorEmoji),
+			zap.Int("servers", len(group.ServerNames)),
+			zap.Bool("enabled", group.Enabled))
+	}
+}
+
+// refreshGroupsMenu refreshes the groups submenu with current groups
+func (a *App) refreshGroupsMenu() {
+	// Clear existing group menu items
+	for _, item := range a.groupMenuItems {
+		if item != nil {
+			item.Hide()
+		}
+	}
+	a.groupMenuItems = make(map[string]*systray.MenuItem)
+
+	if len(a.serverGroups) == 0 {
+		// Show "no groups" message
+		noGroupsItem := a.groupManagementMenu.AddSubMenuItem("📋 No groups created", "Create your first server group")
+		noGroupsItem.Disable()
+		a.groupMenuItems["no_groups"] = noGroupsItem
+		return
+	}
+
+	// Add separator before groups list
+	if len(a.serverGroups) > 0 {
+		a.groupManagementMenu.AddSeparator()
+	}
+
+	// Add each group to the menu
+	for groupName, group := range a.serverGroups {
+		if group.Enabled {
+			groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(group.ServerNames))
+			groupItem := a.groupManagementMenu.AddSubMenuItem(groupTitle, group.Description)
+
+			// Add submenu options for this group
+			addServerItem := groupItem.AddSubMenuItem("➕ Add Server", "Add a server to this group")
+			editGroupItem := groupItem.AddSubMenuItem("✏️ Edit Group", "Edit group name and color")
+			deleteGroupItem := groupItem.AddSubMenuItem("🗑️ Delete Group", "Delete this group")
+
+			a.groupMenuItems[groupName] = groupItem
+
+			// Handle group-specific actions
+			go func(gName string, addServer, editGroup, deleteGroup *systray.MenuItem) {
+				for {
+					select {
+					case <-addServer.ClickedCh:
+						a.handleAddServerToGroup(gName)
+					case <-editGroup.ClickedCh:
+						a.handleEditGroup(gName)
+					case <-deleteGroup.ClickedCh:
+						a.handleDeleteGroup(gName)
+					case <-a.ctx.Done():
+						return
+					}
+				}
+			}(groupName, addServerItem, editGroupItem, deleteGroupItem)
+		}
+	}
+}
+
+// refreshGroupedServersMenu refreshes the grouped servers submenu showing all servers organized by group
+func (a *App) refreshGroupedServersMenu() {
+	// Clear existing group server menu items
+	for _, item := range a.groupServerMenus {
+		if item != nil {
+			item.Hide()
+		}
+	}
+	a.groupServerMenus = make(map[string]*systray.MenuItem)
+
+	// Get all servers
+	allServers, err := a.stateManager.GetAllServers()
+	if err != nil {
+		a.logger.Error("Failed to get servers for grouped menu", zap.Error(err))
+		return
+	}
+
+	if len(a.serverGroups) == 0 {
+		// Show "no groups" message
+		noGroupsItem := a.groupedServersMenu.AddSubMenuItem("📋 No groups created", "Create server groups to organize your servers")
+		noGroupsItem.Disable()
+		a.groupServerMenus["no_groups"] = noGroupsItem
+		return
+	}
+
+	// Add separator before groups list
+	if len(a.serverGroups) > 0 {
+		a.groupedServersMenu.AddSeparator()
+	}
+
+	// Add each group with its servers
+	for groupName, group := range a.serverGroups {
+		if !group.Enabled {
+			continue
+		}
+
+		// Count servers in this group that actually exist
+		var groupServers []map[string]interface{}
+		for _, serverName := range group.ServerNames {
+			for _, server := range allServers {
+				if name, ok := server["name"].(string); ok && name == serverName {
+					groupServers = append(groupServers, server)
+					break
+				}
+			}
+		}
+
+		groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(groupServers))
+		groupItem := a.groupedServersMenu.AddSubMenuItem(groupTitle, group.Description)
+		a.groupServerMenus[groupName] = groupItem
+
+		if len(groupServers) == 0 {
+			// No servers in this group
+			emptyItem := groupItem.AddSubMenuItem("📭 No servers in group", "Add servers to this group")
+			emptyItem.Disable()
+		} else {
+			// Add each server in the group
+			for _, server := range groupServers {
+				serverName, _ := server["name"].(string)
+				enabled, _ := server["enabled"].(bool)
+				quarantined, _ := server["quarantined"].(bool)
+				state, _ := server["state"].(string)
+
+				// Determine server status icon
+				var statusIcon string
+				var statusText string
+				if quarantined {
+					statusIcon = "🚨"
+					statusText = "Quarantined"
+				} else if !enabled {
+					statusIcon = "⏸️"
+					statusText = "Disabled"
+				} else {
+					switch state {
+					case "ready":
+						statusIcon = "🟢"
+						statusText = "Connected"
+					case "connecting":
+						statusIcon = "🟡"
+						statusText = "Connecting"
+					case "error":
+						statusIcon = "🔴"
+						statusText = "Error"
+					default:
+						statusIcon = "⚫"
+						statusText = "Disconnected"
+					}
+				}
+
+				serverItemTitle := fmt.Sprintf("%s %s", statusIcon, serverName)
+				serverItem := groupItem.AddSubMenuItem(serverItemTitle, fmt.Sprintf("Server status: %s", statusText))
+
+				// Add server action options
+				toggleItem := serverItem.AddSubMenuItem("🔄 Toggle Enable/Disable", "Enable or disable this server")
+				viewItem := serverItem.AddSubMenuItem("👁️ View Details", "View server information")
+
+				// Add repository link if available
+				if repoURL, hasRepo := server["repository_url"].(string); hasRepo && repoURL != "" {
+					repoItem := serverItem.AddSubMenuItem("🔗 Repository", "Open server repository")
+
+					// Handle repository link clicks
+					go func(url string) {
+						for {
+							select {
+							case <-repoItem.ClickedCh:
+								a.openFile(url, "repository")
+							case <-a.ctx.Done():
+								return
+							}
+						}
+					}(repoURL)
+				}
+
+				// Handle server action clicks
+				go func(sName string, toggle, view *systray.MenuItem) {
+					for {
+						select {
+						case <-toggle.ClickedCh:
+							a.handleServerAction(sName, "toggle")
+						case <-view.ClickedCh:
+							a.handleServerAction(sName, "view")
+						case <-a.ctx.Done():
+							return
+						}
+					}
+				}(serverName, toggleItem, viewItem)
+			}
+		}
+	}
+
+	// Add ungrouped servers if any exist
+	var ungroupedServers []map[string]interface{}
+	for _, server := range allServers {
+		serverName, _ := server["name"].(string)
+		isGrouped := false
+
+		// Check if server belongs to any group
+		for _, group := range a.serverGroups {
+			for _, groupedServerName := range group.ServerNames {
+				if groupedServerName == serverName {
+					isGrouped = true
+					break
+				}
+			}
+			if isGrouped {
+				break
+			}
+		}
+
+		if !isGrouped {
+			ungroupedServers = append(ungroupedServers, server)
+		}
+	}
+
+	if len(ungroupedServers) > 0 {
+		a.groupedServersMenu.AddSeparator()
+		ungroupedTitle := fmt.Sprintf("📂 Ungrouped Servers (%d)", len(ungroupedServers))
+		ungroupedItem := a.groupedServersMenu.AddSubMenuItem(ungroupedTitle, "Servers not assigned to any group")
+		a.groupServerMenus["ungrouped"] = ungroupedItem
+
+		for _, server := range ungroupedServers {
+			serverName, _ := server["name"].(string)
+			enabled, _ := server["enabled"].(bool)
+			quarantined, _ := server["quarantined"].(bool)
+			state, _ := server["state"].(string)
+
+			// Determine server status icon
+			var statusIcon string
+			var statusText string
+			if quarantined {
+				statusIcon = "🚨"
+				statusText = "Quarantined"
+			} else if !enabled {
+				statusIcon = "⏸️"
+				statusText = "Disabled"
+			} else {
+				switch state {
+				case "ready":
+					statusIcon = "🟢"
+					statusText = "Connected"
+				case "connecting":
+					statusIcon = "🟡"
+					statusText = "Connecting"
+				case "error":
+					statusIcon = "🔴"
+					statusText = "Error"
+				default:
+					statusIcon = "⚫"
+					statusText = "Disconnected"
+				}
+			}
+
+			serverItemTitle := fmt.Sprintf("%s %s", statusIcon, serverName)
+			serverItem := ungroupedItem.AddSubMenuItem(serverItemTitle, fmt.Sprintf("Server status: %s", statusText))
+
+			// Add server action options
+			toggleItem := serverItem.AddSubMenuItem("🔄 Toggle Enable/Disable", "Enable or disable this server")
+			viewItem := serverItem.AddSubMenuItem("👁️ View Details", "View server information")
+
+			// Add repository link if available
+			if repoURL, hasRepo := server["repository_url"].(string); hasRepo && repoURL != "" {
+				repoItem := serverItem.AddSubMenuItem("🔗 Repository", "Open server repository")
+
+				// Handle repository link clicks
+				go func(url string) {
+					for {
+						select {
+						case <-repoItem.ClickedCh:
+							a.openFile(url, "repository")
+						case <-a.ctx.Done():
+							return
+						}
+					}
+				}(repoURL)
+			}
+
+			// Handle server action clicks
+			go func(sName string, toggle, view *systray.MenuItem) {
+				for {
+					select {
+					case <-toggle.ClickedCh:
+						a.handleServerAction(sName, "toggle")
+					case <-view.ClickedCh:
+						a.handleServerAction(sName, "view")
+					case <-a.ctx.Done():
+						return
+					}
+				}
+			}(serverName, toggleItem, viewItem)
+		}
+	}
+}
+
+// handleAddServerToGroup handles adding a server to a specific group
+func (a *App) handleAddServerToGroup(groupName string) {
+	a.logger.Info("Adding server to group", zap.String("group", groupName))
+
+	group, exists := a.serverGroups[groupName]
+	if !exists {
+		a.logger.Error("Group not found", zap.String("group", groupName))
+		return
+	}
+
+	// Get available servers
+	allServers, err := a.stateManager.GetAllServers()
+	if err != nil {
+		a.logger.Error("Failed to get servers for group assignment", zap.Error(err))
+		return
+	}
+
+	// For demonstration, add the first available server that's not already in any group
+	for _, server := range allServers {
+		if name, ok := server["name"].(string); ok {
+			// Check if server is already in this group
+			alreadyInGroup := false
+			for _, existingServer := range group.ServerNames {
+				if existingServer == name {
+					alreadyInGroup = true
+					break
+				}
+			}
+
+			if !alreadyInGroup {
+				// Add server to group
+				group.ServerNames = append(group.ServerNames, name)
+				a.logger.Info("Added server to group",
+					zap.String("server", name),
+					zap.String("group", groupName))
+
+				// Refresh the menu to show updated server count
+				a.refreshGroupsMenu()
+				break
+			}
+		}
+	}
+}
+
+// handleEditGroup handles editing a group's properties
+func (a *App) handleEditGroup(groupName string) {
+	a.logger.Info("Opening edit menu for group", zap.String("group", groupName))
+
+	group, exists := a.serverGroups[groupName]
+	if !exists {
+		a.logger.Error("Group not found for editing", zap.String("group", groupName))
+		return
+	}
+
+	// Open the edit submenu for this group
+	a.openGroupEditMenu(groupName, group)
+}
+
+// openGroupEditMenu opens a detailed edit menu for a group
+func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
+	// Clear the main groups menu temporarily to show edit interface
+	if a.groupManagementMenu != nil {
+		// Hide existing items
+		for _, item := range a.groupMenuItems {
+			if item != nil {
+				item.Hide()
+			}
+		}
+		a.groupMenuItems = make(map[string]*systray.MenuItem)
+	}
+
+	// Create edit interface
+	editTitle := a.groupManagementMenu.AddSubMenuItem(
+		fmt.Sprintf("✏️ Editing: %s %s", group.ColorEmoji, groupName),
+		"Edit group properties")
+	editTitle.Disable()
+
+	a.groupManagementMenu.AddSeparator()
+
+	// Name editing - show current name and options to change
+	nameSection := a.groupManagementMenu.AddSubMenuItem("📝 Change Name", "Edit the group name")
+	currentNameItem := nameSection.AddSubMenuItem(
+		fmt.Sprintf("Current: %s", groupName),
+		"Current group name")
+	currentNameItem.Disable()
+
+	// Predefined name suggestions
+	nameSection.AddSeparator()
+	nameOptions := []string{"Work", "Personal", "Development", "Production", "Testing", "AWS", "Databases", "AI/ML", "Monitoring", "Custom-" + fmt.Sprintf("%d", len(a.serverGroups)+1)}
+
+	for _, nameOption := range nameOptions {
+		if nameOption != groupName { // Don't show current name as option
+			nameItem := nameSection.AddSubMenuItem("→ " + nameOption, fmt.Sprintf("Rename group to '%s'", nameOption))
+
+			go func(oldName, newName string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					a.handleRenameGroup(oldName, newName)
+					// Return to main groups menu after rename
+					a.refreshGroupsMenu()
+				}
+			}(groupName, nameOption, nameItem)
+		}
+	}
+
+	// Color editing
+	colorSection := a.groupManagementMenu.AddSubMenuItem("🎨 Change Color", "Change the group color")
+	currentColorItem := colorSection.AddSubMenuItem(
+		fmt.Sprintf("Current: %s %s", group.ColorEmoji, getColorName(group.ColorEmoji)),
+		"Current group color")
+	currentColorItem.Disable()
+
+	colorSection.AddSeparator()
+
+	// Show all available colors except current one
+	for _, colorOption := range GroupColors {
+		if colorOption.Emoji != group.ColorEmoji {
+			colorItem := colorSection.AddSubMenuItem(
+				fmt.Sprintf("%s %s", colorOption.Emoji, colorOption.Name),
+				fmt.Sprintf("Change color to %s", colorOption.Name))
+
+			go func(gName string, color struct{ Emoji, Name, Code string }, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					a.handleChangeGroupColor(gName, color)
+					// Return to main groups menu after color change
+					a.refreshGroupsMenu()
+				}
+			}(groupName, colorOption, colorItem)
+		}
+	}
+
+	// Action buttons
+	a.groupManagementMenu.AddSeparator()
+
+	// Done button to return to main menu
+	doneItem := a.groupManagementMenu.AddSubMenuItem("✅ Done", "Finish editing and return to main menu")
+	go func(item *systray.MenuItem) {
+		for range item.ClickedCh {
+			a.refreshGroupsMenu()
+		}
+	}(doneItem)
+
+	// Delete button
+	deleteItem := a.groupManagementMenu.AddSubMenuItem("🗑️ Delete Group", fmt.Sprintf("Delete group '%s'", groupName))
+	go func(gName string, item *systray.MenuItem) {
+		for range item.ClickedCh {
+			a.handleDeleteGroup(gName)
+		}
+	}(groupName, deleteItem)
+}
+
+// getColorName returns the color name for a given emoji
+func getColorName(emoji string) string {
+	for _, color := range GroupColors {
+		if color.Emoji == emoji {
+			return color.Name
+		}
+	}
+	return "Unknown"
+}
+
+// handleRenameGroup renames a group
+func (a *App) handleRenameGroup(oldName, newName string) {
+	a.logger.Info("Renaming group", zap.String("old_name", oldName), zap.String("new_name", newName))
+
+	// Check if old group exists
+	group, exists := a.serverGroups[oldName]
+	if !exists {
+		a.logger.Error("Group not found for renaming", zap.String("old_name", oldName))
+		return
+	}
+
+	// Check if new name already exists
+	if _, exists := a.serverGroups[newName]; exists {
+		a.logger.Warn("Group name already exists", zap.String("new_name", newName))
+		return
+	}
+
+	// Update group name
+	group.Name = newName
+	group.Description = fmt.Sprintf("Custom group for organizing servers - %s", getColorName(group.ColorEmoji))
+
+	// Move group in map
+	a.serverGroups[newName] = group
+	delete(a.serverGroups, oldName)
+
+	a.logger.Info("Group renamed successfully",
+		zap.String("old_name", oldName),
+		zap.String("new_name", newName))
+
+	// Refresh menus to show changes
+	if a.syncManager != nil {
+		a.syncManager.SyncDelayed() // Refresh server menus to update group references
+	}
+}
+
+// handleChangeGroupColor changes a group's color
+func (a *App) handleChangeGroupColor(groupName string, newColor struct{ Emoji, Name, Code string }) {
+	a.logger.Info("Changing group color",
+		zap.String("group", groupName),
+		zap.String("new_color", newColor.Name))
+
+	group, exists := a.serverGroups[groupName]
+	if !exists {
+		a.logger.Error("Group not found for color change", zap.String("group", groupName))
+		return
+	}
+
+	// Update group color
+	group.Color = newColor.Code
+	group.ColorEmoji = newColor.Emoji
+	group.Description = fmt.Sprintf("Custom group for organizing servers - %s", newColor.Name)
+
+	a.logger.Info("Group color changed successfully",
+		zap.String("group", groupName),
+		zap.String("new_color", newColor.Name),
+		zap.String("new_emoji", newColor.Emoji))
+
+	// Refresh menus to show changes
+	if a.syncManager != nil {
+		a.syncManager.SyncDelayed() // Refresh server menus to show new colors
+	}
+}
+
+// handleDeleteGroup handles deleting a group
+func (a *App) handleDeleteGroup(groupName string) {
+	a.logger.Info("Deleting group", zap.String("group", groupName))
+
+	// Remove from groups map
+	delete(a.serverGroups, groupName)
+
+	// Remove from menu items
+	if item, exists := a.groupMenuItems[groupName]; exists {
+		item.Hide()
+		delete(a.groupMenuItems, groupName)
+	}
+
+	a.logger.Info("Group deleted successfully", zap.String("group", groupName))
+
+	// Refresh the menu
+	a.refreshGroupsMenu()
+}
+
+// handleAssignServerToGroup assigns a server to a specific group
+func (a *App) handleAssignServerToGroup(serverName, groupName string) error {
+	a.logger.Info("Assigning server to group", zap.String("server", serverName), zap.String("group", groupName))
+
+	// Check if group exists
+	group, exists := a.serverGroups[groupName]
+	if !exists {
+		return fmt.Errorf("group '%s' not found", groupName)
+	}
+
+	// Remove server from any existing groups first
+	a.removeServerFromAllGroups(serverName)
+
+	// Add server to the target group
+	group.ServerNames = append(group.ServerNames, serverName)
+
+	a.logger.Info("Server assigned to group successfully",
+		zap.String("server", serverName),
+		zap.String("group", groupName),
+		zap.Int("group_size", len(group.ServerNames)))
+
+	// Refresh menus to show changes
+	a.refreshGroupsMenu()
+	if a.syncManager != nil {
+		a.syncManager.SyncDelayed() // Refresh server menus to show group colors
+	}
+
+	return nil
+}
+
+// handleRemoveServerFromGroup removes a server from a specific group
+func (a *App) handleRemoveServerFromGroup(serverName, groupName string) error {
+	a.logger.Info("Removing server from group", zap.String("server", serverName), zap.String("group", groupName))
+
+	// Check if group exists
+	group, exists := a.serverGroups[groupName]
+	if !exists {
+		return fmt.Errorf("group '%s' not found", groupName)
+	}
+
+	// Remove server from the group
+	for i, existingServer := range group.ServerNames {
+		if existingServer == serverName {
+			// Remove server from slice
+			group.ServerNames = append(group.ServerNames[:i], group.ServerNames[i+1:]...)
+			break
+		}
+	}
+
+	a.logger.Info("Server removed from group successfully",
+		zap.String("server", serverName),
+		zap.String("group", groupName),
+		zap.Int("group_size", len(group.ServerNames)))
+
+	// Refresh menus to show changes
+	a.refreshGroupsMenu()
+	if a.syncManager != nil {
+		a.syncManager.SyncDelayed() // Refresh server menus to remove group colors
+	}
+
+	return nil
+}
+
+// removeServerFromAllGroups removes a server from all groups (helper function)
+func (a *App) removeServerFromAllGroups(serverName string) {
+	for _, group := range a.serverGroups {
+		for i, existingServer := range group.ServerNames {
+			if existingServer == serverName {
+				// Remove server from slice
+				group.ServerNames = append(group.ServerNames[:i], group.ServerNames[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
+// handleServerConfiguration opens the configuration dialog for a server
+func (a *App) handleServerConfiguration(serverName string) error {
+	a.logger.Info("Opening configuration dialog for server", zap.String("server", serverName))
+
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+
+	// Get current server configuration
+	allServers, err := a.stateManager.GetAllServers()
+	if err != nil {
+		return fmt.Errorf("failed to get servers for configuration: %w", err)
+	}
+
+	var targetServer *config.ServerConfig
+	for _, srv := range allServers {
+		if name, ok := srv["name"].(string); ok && name == serverName {
+			// Convert map back to ServerConfig
+			serverJSON, err := json.Marshal(srv)
+			if err != nil {
+				return fmt.Errorf("failed to marshal server data: %w", err)
+			}
+
+			targetServer = &config.ServerConfig{}
+			if err := json.Unmarshal(serverJSON, targetServer); err != nil {
+				return fmt.Errorf("failed to unmarshal server data: %w", err)
+			}
+			break
+		}
+	}
+
+	if targetServer == nil {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	// Create and show configuration dialog
+	dialog := NewServerConfigDialog(a.logger, targetServer, serverName)
+	
+	// Set diagnostic agent and server manager
+	dialog.diagnosticAgent = a.diagnosticAgent
+	if a.server != nil {
+		dialog.serverManager = a.server
+	}
+
+	// Define save callback
+	onSave := func(updatedServer *config.ServerConfig) error {
+		a.logger.Info("Saving server configuration",
+			zap.String("old_name", serverName),
+			zap.String("new_name", updatedServer.Name))
+
+		// Load current configuration
+		configPath := a.server.GetConfigPath()
+		if configPath == "" {
+			return fmt.Errorf("config path not available")
+		}
+
+		globalConfig, err := config.LoadFromFile(configPath)
+		if err != nil {
+			return fmt.Errorf("failed to load configuration: %w", err)
+		}
+
+		// Find and update the server in the configuration
+		var found bool
+		for i, server := range globalConfig.Servers {
+			if server.Name == serverName {
+				// Update the server configuration
+				globalConfig.Servers[i] = updatedServer
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return fmt.Errorf("server '%s' not found in configuration", serverName)
+		}
+
+		// Save the updated configuration
+		if err := config.SaveToFile(globalConfig, configPath); err != nil {
+			return fmt.Errorf("failed to save configuration: %w", err)
+		}
+
+		// Trigger configuration reload in the server
+		if err := a.server.ReloadConfiguration(); err != nil {
+			a.logger.Warn("Failed to reload configuration after update", zap.Error(err))
+			// Don't return error here as the save operation succeeded
+		}
+
+		a.logger.Info("Server configuration saved and reloaded successfully",
+			zap.String("server", updatedServer.Name))
+
+		return nil
+	}
+
+	// Define cancel callback
+	onCancel := func() {
+		a.logger.Info("Server configuration dialog cancelled", zap.String("server", serverName))
+	}
+
+	// Show the dialog
+	return dialog.Show(a.ctx, onSave, onCancel)
 }
