@@ -2,6 +2,7 @@ package tray
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,20 +16,23 @@ import (
 	"go.uber.org/zap"
 )
 
-// DiagnosticAgent analyzes MCP server connection issues
+// DiagnosticAgent analyzes MCP server connection issues using AI
 type DiagnosticAgent struct {
-	logger *zap.Logger
+	logger    *zap.Logger
+	llmClient LLMClient
 }
 
 // DiagnosticReport contains the analysis results
 type DiagnosticReport struct {
-	ServerName     string                 `json:"server_name"`
-	Issues         []string               `json:"issues"`
-	Recommendations []string              `json:"recommendations"`
-	LogAnalysis    LogAnalysis            `json:"log_analysis"`
-	ConfigAnalysis ConfigAnalysis         `json:"config_analysis"`
-	RepoAnalysis   RepositoryAnalysis     `json:"repo_analysis"`
-	Timestamp      time.Time              `json:"timestamp"`
+	ServerName       string                 `json:"server_name"`
+	Issues           []string               `json:"issues"`
+	Recommendations  []string               `json:"recommendations"`
+	LogAnalysis      LogAnalysis            `json:"log_analysis"`
+	ConfigAnalysis   ConfigAnalysis         `json:"config_analysis"`
+	RepoAnalysis     RepositoryAnalysis     `json:"repo_analysis"`
+	AIAnalysis       string                 `json:"ai_analysis"`
+	SuggestedConfig  string                 `json:"suggested_config,omitempty"`
+	Timestamp        time.Time              `json:"timestamp"`
 }
 
 type LogAnalysis struct {
@@ -52,10 +56,11 @@ type RepositoryAnalysis struct {
 	CommonIssues   []string `json:"common_issues"`
 }
 
-// NewDiagnosticAgent creates a new diagnostic agent
+// NewDiagnosticAgent creates a new diagnostic agent with AI capabilities
 func NewDiagnosticAgent(logger *zap.Logger) *DiagnosticAgent {
 	return &DiagnosticAgent{
-		logger: logger,
+		logger:    logger,
+		llmClient: NewOpenAIClient(),
 	}
 }
 
@@ -86,6 +91,27 @@ func (d *DiagnosticAgent) DiagnoseServer(serverName string) (*DiagnosticReport, 
 	// Analyze repository if available
 	if server.RepositoryURL != "" {
 		report.RepoAnalysis = d.analyzeRepository(server.RepositoryURL)
+	}
+
+	// AI-powered analysis
+	d.logger.Info("Running AI analysis", zap.String("server", serverName))
+	aiAnalysis, err := d.performAIAnalysis(report, server)
+	if err != nil {
+		d.logger.Warn("AI analysis failed", zap.Error(err))
+		report.AIAnalysis = fmt.Sprintf("AI analysis unavailable: %v", err)
+	} else {
+		report.AIAnalysis = aiAnalysis
+	}
+
+	// Generate AI-suggested configuration if issues found
+	if len(report.Issues) > 0 {
+		d.logger.Info("Generating AI configuration suggestions", zap.String("server", serverName))
+		suggestedConfig, err := d.generateConfigSuggestions(server, report)
+		if err != nil {
+			d.logger.Warn("Config generation failed", zap.Error(err))
+		} else {
+			report.SuggestedConfig = suggestedConfig
+		}
 	}
 
 	// Generate recommendations based on analysis
@@ -483,4 +509,113 @@ func (d *DiagnosticAgent) ShowDiagnosticReport(report *DiagnosticReport) {
 	}
 
 	fmt.Printf("\n" + strings.Repeat("-", 60) + "\n")
+}
+// performAIAnalysis uses LLM to analyze server issues intelligently
+func (d *DiagnosticAgent) performAIAnalysis(report *DiagnosticReport, server *config.ServerConfig) (string, error) {
+	// Gather documentation if available
+	documentation := ""
+	if server.RepositoryURL != "" {
+		doc, err := d.fetchDocumentation(server.RepositoryURL)
+		if err == nil {
+			documentation = doc
+		}
+	}
+
+	// Create comprehensive analysis prompt
+	prompt := fmt.Sprintf(`
+Analyze this MCP server configuration and diagnostic data:
+
+SERVER: %s
+COMMAND: %s
+ARGS: %v
+URL: %s
+ENABLED: %t
+
+ISSUES FOUND:
+%s
+
+LOG ANALYSIS:
+- Error Count: %d
+- Common Errors: %v
+- Last Error: %s
+
+CONFIG ANALYSIS:
+- Valid: %t
+- Missing Fields: %v
+- Invalid Values: %v
+
+DOCUMENTATION:
+%s
+
+Please provide:
+1. Root cause analysis of the issues
+2. Step-by-step troubleshooting recommendations
+3. Configuration fixes needed
+4. Best practices for this server type
+
+Focus on actionable solutions that can be implemented immediately.
+`, 
+		server.Name,
+		server.Command,
+		server.Args,
+		server.URL,
+		server.Enabled,
+		fmt.Sprintf("%v", report.Issues),
+		report.LogAnalysis.ErrorCount,
+		report.LogAnalysis.CommonErrors,
+		report.LogAnalysis.LastError,
+		report.ConfigAnalysis.Valid,
+		report.ConfigAnalysis.MissingFields,
+		report.ConfigAnalysis.InvalidValues,
+		documentation,
+	)
+
+	return d.llmClient.Analyze(prompt)
+}
+
+// generateConfigSuggestions uses AI to generate corrected configuration
+func (d *DiagnosticAgent) generateConfigSuggestions(server *config.ServerConfig, report *DiagnosticReport) (string, error) {
+	// Get current config as JSON
+	currentConfigJSON, err := json.MarshalIndent(server, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal current config: %w", err)
+	}
+
+	// Fetch documentation
+	documentation := ""
+	if server.RepositoryURL != "" {
+		doc, err := d.fetchDocumentation(server.RepositoryURL)
+		if err == nil {
+			documentation = doc
+		}
+	}
+
+	return d.llmClient.GenerateConfig(server.Name, documentation, string(currentConfigJSON))
+}
+
+// fetchDocumentation retrieves documentation from repository
+func (d *DiagnosticAgent) fetchDocumentation(repoURL string) (string, error) {
+	// Convert GitHub repo URL to raw README URL
+	readmeURL := d.convertToReadmeURL(repoURL)
+	if readmeURL == "" {
+		return "", fmt.Errorf("unsupported repository URL format")
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(readmeURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch documentation: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("documentation not found (status: %d)", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read documentation: %w", err)
+	}
+
+	return string(body), nil
 }

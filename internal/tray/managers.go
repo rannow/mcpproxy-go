@@ -227,6 +227,7 @@ type MenuManager struct {
 	// Menu references - Status-based menus
 	connectedServersMenu    *systray.MenuItem
 	disconnectedServersMenu *systray.MenuItem
+	stoppedServersMenu      *systray.MenuItem
 	disabledServersMenu     *systray.MenuItem
 	quarantineMenu          *systray.MenuItem
 
@@ -236,6 +237,7 @@ type MenuManager struct {
 	// Menu tracking to prevent duplicates - Status-based tracking
 	connectedMenuItems      map[string]*systray.MenuItem // server name -> connected menu item
 	disconnectedMenuItems   map[string]*systray.MenuItem // server name -> disconnected menu item
+	stoppedMenuItems        map[string]*systray.MenuItem // server name -> stopped menu item
 	disabledMenuItems       map[string]*systray.MenuItem // server name -> disabled menu item
 	quarantineMenuItems     map[string]*systray.MenuItem // server name -> quarantine menu item
 
@@ -266,6 +268,8 @@ type MenuManager struct {
 	lastMenuStateHash string
 	menuUpdateMutex   sync.Mutex
 	menuDataCached    bool // Flag to track if menu data is loaded
+	isMenuOpen        bool // Track if user has menu open
+	menuOpenTime      time.Time
 
 	// Server groups for color display
 	serverGroups *map[string]*ServerGroup // Reference to server groups from App
@@ -276,11 +280,12 @@ type MenuManager struct {
 }
 
 // NewMenuManager creates a new menu manager
-func NewMenuManager(connectedMenu, disconnectedMenu, disabledMenu, quarantineMenu, upstreamMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
+func NewMenuManager(connectedMenu, disconnectedMenu, stoppedMenu, disabledMenu, quarantineMenu, upstreamMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
 	return &MenuManager{
 		logger:                  logger,
 		connectedServersMenu:    connectedMenu,
 		disconnectedServersMenu: disconnectedMenu,
+		stoppedServersMenu:      stoppedMenu,
 		disabledServersMenu:     disabledMenu,
 		quarantineMenu:          quarantineMenu,
 		upstreamServersMenu:     upstreamMenu,
@@ -288,6 +293,7 @@ func NewMenuManager(connectedMenu, disconnectedMenu, disabledMenu, quarantineMen
 		// Status-based tracking maps
 		connectedMenuItems:      make(map[string]*systray.MenuItem),
 		disconnectedMenuItems:   make(map[string]*systray.MenuItem),
+		stoppedMenuItems:        make(map[string]*systray.MenuItem),
 		disabledMenuItems:       make(map[string]*systray.MenuItem),
 		quarantineMenuItems:     make(map[string]*systray.MenuItem),
 
@@ -336,6 +342,7 @@ func (m *MenuManager) removeServersFromWrongMenus(allCurrentServers map[string]s
 	statusMenus := map[string]map[string]*systray.MenuItem{
 		"connected":     m.connectedMenuItems,
 		"disconnected":  m.disconnectedMenuItems,
+		"stopped":       m.stoppedMenuItems,
 		"disabled":      m.disabledMenuItems,
 		"quarantined":   m.quarantineMenuItems,
 	}
@@ -382,19 +389,23 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 	defer m.mu.Unlock()
 
 	// Stability check: Don't clear existing menus if we get empty servers and we already have servers
-	if len(servers) == 0 && (len(m.connectedMenuItems) > 0 || len(m.disconnectedMenuItems) > 0 || len(m.disabledMenuItems) > 0) {
+	if len(servers) == 0 && (len(m.connectedMenuItems) > 0 || len(m.disconnectedMenuItems) > 0 || len(m.stoppedMenuItems) > 0 || len(m.disabledMenuItems) > 0) {
 		m.logger.Debug("Received empty server list but existing menu items present, preserving UI state")
 		return
 	}
 
 	// Group servers by status
-	var connected, disconnected, disabled, quarantined []map[string]interface{}
-	connectedCount, disconnectedCount, disabledCount, quarantinedCount := 0, 0, 0, 0
+	var connected, disconnected, stopped, disabled, quarantined []map[string]interface{}
+	connectedCount, disconnectedCount, stoppedCount, disabledCount, quarantinedCount := 0, 0, 0, 0, 0
 
 	for _, server := range servers {
 		enabled, _ := server["enabled"].(bool)
 		serverConnected, _ := server["connected"].(bool)
+		serverConnecting, _ := server["connecting"].(bool)
 		serverQuarantined, _ := server["quarantined"].(bool)
+		
+		// Check if server has a stopped status (when server is not connecting and not connected but enabled)
+		serverStopped := enabled && !serverConnected && !serverConnecting
 
 		if serverQuarantined {
 			quarantined = append(quarantined, server)
@@ -405,6 +416,9 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 		} else if serverConnected {
 			connected = append(connected, server)
 			connectedCount++
+		} else if serverStopped {
+			stopped = append(stopped, server)
+			stoppedCount++
 		} else {
 			disconnected = append(disconnected, server)
 			disconnectedCount++
@@ -417,6 +431,9 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 	}
 	if m.disconnectedServersMenu != nil {
 		m.disconnectedServersMenu.SetTitle(fmt.Sprintf("🔴 Disconnected Servers (%d)", disconnectedCount))
+	}
+	if m.stoppedServersMenu != nil {
+		m.stoppedServersMenu.SetTitle(fmt.Sprintf("⏹️ Stopped Servers (%d)", stoppedCount))
 	}
 	if m.disabledServersMenu != nil {
 		m.disabledServersMenu.SetTitle(fmt.Sprintf("⏸️ Disabled Servers (%d)", disabledCount))
@@ -437,6 +454,11 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 			allCurrentServers[name] = "disconnected"
 		}
 	}
+	for _, server := range stopped {
+		if name, ok := server["name"].(string); ok {
+			allCurrentServers[name] = "stopped"
+		}
+	}
 	for _, server := range disabled {
 		if name, ok := server["name"].(string); ok {
 			allCurrentServers[name] = "disabled"
@@ -454,12 +476,14 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 	// Update each status-based menu
 	m.updateMenuForStatus(m.connectedServersMenu, connected, m.connectedMenuItems, "connected")
 	m.updateMenuForStatus(m.disconnectedServersMenu, disconnected, m.disconnectedMenuItems, "disconnected")
+	m.updateMenuForStatus(m.stoppedServersMenu, stopped, m.stoppedMenuItems, "stopped")
 	m.updateMenuForStatus(m.disabledServersMenu, disabled, m.disabledMenuItems, "disabled")
 	m.updateMenuForStatus(m.quarantineMenu, quarantined, m.quarantineMenuItems, "quarantined")
 
 	m.logger.Debug("Status-based menus updated",
 		zap.Int("connected", connectedCount),
 		zap.Int("disconnected", disconnectedCount),
+		zap.Int("stopped", stoppedCount),
 		zap.Int("disabled", disabledCount),
 		zap.Int("quarantined", quarantinedCount))
 
@@ -832,6 +856,12 @@ func (m *MenuManager) shouldUpdateMenus(servers []map[string]interface{}) bool {
 	m.menuUpdateMutex.Lock()
 	defer m.menuUpdateMutex.Unlock()
 	
+	// Don't update if menu is currently open (user is interacting with it)
+	if m.isMenuOpen && time.Since(m.menuOpenTime) < 30*time.Second {
+		m.logger.Debug("Menu is open, skipping update to prevent interruption")
+		return false
+	}
+	
 	newHash := m.calculateMenuStateHash(servers)
 	
 	// For lazy loading: if data is already cached and hash hasn't changed, don't update
@@ -850,6 +880,25 @@ func (m *MenuManager) shouldUpdateMenus(servers []map[string]interface{}) bool {
 	return false
 }
 
+// SetMenuOpen marks the menu as opened by user
+func (m *MenuManager) SetMenuOpen() {
+	m.menuUpdateMutex.Lock()
+	defer m.menuUpdateMutex.Unlock()
+	
+	m.isMenuOpen = true
+	m.menuOpenTime = time.Now()
+	m.logger.Debug("Menu marked as open")
+}
+
+// SetMenuClosed marks the menu as closed by user
+func (m *MenuManager) SetMenuClosed() {
+	m.menuUpdateMutex.Lock()
+	defer m.menuUpdateMutex.Unlock()
+	
+	m.isMenuOpen = false
+	m.logger.Debug("Menu marked as closed")
+}
+
 func (m *MenuManager) createGroupedServerMenus(currentServerNames []string, currentServerMap map[string]map[string]interface{}, connected, disconnected, disabled, quarantined []string) {
 	var lastHeaderItem *systray.MenuItem
 
@@ -861,6 +910,7 @@ func (m *MenuManager) createGroupedServerMenus(currentServerNames []string, curr
 		for _, serverName := range connected {
 			serverData := currentServerMap[serverName]
 			m.logger.Info("Creating menu item for connected server", zap.String("server", serverName))
+			m.logger.Error("CONNECTED SERVER DATA", zap.String("server", serverName), zap.Any("data", serverData))
 			status, tooltip := m.getServerStatusDisplay(serverData)
 			serverMenuItem := m.upstreamServersMenu.AddSubMenuItem("  "+status, tooltip) // Indent with spaces
 			m.serverMenuItems[serverName] = serverMenuItem
@@ -880,6 +930,7 @@ func (m *MenuManager) createGroupedServerMenus(currentServerNames []string, curr
 		for _, serverName := range disconnected {
 			serverData := currentServerMap[serverName]
 			m.logger.Info("Creating menu item for disconnected server", zap.String("server", serverName))
+			m.logger.Error("DISCONNECTED SERVER DATA", zap.String("server", serverName), zap.Any("data", serverData))
 			status, tooltip := m.getServerStatusDisplay(serverData)
 			serverMenuItem := m.upstreamServersMenu.AddSubMenuItem("  "+status, tooltip) // Indent with spaces
 			m.serverMenuItems[serverName] = serverMenuItem
@@ -931,6 +982,7 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	serverName, _ := server["name"].(string)
 	enabled, _ := server["enabled"].(bool)
 	connected, _ := server["connected"].(bool)
+	connecting, _ := server["connecting"].(bool)
 	quarantined, _ := server["quarantined"].(bool)
 	toolCount, _ := server["tool_count"].(int)
 
@@ -946,6 +998,9 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	} else if connected {
 		statusIcon = "🟢"
 		statusText = fmt.Sprintf("connected (%d tools)", toolCount)
+	} else if enabled && !connected && !connecting {
+		statusIcon = "⏹️"
+		statusText = "stopped"
 	} else {
 		statusIcon = "🔴"
 		statusText = "disconnected"
@@ -988,7 +1043,11 @@ func (m *MenuManager) serverSupportsOAuth(server map[string]interface{}) bool {
 	// Get server URL
 	serverURL, ok := server["url"].(string)
 	if !ok || serverURL == "" {
-		return false
+		// For stdio servers without URL, check if they have OAuth configuration
+		if _, hasOAuth := server["oauth"]; hasOAuth {
+			return true
+		}
+		return false // stdio servers typically don't support OAuth
 	}
 
 	// Check if it's an HTTP/HTTPS server (OAuth is typically used with HTTP-based APIs)
@@ -1028,8 +1087,14 @@ func (m *MenuManager) serverSupportsOAuth(server map[string]interface{}) bool {
 func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuItem, server map[string]interface{}) {
 	serverName, _ := server["name"].(string)
 	if serverName == "" {
+		m.logger.Warn("createServerActionSubmenus: empty server name")
 		return
 	}
+
+	// Simple test log to verify function is called
+	m.logger.Error("SUBMENU TEST: Function called for server", zap.String("server", serverName))
+
+	m.logger.Info("Creating action submenus for server", zap.String("server", serverName))
 
 	enabled, _ := server["enabled"].(bool)
 	quarantined, _ := server["quarantined"].(bool)
@@ -1043,11 +1108,13 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	}
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
+	m.logger.Info("Added enable/disable menu item", zap.String("server", serverName), zap.String("text", enableText))
 
 	// OAuth Login action (only for servers that support OAuth)
 	if m.serverSupportsOAuth(server) && !quarantined {
 		oauthItem := serverMenuItem.AddSubMenuItem("🔐 OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
 		m.serverOAuthItems[serverName] = oauthItem
+		m.logger.Info("Added OAuth menu item", zap.String("server", serverName))
 
 		// Set up OAuth login click handler
 		go func(name string, item *systray.MenuItem) {
@@ -1058,12 +1125,15 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 				}
 			}
 		}(serverName, oauthItem)
+	} else {
+		m.logger.Info("Skipping OAuth menu item", zap.String("server", serverName), zap.Bool("supports_oauth", m.serverSupportsOAuth(server)), zap.Bool("quarantined", quarantined))
 	}
 
 	// Quarantine action (only if not already quarantined)
 	if !quarantined {
 		quarantineItem := serverMenuItem.AddSubMenuItem("Move to Quarantine", fmt.Sprintf("Quarantine server %s for security review", serverName))
 		m.serverQuarantineItems[serverName] = quarantineItem
+		m.logger.Info("Added quarantine menu item", zap.String("server", serverName))
 
 		// Set up quarantine click handler
 		go func(name string, item *systray.MenuItem) {
@@ -1074,21 +1144,14 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 				}
 			}
 		}(serverName, quarantineItem)
+	} else {
+		m.logger.Info("Skipping quarantine menu item (already quarantined)", zap.String("server", serverName))
 	}
-
-	// Diagnostic analysis action
-	diagnoseItem := serverMenuItem.AddSubMenuItem("🔍 Diagnose Connection Issues", fmt.Sprintf("Analyze connection issues for %s", serverName))
-	go func(name string, item *systray.MenuItem) {
-		for range item.ClickedCh {
-			if m.onServerAction != nil {
-				go m.onServerAction(name, "diagnose")
-			}
-		}
-	}(serverName, diagnoseItem)
 
 	// Configuration editor action
 	configItem := serverMenuItem.AddSubMenuItem("⚙️ Configure", fmt.Sprintf("Configure server %s", serverName))
 	m.serverConfigItems[serverName] = configItem
+	m.logger.Info("Added configure menu item", zap.String("server", serverName))
 	go func(name string, item *systray.MenuItem) {
 		for range item.ClickedCh {
 			if m.onServerAction != nil {
@@ -1169,19 +1232,18 @@ func (m *MenuManager) createGroupActionsSubmenu(serverMenuItem *systray.MenuItem
 		}
 	}
 
-	// Create the groups submenu
-	groupsSubmenu := serverMenuItem.AddSubMenuItem("🏷️ Groups", "Manage group assignment for this server")
+	// Create the assign to group submenu directly
+	assignSubmenu := serverMenuItem.AddSubMenuItem("📋 Assign to Group", "Assign server to a group")
 
-	// Show current group status
+	// Show current group status if assigned
 	if currentGroup != nil {
-		// Server is in a group - show current group and option to remove
-		currentGroupItem := groupsSubmenu.AddSubMenuItem(
+		currentGroupItem := assignSubmenu.AddSubMenuItem(
 			fmt.Sprintf("%s Currently in: %s", currentGroup.ColorEmoji, currentGroupName),
 			fmt.Sprintf("Server is currently assigned to group '%s'", currentGroupName))
 		currentGroupItem.Disable() // Make it non-clickable info
 
 		// Add option to remove from current group
-		removeFromGroupItem := groupsSubmenu.AddSubMenuItem("❌ Remove from Group", "Remove server from current group")
+		removeFromGroupItem := assignSubmenu.AddSubMenuItem("❌ Remove from Group", "Remove server from current group")
 		go func(name, group string, item *systray.MenuItem) {
 			for range item.ClickedCh {
 				if m.onServerAction != nil {
@@ -1190,13 +1252,11 @@ func (m *MenuManager) createGroupActionsSubmenu(serverMenuItem *systray.MenuItem
 			}
 		}(serverName, currentGroupName, removeFromGroupItem)
 
-		groupsSubmenu.AddSeparator()
+		assignSubmenu.AddSeparator()
 	}
 
 	// Add options to assign to different groups
 	if m.serverGroups != nil && len(*m.serverGroups) > 0 {
-		assignSubmenu := groupsSubmenu.AddSubMenuItem("📋 Assign to Group", "Assign server to a different group")
-
 		// List all available groups (except current one)
 		for groupName, group := range *m.serverGroups {
 			if group.Enabled && groupName != currentGroupName {
@@ -1215,7 +1275,7 @@ func (m *MenuManager) createGroupActionsSubmenu(serverMenuItem *systray.MenuItem
 		}
 	} else {
 		// No groups available
-		noGroupsItem := groupsSubmenu.AddSubMenuItem("📋 No groups available", "Create groups first in the Server Groups menu")
+		noGroupsItem := assignSubmenu.AddSubMenuItem("📋 No groups available", "Create groups first in the Server Groups menu")
 		noGroupsItem.Disable()
 	}
 }

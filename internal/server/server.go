@@ -21,6 +21,18 @@ import (
 	"mcpproxy-go/internal/upstream"
 )
 
+// Group represents a server group
+type Group struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+// Global groups storage
+var (
+	groups     = make(map[string]*Group)
+	groupsMutex = sync.RWMutex{}
+)
+
 // Status represents the current status of the server
 type Status struct {
 	Phase         string                 `json:"phase"`          // Starting, Ready, Error
@@ -125,6 +137,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, cacheManager, truncator, logger, server, cfg.DebugSearch, cfg)
 
 	server.mcpProxy = mcpProxy
+
+	// Initialize groups from config
+	server.initGroupsFromConfig()
 
 	// Start background initialization immediately
 	go server.backgroundInitialization()
@@ -1104,6 +1119,29 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
 	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
 
+	// Group management web interface
+	mux.HandleFunc("/groups", s.handleGroupsWeb)
+	mux.HandleFunc("/assignments", s.handleAssignmentWeb)
+	mux.HandleFunc("/api/groups", s.handleGroupsAPI)
+	mux.HandleFunc("/api/groups/", s.handleGroupsAPI)
+
+	// Server assignment endpoints
+	mux.HandleFunc("/api/assign-server", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleAssignServer(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/assignments", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetAssignments(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	s.mu.Lock()
 	s.httpServer = &http.Server{
 		Addr:              s.config.Listen,
@@ -1200,7 +1238,83 @@ func (s *Server) SaveConfiguration() error {
 	}
 	s.config.Servers = latestServers
 
+	// Sync groups from in-memory storage to config
+	s.syncGroupsToConfig()
+
 	return config.SaveConfig(s.config, configPath)
+}
+
+// syncGroupsToConfig syncs groups from in-memory storage to config
+func (s *Server) syncGroupsToConfig() {
+	groupsMutex.RLock()
+	defer groupsMutex.RUnlock()
+
+	// Convert in-memory groups to config format
+	configGroups := make([]config.GroupConfig, 0, len(groups))
+	for _, group := range groups {
+		configGroups = append(configGroups, config.GroupConfig{
+			Name:    group.Name,
+			Color:   group.Color,
+			Enabled: true, // Groups are enabled by default
+		})
+	}
+
+	s.config.Groups = configGroups
+	s.logger.Debug("Synced groups to config", zap.Int("count", len(configGroups)))
+}
+
+// initGroupsFromConfig initializes in-memory groups from config
+func (s *Server) initGroupsFromConfig() {
+	groupsMutex.Lock()
+	defer groupsMutex.Unlock()
+
+	// Clear existing groups
+	groups = make(map[string]*Group)
+
+	// Load groups from config
+	for _, configGroup := range s.config.Groups {
+		if configGroup.Enabled {
+			groups[configGroup.Name] = &Group{
+				Name:  configGroup.Name,
+				Color: configGroup.Color,
+			}
+		}
+	}
+
+	// Ensure default groups exist if no groups in config
+	if len(groups) == 0 {
+		groups["AWS Services"] = &Group{Name: "AWS Services", Color: "#ff9900"}
+		groups["Development"] = &Group{Name: "Development", Color: "#28a745"}
+		groups["Production"] = &Group{Name: "Production", Color: "#dc3545"}
+	}
+
+	s.logger.Debug("Initialized groups from config", zap.Int("count", len(groups)))
+}
+
+// getGroups returns a copy of all groups (thread-safe)
+func (s *Server) getGroups() map[string]*Group {
+	groupsMutex.RLock()
+	defer groupsMutex.RUnlock()
+	
+	result := make(map[string]*Group)
+	for k, v := range groups {
+		result[k] = v
+	}
+	return result
+}
+
+// setGroup sets a group (thread-safe)
+func (s *Server) setGroup(name string, group *Group) {
+	groupsMutex.Lock()
+	defer groupsMutex.Unlock()
+	groups[name] = group
+}
+
+// deleteGroup deletes a group (thread-safe)
+func (s *Server) deleteGroup(name string) {
+	groupsMutex.Lock()
+	defer groupsMutex.Unlock()
+	delete(groups, name)
 }
 
 // ReloadConfiguration reloads the configuration from disk

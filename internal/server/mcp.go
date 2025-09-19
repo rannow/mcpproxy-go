@@ -237,6 +237,29 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		)
 		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
 
+		// groups - Server group management
+		groupsTool := mcp.NewTool("groups",
+			mcp.WithDescription("Manage server groups - assign servers to groups and organize servers by groups. Use 'list_available_groups' first to see available groups."),
+			mcp.WithString("operation",
+				mcp.Required(),
+				mcp.Description("Operation to perform"),
+				mcp.Enum("list_groups", "assign_server", "unassign_server", "list_assignments", "get_group_servers"),
+			),
+			mcp.WithString("server_name",
+				mcp.Description("Name of the server (required for assign_server, unassign_server operations)"),
+			),
+			mcp.WithString("group_name",
+				mcp.Description("Name of the group (required for assign_server, get_group_servers operations). Use 'list_available_groups' to see available groups."),
+			),
+		)
+		p.server.AddTool(groupsTool, p.handleGroupsToolMCP)
+
+		// list_available_groups - Quick group listing for selection
+		listGroupsTool := mcp.NewTool("list_available_groups",
+			mcp.WithDescription("List all available groups for selection. Use this to see which groups you can assign servers to."),
+		)
+		p.server.AddTool(listGroupsTool, p.handleListAvailableGroups)
+
 		// quarantine_security - Security quarantine management
 		quarantineSecurityTool := mcp.NewTool("quarantine_security",
 			mcp.WithDescription("Security quarantine management for MCP servers. Review and manage quarantined servers to prevent Tool Poisoning Attacks (TPAs). This tool handles security analysis and quarantine state management. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
@@ -540,6 +563,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			return p.handleUpstreamServers(ctx, proxyRequest)
 		case operationQuarantineSec:
 			return p.handleQuarantineSecurity(ctx, proxyRequest)
+		case "groups":
+			return p.handleGroupsToolMCP(ctx, proxyRequest)
+		case "list_available_groups":
+			return p.handleListAvailableGroups(ctx, proxyRequest)
 		case operationRetrieveTools:
 			return p.handleRetrieveTools(ctx, proxyRequest)
 		case operationReadCache:
@@ -706,6 +733,67 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 	}
 
 	return mcp.NewToolResultText(string(jsonResult))
+}
+
+// handleGroupsToolMCP wraps the groups tool for MCP
+func (p *MCPProxyServer) handleGroupsToolMCP(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Convert MCP request to map
+	args := make(map[string]interface{})
+	if request.Params.Arguments != nil {
+		if argsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			args = argsMap
+		}
+	}
+
+	// Call the groups tool handler
+	result, err := p.mainServer.handleGroupsTool(args)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Convert result to JSON
+	jsonResult, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// getAvailableGroupNames returns a slice of available group names for enum values
+func (p *MCPProxyServer) getAvailableGroupNames() []string {
+	groupsMutex.RLock()
+	defer groupsMutex.RUnlock()
+	
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	return names
+}
+
+// handleListAvailableGroups returns a simple list of available groups
+func (p *MCPProxyServer) handleListAvailableGroups(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	groupsMutex.RLock()
+	defer groupsMutex.RUnlock()
+	
+	groupList := make([]string, 0, len(groups))
+	for name := range groups {
+		groupList = append(groupList, name)
+	}
+	
+	result := map[string]interface{}{
+		"available_groups": groupList,
+		"count": len(groupList),
+		"message": fmt.Sprintf("Found %d available groups. Use these names with the 'groups' tool.", len(groupList)),
+	}
+	
+	jsonResult, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+	
+	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
 // handleUpstreamServers implements upstream server management

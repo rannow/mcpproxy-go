@@ -338,6 +338,12 @@ const configDialogTemplate = `<!DOCTYPE html>
                     <div class="help-text">Unique identifier for this server</div>
                 </div>
 
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <input type="text" id="description" name="description" value="{{.Server.Description}}" placeholder="Optional description of what this server does">
+                    <div class="help-text">Brief description of the server's purpose or functionality</div>
+                </div>
+
                 <div class="form-row">
                     <div class="form-group">
                         <label for="protocol">Protocol</label>
@@ -432,27 +438,27 @@ const configDialogTemplate = `<!DOCTYPE html>
             <button type="button" class="btn btn-info" onclick="runDiagnostic()">🔍 Diagnostic</button>
             <button type="button" class="btn btn-primary" onclick="save()">Save</button>
         </div>
-    </div>
 
-    <!-- Connection Status Section -->
-    <div id="connectionSection" class="section" style="margin-top: 20px;">
-        <h3>🔗 Connection Status</h3>
-        <div id="connectionStatus" class="connection-status">
-            <span id="statusIndicator">⚪</span>
-            <span id="statusText">Checking connection...</span>
+        <!-- Connection Status Section -->
+        <div class="section" style="margin-top: 20px;">
+            <h3>🔗 Connection Status</h3>
+            <div id="connectionStatus" class="connection-status">
+                <span id="statusIndicator">⚪</span>
+                <span id="statusText">Checking connection...</span>
+            </div>
         </div>
-    </div>
 
-    <!-- Tools Display Section -->
-    <div id="toolsSection" class="section" style="display: none; margin-top: 20px;">
-        <h3>🛠️ Available Tools</h3>
-        <div id="toolsList" class="tools-list"></div>
-    </div>
+        <!-- Tools Section -->
+        <div class="section" style="margin-top: 20px;">
+            <h3>🛠️ Available Tools</h3>
+            <div id="toolsList" class="tools-list"></div>
+        </div>
 
-    <!-- Diagnostic Report Section -->
-    <div id="diagnosticSection" class="section" style="display: none; margin-top: 20px;">
-        <h3>🔍 Diagnostic Report</h3>
-        <div id="diagnosticReport" class="diagnostic-report"></div>
+        <!-- Diagnostic Section -->
+        <div class="section" style="margin-top: 20px;">
+            <h3>🔍 Diagnostic Report</h3>
+            <div id="diagnosticReport" class="diagnostic-report"></div>
+        </div>
     </div>
 
     <script>
@@ -509,6 +515,7 @@ const configDialogTemplate = `<!DOCTYPE html>
 
             const server = {
                 name: formData.get('name'),
+                description: formData.get('description') || '',
                 protocol: formData.get('protocol'),
                 enabled: formData.get('enabled') === 'on',
                 quarantined: formData.get('quarantined') === 'on',
@@ -616,15 +623,12 @@ const configDialogTemplate = `<!DOCTYPE html>
 
         function runDiagnostic() {
             const diagnosticBtn = document.querySelector('.btn-info');
-            const diagnosticSection = document.getElementById('diagnosticSection');
             const diagnosticReport = document.getElementById('diagnosticReport');
             
             // Show loading state
             diagnosticBtn.textContent = '🔄 Running...';
             diagnosticBtn.disabled = true;
             
-            // Show diagnostic section
-            diagnosticSection.style.display = 'block';
             diagnosticReport.textContent = 'Running diagnostic analysis...';
             
             fetch('/diagnostic', { method: 'POST' })
@@ -718,15 +722,12 @@ const configDialogTemplate = `<!DOCTYPE html>
         }
 
         function loadTools() {
-            const toolsSection = document.getElementById('toolsSection');
             const toolsList = document.getElementById('toolsList');
             
             fetch(window.location.origin + '/tools')
             .then(function(response) { return response.json(); })
             .then(function(data) {
                 if (data.tools && data.tools.length > 0) {
-                    toolsSection.style.display = 'block';
-                    
                     let toolsHtml = '';
                     data.tools.forEach(function(tool) {
                         toolsHtml += '<div class="tool-item">';
@@ -737,13 +738,13 @@ const configDialogTemplate = `<!DOCTYPE html>
                     
                     toolsList.innerHTML = toolsHtml;
                 } else if (data.error) {
-                    // Don't show tools section if there's an error (server not connected)
-                    toolsSection.style.display = 'none';
+                    toolsList.innerHTML = '<p>Error loading tools: ' + data.error + '</p>';
+                } else {
+                    toolsList.innerHTML = '<p>No tools available</p>';
                 }
             })
-            .catch(function() {
-                // Don't show tools section if fetch fails
-                toolsSection.style.display = 'none';
+            .catch(function(error) {
+                toolsList.innerHTML = '<p>Failed to load tools: ' + error.message + '</p>';
             });
         }
 

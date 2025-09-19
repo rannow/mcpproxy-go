@@ -21,8 +21,8 @@ const (
     <key>ProgramArguments</key>
     <array>
         <string>%s</string>
-        <string>--tray=true</string>
-        <string>--log-to-file=true</string>
+        <string>serve</string>
+        <string>--log-to-file</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

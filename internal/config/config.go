@@ -76,6 +76,9 @@ type Config struct {
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
 
+	// Groups configuration
+	Groups []GroupConfig `json:"groups,omitempty" mapstructure:"groups"`
+
 	// GitHub repository URL for the project
 	GitHubURL string `json:"github_url,omitempty" mapstructure:"github-url"`
 }
@@ -97,6 +100,7 @@ type LogConfig struct {
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
 	Name          string            `json:"name,omitempty" mapstructure:"name"`
+	Description   string            `json:"description,omitempty" mapstructure:"description"`
 	URL           string            `json:"url,omitempty" mapstructure:"url"`
 	Protocol      string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
 	Command       string            `json:"command,omitempty" mapstructure:"command"`
@@ -111,6 +115,7 @@ type ServerConfig struct {
 	Created       time.Time         `json:"created" mapstructure:"created"`
 	Updated       time.Time         `json:"updated,omitempty" mapstructure:"updated"`
 	Isolation     *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
+	GroupName     string            `json:"group_name,omitempty" mapstructure:"group_name"` // Assigned group name
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -147,6 +152,14 @@ type IsolationConfig struct {
 	LogDriver   string   `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
 	LogMaxSize  string   `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
 	LogMaxFiles string   `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+}
+
+// GroupConfig represents a server group configuration
+type GroupConfig struct {
+	Name        string `json:"name" mapstructure:"name"`
+	Description string `json:"description,omitempty" mapstructure:"description"`
+	Color       string `json:"color" mapstructure:"color"`
+	Enabled     bool   `json:"enabled" mapstructure:"enabled"`
 }
 
 // RegistryEntry represents a registry in the configuration

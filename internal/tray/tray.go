@@ -124,11 +124,12 @@ type App struct {
 	// Status-based server menus
 	connectedServersMenu    *systray.MenuItem
 	disconnectedServersMenu *systray.MenuItem
+	stoppedServersMenu      *systray.MenuItem
 	disabledServersMenu     *systray.MenuItem
 	quarantineMenu          *systray.MenuItem
 
 	// Legacy upstream menu (for backward compatibility if needed)
-	upstreamServersMenu *systray.MenuItem
+	// upstreamServersMenu *systray.MenuItem - REMOVED
 
 	// Managers for proper synchronization
 	stateManager *ServerStateManager
@@ -408,18 +409,18 @@ func (a *App) onReady() {
 	// --- Status-Based Server Menus ---
 	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "Connected and ready servers")
 	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "Servers that are enabled but not connected")
+	a.stoppedServersMenu = systray.AddMenuItem("⏹️ Stopped Servers", "Servers that have been stopped")
 	a.disabledServersMenu = systray.AddMenuItem("⏸️ Disabled Servers", "Servers that are disabled")
 	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "Servers in security quarantine")
 	systray.AddSeparator()
 
 	// --- Legacy and Group Menus ---
-	a.upstreamServersMenu = systray.AddMenuItem("📋 All Servers (Legacy)", "View all servers in one list")
 	a.groupedServersMenu = systray.AddMenuItem("🏷️ Grouped Servers", "View servers organized by groups")
-	a.groupManagementMenu = systray.AddMenuItem("📝 Server Groups", "Create and manage custom server groups")
+	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "Open web interface to manage server groups")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.disabledServersMenu, a.quarantineMenu, a.upstreamServersMenu, a.logger)
+	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.stoppedServersMenu, a.disabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
 	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar())
 
@@ -434,6 +435,10 @@ func (a *App) onReady() {
 	// --- Set Server Groups Reference ---
 	// Allow MenuManager to access server groups for color display
 	a.menuManager.SetServerGroups(&a.serverGroups)
+
+	// --- Load Groups for Server Menus ---
+	a.logger.Info("TRAY INIT: Loading groups for server assignment menus")
+	a.loadGroupsForServerMenus()
 
 	// --- Initialize Server Count Display ---
 	// Load initial server count from config
@@ -455,6 +460,7 @@ func (a *App) onReady() {
 	}
 
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
+	forceQuitItem := systray.AddMenuItem("🚨 Force Quit", "Force quit if application is hanging")
 
 	// --- Set Initial State & Start Sync ---
 	a.updateStatus()
@@ -484,23 +490,45 @@ func (a *App) onReady() {
 			case <-a.groupedServersMenu.ClickedCh:
 				a.handleGroupedServers()
 			case <-a.groupManagementMenu.ClickedCh:
-				a.handleGroupManagement()
+				a.openGroupManagementWeb()
 			case <-a.connectedServersMenu.ClickedCh:
 				a.handleServerMenuClick("connected")
 			case <-a.disconnectedServersMenu.ClickedCh:
 				a.handleServerMenuClick("disconnected")
+			case <-a.stoppedServersMenu.ClickedCh:
+				a.handleServerMenuClick("stopped")
 			case <-a.disabledServersMenu.ClickedCh:
 				a.handleServerMenuClick("disabled")
 			case <-a.quarantineMenu.ClickedCh:
 				a.handleServerMenuClick("quarantine")
-			case <-a.upstreamServersMenu.ClickedCh:
-				a.handleServerMenuClick("upstream")
 			case <-quitItem.ClickedCh:
 				a.logger.Info("Quit item clicked, shutting down")
-				if a.shutdown != nil {
-					a.shutdown()
-				}
+				
+				// Force quit with timeout to prevent hanging
+				go func() {
+					// Set a maximum time for graceful shutdown
+					timeout := time.After(3 * time.Second)
+					done := make(chan bool, 1)
+					
+					go func() {
+						if a.shutdown != nil {
+							a.shutdown()
+						}
+						done <- true
+					}()
+					
+					select {
+					case <-done:
+						a.logger.Info("Graceful shutdown completed")
+					case <-timeout:
+						a.logger.Warn("Graceful shutdown timed out, forcing exit")
+						os.Exit(0) // Force exit if graceful shutdown hangs
+					}
+				}()
 				return
+			case <-forceQuitItem.ClickedCh:
+				a.logger.Warn("Force quit requested - exiting immediately")
+				os.Exit(0)
 			case <-a.ctx.Done():
 				return
 			}
@@ -808,82 +836,99 @@ func (a *App) handleStartStop() {
 	if a.server.IsRunning() {
 		a.logger.Info("Stopping server from tray")
 
-		// Immediately update UI to show stopping state
+		// Save server states before stopping
+		if err := a.saveServerStatesForStop(); err != nil {
+			a.logger.Error("Failed to save server states", zap.Error(err))
+		}
+
+		// Immediately update UI to show stopping state and disable button
 		if a.statusItem != nil {
 			a.statusItem.SetTitle("Status: Stopping...")
 		}
 		if a.startStopItem != nil {
 			a.startStopItem.SetTitle("Stopping...")
+			a.startStopItem.Disable() // Prevent multiple clicks
 		}
 
-		// Stop the server
-		if err := a.server.StopServer(); err != nil {
-			a.logger.Error("Failed to stop server", zap.Error(err))
-			// Restore UI state on error
-			a.updateStatus()
-			return
-		}
-
-		// Wait for server to fully stop with timeout
+		// Stop the server with timeout protection
 		go func() {
-			timeout := time.After(10 * time.Second)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-timeout:
-					a.logger.Warn("Timeout waiting for server to stop, updating status anyway")
-					a.updateStatus()
-					return
-				case <-ticker.C:
-					if !a.server.IsRunning() {
-						a.logger.Info("Server stopped, updating UI")
-						a.updateStatus()
-						return
+			done := make(chan bool, 1)
+			
+			// Run stop operation in separate goroutine
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						a.logger.Error("Panic during server stop", zap.Any("panic", r))
 					}
+					done <- true
+				}()
+				
+				if err := a.server.StopServer(); err != nil {
+					a.logger.Error("Failed to stop server", zap.Error(err))
 				}
+			}()
+
+			// Wait for completion or timeout
+			select {
+			case <-done:
+				a.logger.Info("Server stop operation completed")
+			case <-time.After(5 * time.Second):
+				a.logger.Warn("Server stop operation timed out after 5 seconds")
 			}
+
+			// Always restore UI state
+			if a.startStopItem != nil {
+				a.startStopItem.Enable()
+			}
+			a.updateStatus()
 		}()
 	} else {
 		a.logger.Info("Starting server from tray")
 
-		// Immediately update UI to show starting state
+		// Immediately update UI to show starting state and disable button
 		if a.statusItem != nil {
 			a.statusItem.SetTitle("Status: Starting...")
 		}
 		if a.startStopItem != nil {
 			a.startStopItem.SetTitle("Starting...")
+			a.startStopItem.Disable() // Prevent multiple clicks
 		}
 
-		// Start the server
+		// Start the server with timeout protection
 		go func() {
-			if err := a.server.StartServer(a.ctx); err != nil {
-				a.logger.Error("Failed to start server", zap.Error(err))
-				// Restore UI state on error
-				a.updateStatus()
-				return
-			}
-
-			// Wait for server to fully start with timeout
-			timeout := time.After(10 * time.Second)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-timeout:
-					a.logger.Warn("Timeout waiting for server to start, updating status anyway")
-					a.updateStatus()
-					return
-				case <-ticker.C:
-					if a.server.IsRunning() {
-						a.logger.Info("Server started, updating UI")
-						a.updateStatus()
-						return
+			done := make(chan bool, 1)
+			
+			// Run start operation in separate goroutine
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						a.logger.Error("Panic during server start", zap.Any("panic", r))
 					}
+					done <- true
+				}()
+				
+				if err := a.server.StartServer(a.ctx); err != nil {
+					a.logger.Error("Failed to start server", zap.Error(err))
 				}
+			}()
+
+			// Wait for completion or timeout
+			select {
+			case <-done:
+				a.logger.Info("Server start operation completed")
+				// Restore server states after successful start
+				if err := a.restoreServerStatesAfterStart(); err != nil {
+					a.logger.Error("Failed to restore server states", zap.Error(err))
+				}
+			case <-time.After(10 * time.Second):
+				a.logger.Warn("Server start operation timed out after 10 seconds")
 			}
+
+			// Always restore UI state
+			if a.startStopItem != nil {
+				a.startStopItem.Enable()
+			}
+			a.updateStatus()
 		}()
 	}
 }
@@ -1278,6 +1323,12 @@ func (a *App) openFile(path, fileType string) {
 	}
 }
 
+// openGroupManagementWeb opens the web interface for group management
+func (a *App) openGroupManagementWeb() {
+	url := "http://localhost:8080/groups"
+	a.openFile(url, "group management web interface")
+}
+
 // refreshMenusDelayed refreshes menus after a delay using the synchronization manager
 func (a *App) refreshMenusDelayed() {
 	if a.syncManager != nil {
@@ -1297,6 +1348,19 @@ func (a *App) refreshMenusImmediate() {
 // handleServerMenuClick handles lazy loading when server menus are clicked
 func (a *App) handleServerMenuClick(menuType string) {
 	a.logger.Info("Server menu clicked, loading data", zap.String("menu_type", menuType))
+	
+	// Mark menu as open to prevent updates while user is interacting
+	if a.menuManager != nil {
+		a.menuManager.SetMenuOpen()
+		
+		// Set a timer to mark menu as closed after user interaction timeout
+		go func() {
+			time.Sleep(30 * time.Second)
+			if a.menuManager != nil {
+				a.menuManager.SetMenuClosed()
+			}
+		}()
+	}
 	
 	// Notify sync manager of user activity for adaptive frequency
 	if a.syncManager != nil {
@@ -1358,20 +1422,6 @@ func (a *App) handleServerAction(serverName, action string) {
 	case "open_repo":
 		err = a.openServerRepo(serverName)
 
-	case "diagnose":
-		// Run diagnostic analysis for the server
-		go func() {
-			a.logger.Info("Running diagnostic analysis", zap.String("server", serverName))
-			report, err := a.diagnosticAgent.DiagnoseServer(serverName)
-			if err != nil {
-				a.logger.Error("Diagnostic analysis failed", zap.String("server", serverName), zap.Error(err))
-				return
-			}
-			
-			// Display the diagnostic report
-			a.diagnosticAgent.ShowDiagnosticReport(report)
-		}()
-		
 	case "configure":
 		err = a.handleServerConfiguration(serverName)
 
@@ -1555,16 +1605,63 @@ func (a *App) handleGroupedServers() {
 	// Clear existing group server menu items if they exist
 	if a.groupedServersMenu != nil {
 		// Remove all submenu items
-		for _, item := range a.groupServerMenus {
-			if item != nil {
-				item.Hide()
-			}
-		}
-		a.groupServerMenus = make(map[string]*systray.MenuItem)
+		a.groupedServersMenu.Hide()
+		a.groupedServersMenu.Show()
 	}
 
-	// Create server lists organized by groups
-	a.refreshGroupedServersMenu()
+	// Fetch groups from the web interface
+	groups, err := a.fetchGroupsFromAPI()
+	if err != nil {
+		a.logger.Error("Failed to fetch groups", zap.Error(err))
+		// Show error item
+		errorItem := a.groupedServersMenu.AddSubMenuItem("❌ Failed to load groups", "Error loading groups from web interface")
+		errorItem.Disable()
+		return
+	}
+
+	// Fetch server assignments
+	assignments, err := a.fetchServerAssignments()
+	if err != nil {
+		a.logger.Error("Failed to fetch server assignments", zap.Error(err))
+		assignments = make(map[string]string) // Empty assignments on error
+	}
+
+	// Create menu items for each group
+	for _, group := range groups {
+		groupName := group["name"].(string)
+		
+		// Get servers assigned to this group
+		groupServers := make([]string, 0)
+		for serverName, assignedGroup := range assignments {
+			if assignedGroup == groupName {
+				groupServers = append(groupServers, serverName)
+			}
+		}
+
+		// Create group menu item
+		groupItem := a.groupedServersMenu.AddSubMenuItem(
+			fmt.Sprintf("🏷️ %s (%d)", groupName, len(groupServers)), 
+			fmt.Sprintf("Servers in group '%s'", groupName))
+
+		// Add servers in this group
+		if len(groupServers) == 0 {
+			emptyItem := groupItem.AddSubMenuItem("📭 No servers assigned", "Use the 'groups' MCP tool to assign servers")
+			emptyItem.Disable()
+		} else {
+			for _, serverName := range groupServers {
+				serverItem := groupItem.AddSubMenuItem(
+					fmt.Sprintf("📋 %s", serverName),
+					fmt.Sprintf("Server: %s", serverName))
+				
+				// Add server actions
+				go func(sName string, item *systray.MenuItem) {
+					for range item.ClickedCh {
+						a.handleServerAction(sName, "view")
+					}
+				}(serverName, serverItem)
+			}
+		}
+	}
 }
 
 // handleGroupManagement handles clicks on the group management menu
@@ -1588,13 +1685,22 @@ func (a *App) handleGroupManagement() {
 		a.groupMenuItems = make(map[string]*systray.MenuItem)
 	}
 
-	// Add group management options
+	// Add group management options and show existing groups
+	a.logger.Info("TRAY INIT: About to add group management items")
 	createGroupItem := a.groupManagementMenu.AddSubMenuItem("➕ Create New Group", "Create a new server group with color assignment")
 	manageGroupsItem := a.groupManagementMenu.AddSubMenuItem("⚙️ Manage Groups", "Edit existing server groups")
 	a.groupManagementMenu.AddSeparator()
 
-	// Show existing groups
+	// Show existing groups from API
+	a.logger.Info("TRAY INIT: About to call refreshGroupsMenu")
 	a.refreshGroupsMenu()
+	
+	// Also schedule a delayed refresh in case server wasn't ready initially
+	go func() {
+		time.Sleep(3 * time.Second)
+		a.logger.Info("TRAY INIT: Delayed refreshGroupsMenu call")
+		a.refreshGroupsMenu()
+	}()
 
 	// Handle clicks on group management items
 	go func() {
@@ -1611,38 +1717,91 @@ func (a *App) handleGroupManagement() {
 	}()
 }
 
-// handleCreateGroup handles creating a new server group
-func (a *App) handleCreateGroup() {
-	a.logger.Info("Creating new server group")
-
-	// In a real implementation, this would open a dialog or use a simple input system
-	// For now, we'll create a sample group to demonstrate the functionality
-	groupName := fmt.Sprintf("Group-%d", len(a.serverGroups)+1)
-
-	// Select a color from the predefined options
-	colorIndex := len(a.serverGroups) % len(GroupColors)
-	selectedColor := GroupColors[colorIndex]
-
-	// Create the new group
-	newGroup := &ServerGroup{
-		Name:        groupName,
-		Color:       selectedColor.Code,
-		ColorEmoji:  selectedColor.Emoji,
-		Description: fmt.Sprintf("Custom group for organizing servers - %s", selectedColor.Name),
-		ServerNames: []string{}, // Start with empty group
-		Enabled:     true,
+// saveGroupsToConfig saves the current groups to the configuration file
+func (a *App) saveGroupsToConfig() error {
+	if a.server == nil {
+		return fmt.Errorf("server interface not available")
 	}
 
-	// Add to groups map
-	a.serverGroups[groupName] = newGroup
+	configPath := a.server.GetConfigPath()
+	if configPath == "" {
+		return fmt.Errorf("config path not available")
+	}
 
-	// Refresh the groups menu to show the new group
-	a.refreshGroupsMenu()
+	// Read the current config file as JSON
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
 
-	a.logger.Info("Created new server group",
-		zap.String("group_name", groupName),
-		zap.String("color", selectedColor.Name),
-		zap.String("emoji", selectedColor.Emoji))
+	var configData map[string]interface{}
+	if err := json.Unmarshal(data, &configData); err != nil {
+		return fmt.Errorf("failed to parse config JSON: %w", err)
+	}
+
+	// Convert serverGroups to config format
+	groups := make([]map[string]interface{}, 0, len(a.serverGroups))
+	for _, group := range a.serverGroups {
+		if group.Enabled {
+			groups = append(groups, map[string]interface{}{
+				"name":        group.Name,
+				"description": group.Description,
+				"color":       group.Color,
+				"enabled":     group.Enabled,
+			})
+		}
+	}
+
+	// Update the groups in the config
+	configData["groups"] = groups
+
+	// Update server group assignments
+	if servers, ok := configData["mcpServers"].([]interface{}); ok {
+		for _, serverInterface := range servers {
+			if server, ok := serverInterface.(map[string]interface{}); ok {
+				if serverName, ok := server["name"].(string); ok {
+					// Find which group this server belongs to
+					server["group_name"] = "" // Reset first
+					for groupName, group := range a.serverGroups {
+						for _, assignedServerName := range group.ServerNames {
+							if assignedServerName == serverName {
+								server["group_name"] = groupName
+								break
+							}
+						}
+						if server["group_name"] != "" {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Write the updated config back to file
+	updatedData, err := json.MarshalIndent(configData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config JSON: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, updatedData, 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	a.logger.Info("Groups saved to configuration", 
+		zap.Int("group_count", len(groups)),
+		zap.String("config_path", configPath))
+
+	return nil
+}
+
+// handleCreateGroup handles creating a new server group
+func (a *App) handleCreateGroup() {
+	a.logger.Info("Opening group creation interface")
+	
+	// Open the web interface for group management
+	url := "http://localhost:8080/groups"
+	a.openFile(url, "group management web interface")
 }
 
 // handleManageGroups handles managing existing groups
@@ -1667,6 +1826,8 @@ func (a *App) handleManageGroups() {
 
 // refreshGroupsMenu refreshes the groups submenu with current groups
 func (a *App) refreshGroupsMenu() {
+	a.logger.Info("refreshGroupsMenu called - START", zap.Int("local_groups_count", len(a.serverGroups)))
+	
 	// Clear existing group menu items
 	for _, item := range a.groupMenuItems {
 		if item != nil {
@@ -1675,9 +1836,62 @@ func (a *App) refreshGroupsMenu() {
 	}
 	a.groupMenuItems = make(map[string]*systray.MenuItem)
 
+	// If no local groups exist, try to sync with config groups first, then API groups
 	if len(a.serverGroups) == 0 {
-		// Show "no groups" message
-		noGroupsItem := a.groupManagementMenu.AddSubMenuItem("📋 No groups created", "Create your first server group")
+		a.logger.Debug("No local groups found, attempting to sync with config and API")
+		
+		// Check if server is running first
+		if !a.server.IsRunning() {
+			a.logger.Debug("Server not running yet, showing placeholder")
+			noGroupsItem := a.groupManagementMenu.AddSubMenuItem("⏳ Loading groups...", "Server is starting up")
+			noGroupsItem.Disable()
+			a.groupMenuItems["loading"] = noGroupsItem
+			return
+		}
+		
+		// Try to get groups from config first, then fall back to API
+		groupsLoaded := false
+		
+		// TODO: Load from config when available
+		// For now, fetch from API as fallback
+		if apiGroups, err := a.fetchGroupsFromAPI(); err == nil && len(apiGroups) > 0 {
+			a.logger.Debug("Successfully fetched API groups, populating local groups", zap.Int("count", len(apiGroups)))
+			for _, apiGroup := range apiGroups {
+				if name, ok := apiGroup["name"].(string); ok {
+					color, _ := apiGroup["color"].(string)
+					if color == "" { color = "#007bff" }
+					
+					// Create local ServerGroup from API group
+					a.serverGroups[name] = &ServerGroup{
+						Name: name,
+						Description: "Synced from API",
+						Color: color,
+						ColorEmoji: a.getColorEmojiForHex(color),
+						ServerNames: make([]string, 0),
+						Enabled: true,
+					}
+					a.logger.Debug("Added API group to local groups", zap.String("name", name), zap.String("color", color))
+				}
+			}
+			groupsLoaded = true
+			// Update MenuManager with new groups
+			if a.menuManager != nil {
+				a.menuManager.SetServerGroups(&a.serverGroups)
+				// Trigger a refresh of all server menus to show the groups
+				if a.syncManager != nil {
+					a.syncManager.SyncDelayed()
+				}
+			}
+		}
+		
+		if !groupsLoaded {
+			a.logger.Error("Failed to load groups from config or API")
+		}
+	}
+
+	if len(a.serverGroups) == 0 {
+		// Show "no groups" message if API fetch failed
+		noGroupsItem := a.groupManagementMenu.AddSubMenuItem("📋 No groups available", "Groups will appear here when server is ready")
 		noGroupsItem.Disable()
 		a.groupMenuItems["no_groups"] = noGroupsItem
 		return
@@ -2138,6 +2352,11 @@ func (a *App) handleRenameGroup(oldName, newName string) {
 	a.serverGroups[newName] = group
 	delete(a.serverGroups, oldName)
 
+	// Save groups to configuration file
+	if err := a.saveGroupsToConfig(); err != nil {
+		a.logger.Error("Failed to save groups to configuration", zap.Error(err))
+	}
+
 	a.logger.Info("Group renamed successfully",
 		zap.String("old_name", oldName),
 		zap.String("new_name", newName))
@@ -2165,6 +2384,11 @@ func (a *App) handleChangeGroupColor(groupName string, newColor struct{ Emoji, N
 	group.ColorEmoji = newColor.Emoji
 	group.Description = fmt.Sprintf("Custom group for organizing servers - %s", newColor.Name)
 
+	// Save groups to configuration file
+	if err := a.saveGroupsToConfig(); err != nil {
+		a.logger.Error("Failed to save groups to configuration", zap.Error(err))
+	}
+
 	a.logger.Info("Group color changed successfully",
 		zap.String("group", groupName),
 		zap.String("new_color", newColor.Name),
@@ -2189,6 +2413,11 @@ func (a *App) handleDeleteGroup(groupName string) {
 		delete(a.groupMenuItems, groupName)
 	}
 
+	// Save groups to configuration file
+	if err := a.saveGroupsToConfig(); err != nil {
+		a.logger.Error("Failed to save groups to configuration", zap.Error(err))
+	}
+
 	a.logger.Info("Group deleted successfully", zap.String("group", groupName))
 
 	// Refresh the menu
@@ -2210,6 +2439,11 @@ func (a *App) handleAssignServerToGroup(serverName, groupName string) error {
 
 	// Add server to the target group
 	group.ServerNames = append(group.ServerNames, serverName)
+
+	// Save groups to configuration file
+	if err := a.saveGroupsToConfig(); err != nil {
+		a.logger.Error("Failed to save groups to configuration", zap.Error(err))
+	}
 
 	a.logger.Info("Server assigned to group successfully",
 		zap.String("server", serverName),
@@ -2242,6 +2476,11 @@ func (a *App) handleRemoveServerFromGroup(serverName, groupName string) error {
 			group.ServerNames = append(group.ServerNames[:i], group.ServerNames[i+1:]...)
 			break
 		}
+	}
+
+	// Save groups to configuration file
+	if err := a.saveGroupsToConfig(); err != nil {
+		a.logger.Error("Failed to save groups to configuration", zap.Error(err))
 	}
 
 	a.logger.Info("Server removed from group successfully",
@@ -2372,4 +2611,288 @@ func (a *App) handleServerConfiguration(serverName string) error {
 
 	// Show the dialog
 	return dialog.Show(a.ctx, onSave, onCancel)
+}
+// fetchGroupsFromAPI fetches groups from the web interface API
+func (a *App) fetchGroupsFromAPI() ([]map[string]interface{}, error) {
+	listenAddr := a.server.GetListenAddress()
+	if listenAddr == "" {
+		return nil, fmt.Errorf("server listen address not available")
+	}
+	
+	// Ensure we have a proper URL
+	if !strings.HasPrefix(listenAddr, "http") {
+		listenAddr = "http://localhost" + listenAddr
+	}
+	
+	url := listenAddr + "/api/groups"
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch groups from %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	success, ok := response["success"].(bool)
+	if !ok || !success {
+		return nil, fmt.Errorf("API returned error: %v", response["error"])
+	}
+
+	groups, ok := response["groups"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid groups data in response")
+	}
+
+	result := make([]map[string]interface{}, len(groups))
+	for i, group := range groups {
+		if groupMap, ok := group.(map[string]interface{}); ok {
+			result[i] = groupMap
+		}
+	}
+
+	return result, nil
+}
+
+// loadGroupsForServerMenus loads groups from API for server assignment menus
+func (a *App) loadGroupsForServerMenus() {
+	a.logger.Info("loadGroupsForServerMenus called - START")
+	
+	// Check if server is running first
+	if !a.server.IsRunning() {
+		a.logger.Info("Server not running yet, scheduling delayed group load")
+		go func() {
+			time.Sleep(5 * time.Second)
+			a.loadGroupsForServerMenus()
+		}()
+		return
+	}
+	
+	// Fetch API groups and populate local groups
+	if apiGroups, err := a.fetchGroupsFromAPI(); err == nil && len(apiGroups) > 0 {
+		a.logger.Info("Successfully fetched API groups for server menus", zap.Int("count", len(apiGroups)))
+		for _, apiGroup := range apiGroups {
+			if name, ok := apiGroup["name"].(string); ok {
+				color, _ := apiGroup["color"].(string)
+				if color == "" { color = "#007bff" }
+				
+				// Create local ServerGroup from API group
+				a.serverGroups[name] = &ServerGroup{
+					Name: name,
+					Description: "Available for server assignment",
+					Color: color,
+					ColorEmoji: a.getColorEmojiForHex(color),
+					ServerNames: make([]string, 0),
+					Enabled: true,
+				}
+				a.logger.Info("Added API group for server assignment", zap.String("name", name), zap.String("color", color))
+			}
+		}
+		
+		// Update MenuManager with new groups
+		if a.menuManager != nil {
+			a.menuManager.SetServerGroups(&a.serverGroups)
+			a.logger.Info("Updated MenuManager with groups", zap.Int("group_count", len(a.serverGroups)))
+			
+			// Trigger a refresh of all server menus to show the groups
+			if a.syncManager != nil {
+				a.syncManager.SyncDelayed()
+				a.logger.Info("Triggered delayed sync to refresh server menus with groups")
+			}
+		}
+	} else {
+		a.logger.Error("Failed to fetch API groups for server menus", zap.Error(err))
+	}
+}
+
+func (a *App) syncWithAPIGroups() {
+	apiGroups, err := a.fetchGroupsFromAPI()
+	if err != nil {
+		a.logger.Error("Failed to sync with API groups", zap.Error(err))
+		return
+	}
+
+	// Convert API groups to tray groups
+	for _, apiGroup := range apiGroups {
+		name, ok := apiGroup["name"].(string)
+		if !ok {
+			continue
+		}
+		
+		color, ok := apiGroup["color"].(string)
+		if !ok {
+			color = "#007bff" // Default color
+		}
+
+		// Create tray group from API group
+		newGroup := &ServerGroup{
+			Name:        name,
+			Description: fmt.Sprintf("Synced from API: %s", name),
+			Color:       color,
+			ColorEmoji:  a.getColorEmoji(color),
+			ServerNames: make([]string, 0),
+			Enabled:     true,
+		}
+
+		a.serverGroups[name] = newGroup
+	}
+
+	a.logger.Info("Synchronized with API groups", zap.Int("count", len(apiGroups)))
+}
+
+// getColorEmoji returns an emoji for a given hex color
+func (a *App) getColorEmoji(hexColor string) string {
+	// Map common hex colors to emojis
+	colorMap := map[string]string{
+		"#ff9900": "🟠", // AWS Orange
+		"#28a745": "🟢", // Green
+		"#dc3545": "🔴", // Red
+		"#007bff": "🔵", // Blue
+		"#6f42c1": "🟣", // Purple
+		"#fd7e14": "🟠", // Orange
+		"#20c997": "🟢", // Teal (green)
+		"#e83e8c": "🟣", // Pink (purple)
+		"#6c757d": "⚫", // Gray (black)
+		"#343a40": "⚫", // Dark
+	}
+
+	// Convert to lowercase for comparison
+	hexColor = strings.ToLower(hexColor)
+	
+	if emoji, exists := colorMap[hexColor]; exists {
+		return emoji
+	}
+	
+	// Default to blue circle for unknown colors
+	return "🔵"
+}
+
+// fetchServerAssignments fetches server-to-group assignments
+func (a *App) fetchServerAssignments() (map[string]string, error) {
+	// For now, return empty assignments since we don't have persistent storage yet
+	// TODO: Implement actual assignment fetching from the groups API
+	return make(map[string]string), nil
+}
+
+// assignServerToGroup assigns a server to a group
+func (a *App) assignServerToGroup(serverName, groupName string) {
+	a.logger.Info("Assigning server to group", zap.String("server", serverName), zap.String("group", groupName))
+	
+	// TODO: Implement actual server-to-group assignment
+	// For now, just log the action
+	
+	a.logger.Info("Server assignment completed", zap.String("server", serverName), zap.String("group", groupName))
+}
+
+// ServerState represents the state of a server before stop
+type ServerState struct {
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	Connected bool   `json:"connected"`
+}
+
+// saveServerStatesForStop saves current server states before stopping
+func (a *App) saveServerStatesForStop() error {
+	if a.stateManager == nil {
+		return nil
+	}
+
+	// Get all current servers
+	servers, err := a.stateManager.GetAllServers()
+	if err != nil {
+		return err
+	}
+
+	// Create state snapshot
+	states := make([]ServerState, 0, len(servers))
+	for _, server := range servers {
+		name, _ := server["name"].(string)
+		enabled, _ := server["enabled"].(bool)
+		connected, _ := server["connected"].(bool)
+
+		states = append(states, ServerState{
+			Name:      name,
+			Enabled:   enabled,
+			Connected: connected,
+		})
+	}
+
+	// Save to temporary file
+	stateFile := filepath.Join(os.TempDir(), "mcpproxy_server_states.json")
+	data, err := json.Marshal(states)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(stateFile, data, 0644); err != nil {
+		return err
+	}
+
+	a.logger.Info("Server states saved for stop operation", 
+		zap.String("file", stateFile), 
+		zap.Int("servers", len(states)))
+
+	return nil
+}
+
+// restoreServerStatesAfterStart restores server states after starting
+func (a *App) restoreServerStatesAfterStart() error {
+	stateFile := filepath.Join(os.TempDir(), "mcpproxy_server_states.json")
+	
+	// Check if state file exists
+	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+		a.logger.Debug("No server states file found, skipping restoration")
+		return nil
+	}
+
+	// Read saved states
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return err
+	}
+
+	var states []ServerState
+	if err := json.Unmarshal(data, &states); err != nil {
+		return err
+	}
+
+	a.logger.Info("Restoring server states after start", zap.Int("servers", len(states)))
+
+	// Wait a moment for server to be fully ready
+	go func() {
+		// Give the server time to initialize
+		time.Sleep(3 * time.Second)
+
+		// Trigger a sync to restore the UI to the saved states
+		if a.syncManager != nil {
+			if err := a.syncManager.SyncNow(); err != nil {
+				a.logger.Error("Failed to sync after state restoration", zap.Error(err))
+			} else {
+				a.logger.Info("Server states restored successfully")
+			}
+		}
+
+		// Clean up the state file
+		if err := os.Remove(stateFile); err != nil {
+			a.logger.Warn("Failed to remove state file", zap.Error(err))
+		}
+	}()
+
+	return nil
+}
+
+// getColorEmojiForHex returns emoji for hex color
+func (a *App) getColorEmojiForHex(hex string) string {
+	switch strings.ToLower(hex) {
+	case "#ff9900": return "🟠" // AWS Orange
+	case "#28a745": return "🟢" // Green  
+	case "#dc3545": return "🔴" // Red
+	default: return "🔵" // Blue
+	}
 }
