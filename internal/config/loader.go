@@ -238,7 +238,93 @@ func SaveToFile(cfg *Config, path string) error {
 	return SaveConfig(cfg, path)
 }
 
-// SaveConfig saves configuration to file
+// createConfigBackup creates a timestamped backup of existing config file
+func createConfigBackup(path string) error {
+	// Check if original config file exists
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil // No backup needed if file doesn't exist
+	}
+
+	// Create backup filename with timestamp
+	timestamp := time.Now().Format("20060102-150405")
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	backupPath := fmt.Sprintf("%s.backup.%s%s", base, timestamp, ext)
+
+	// Copy original file to backup
+	originalData, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read original config for backup: %w", err)
+	}
+
+	if err := os.WriteFile(backupPath, originalData, 0600); err != nil {
+		return fmt.Errorf("failed to create config backup: %w", err)
+	}
+
+	fmt.Printf("[INFO] Created config backup: %s\n", backupPath)
+
+	// Clean up old backups (keep only last 10)
+	cleanupOldBackups(path)
+
+	return nil
+}
+
+// cleanupOldBackups removes old backup files, keeping only the most recent ones
+func cleanupOldBackups(configPath string) {
+	dir := filepath.Dir(configPath)
+	ext := filepath.Ext(configPath)
+	base := strings.TrimSuffix(filepath.Base(configPath), ext)
+
+	// Find all backup files for this config
+	pattern := fmt.Sprintf("%s.backup.*%s", base, ext)
+	matches, err := filepath.Glob(filepath.Join(dir, pattern))
+	if err != nil {
+		fmt.Printf("[WARN] Failed to find backup files for cleanup: %v\n", err)
+		return
+	}
+
+	// Keep only the 10 most recent backups
+	const maxBackups = 10
+	if len(matches) <= maxBackups {
+		return // Nothing to clean up
+	}
+
+	// Sort by modification time (newest first)
+	type backupInfo struct {
+		path    string
+		modTime time.Time
+	}
+
+	var backups []backupInfo
+	for _, match := range matches {
+		if info, err := os.Stat(match); err == nil {
+			backups = append(backups, backupInfo{
+				path:    match,
+				modTime: info.ModTime(),
+			})
+		}
+	}
+
+	// Sort by modification time (newest first)
+	for i := 0; i < len(backups)-1; i++ {
+		for j := i + 1; j < len(backups); j++ {
+			if backups[i].modTime.Before(backups[j].modTime) {
+				backups[i], backups[j] = backups[j], backups[i]
+			}
+		}
+	}
+
+	// Remove old backups
+	for i := maxBackups; i < len(backups); i++ {
+		if err := os.Remove(backups[i].path); err != nil {
+			fmt.Printf("[WARN] Failed to remove old backup %s: %v\n", backups[i].path, err)
+		} else {
+			fmt.Printf("[INFO] Removed old config backup: %s\n", backups[i].path)
+		}
+	}
+}
+
+// SaveConfig saves configuration to file with automatic backup
 func SaveConfig(cfg *Config, path string) error {
 	fmt.Printf("[DEBUG] SaveConfig called with path: %s\n", path)
 	fmt.Printf("[DEBUG] SaveConfig - server count: %d\n", len(cfg.Servers))
@@ -247,6 +333,12 @@ func SaveConfig(cfg *Config, path string) error {
 	for _, server := range cfg.Servers {
 		fmt.Printf("[DEBUG] SaveConfig - server %s: enabled=%v, quarantined=%v\n",
 			server.Name, server.Enabled, server.Quarantined)
+	}
+
+	// Create backup of existing config file
+	if err := createConfigBackup(path); err != nil {
+		fmt.Printf("[WARN] Failed to create config backup: %v\n", err)
+		// Continue with save operation even if backup fails
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")

@@ -43,6 +43,7 @@ var iconData []byte
 
 // ServerGroup represents a custom group of servers with color coding
 type ServerGroup struct {
+	ID          int      `json:"id"`
 	Name        string   `json:"name"`
 	Color       string   `json:"color"`       // Color emoji or hex code
 	ColorEmoji  string   `json:"color_emoji"` // Color emoji for display
@@ -171,10 +172,8 @@ type App struct {
 
 	// Group management fields
 	groupManagementMenu *systray.MenuItem            // Group management menu
-	groupedServersMenu  *systray.MenuItem            // Menu showing servers organized by groups
 	serverGroups        map[string]*ServerGroup      // Custom server groups
 	groupMenuItems      map[string]*systray.MenuItem // Group menu items
-	groupServerMenus    map[string]*systray.MenuItem // Group-based server list menus
 }
 
 // New creates a new tray application
@@ -206,9 +205,46 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 	// Initialize group management
 	app.serverGroups = make(map[string]*ServerGroup)
 	app.groupMenuItems = make(map[string]*systray.MenuItem)
-	app.groupServerMenus = make(map[string]*systray.MenuItem)
 
 	return app
+}
+
+// Helper functions for group ID management
+func (a *App) getGroupByID(id int) *ServerGroup {
+	for _, group := range a.serverGroups {
+		if group.ID == id {
+			return group
+		}
+	}
+	return nil
+}
+
+func (a *App) getGroupByName(name string) *ServerGroup {
+	for _, group := range a.serverGroups {
+		if group.Name == name {
+			return group
+		}
+	}
+	return nil
+}
+
+func (a *App) getNextGroupID() int {
+	maxID := 0
+	for _, group := range a.serverGroups {
+		if group.ID > maxID {
+			maxID = group.ID
+		}
+	}
+	return maxID + 1
+}
+
+func (a *App) getGroupKeyByID(id int) string {
+	for key, group := range a.serverGroups {
+		if group.ID == id {
+			return key
+		}
+	}
+	return ""
 }
 
 // Run starts the system tray application
@@ -415,9 +451,8 @@ func (a *App) onReady() {
 	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "Servers in security quarantine")
 	systray.AddSeparator()
 
-	// --- Legacy and Group Menus ---
-	a.groupedServersMenu = systray.AddMenuItem("🏷️ Grouped Servers", "View servers organized by groups")
-	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "Open web interface to manage server groups")
+	// --- Group Management Menu ---
+	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "View and manage server groups")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
@@ -488,8 +523,6 @@ func (a *App) onReady() {
 				a.openLogsDir()
 			case <-githubItem.ClickedCh:
 				a.openGitHubRepository()
-			case <-a.groupedServersMenu.ClickedCh:
-				a.handleGroupedServers()
 			case <-a.groupManagementMenu.ClickedCh:
 				a.openGroupManagementWeb()
 			case <-a.connectedServersMenu.ClickedCh:
@@ -1594,76 +1627,6 @@ func (a *App) handleAutostartToggle() {
 	}
 }
 
-// handleGroupedServers handles clicks on the grouped servers menu
-func (a *App) handleGroupedServers() {
-	a.logger.Info("Opening grouped servers view")
-
-	// Notify sync manager of user activity for adaptive frequency
-	if a.syncManager != nil {
-		a.syncManager.NotifyUserActivity()
-	}
-
-	// Clear existing group server menu items if they exist
-	if a.groupedServersMenu != nil {
-		// Remove all submenu items
-		a.groupedServersMenu.Hide()
-		a.groupedServersMenu.Show()
-	}
-
-	// Fetch groups from the web interface
-	groups, err := a.fetchGroupsFromAPI()
-	if err != nil {
-		a.logger.Error("Failed to fetch groups", zap.Error(err))
-		// Show error item
-		errorItem := a.groupedServersMenu.AddSubMenuItem("❌ Failed to load groups", "Error loading groups from web interface")
-		errorItem.Disable()
-		return
-	}
-
-	// Fetch server assignments
-	assignments, err := a.fetchServerAssignments()
-	if err != nil {
-		a.logger.Error("Failed to fetch server assignments", zap.Error(err))
-		assignments = make(map[string]string) // Empty assignments on error
-	}
-
-	// Create menu items for each group
-	for _, group := range groups {
-		groupName := group["name"].(string)
-		
-		// Get servers assigned to this group
-		groupServers := make([]string, 0)
-		for serverName, assignedGroup := range assignments {
-			if assignedGroup == groupName {
-				groupServers = append(groupServers, serverName)
-			}
-		}
-
-		// Create group menu item
-		groupItem := a.groupedServersMenu.AddSubMenuItem(
-			fmt.Sprintf("🏷️ %s (%d)", groupName, len(groupServers)), 
-			fmt.Sprintf("Servers in group '%s'", groupName))
-
-		// Add servers in this group
-		if len(groupServers) == 0 {
-			emptyItem := groupItem.AddSubMenuItem("📭 No servers assigned", "Use the 'groups' MCP tool to assign servers")
-			emptyItem.Disable()
-		} else {
-			for _, serverName := range groupServers {
-				serverItem := groupItem.AddSubMenuItem(
-					fmt.Sprintf("📋 %s", serverName),
-					fmt.Sprintf("Server: %s", serverName))
-				
-				// Add server actions
-				go func(sName string, item *systray.MenuItem) {
-					for range item.ClickedCh {
-						a.handleServerAction(sName, "view")
-					}
-				}(serverName, serverItem)
-			}
-		}
-	}
-}
 
 // handleGroupManagement handles clicks on the group management menu
 func (a *App) handleGroupManagement() {
@@ -1690,6 +1653,7 @@ func (a *App) handleGroupManagement() {
 	a.logger.Info("TRAY INIT: About to add group management items")
 	createGroupItem := a.groupManagementMenu.AddSubMenuItem("➕ Create New Group", "Create a new server group with color assignment")
 	manageGroupsItem := a.groupManagementMenu.AddSubMenuItem("⚙️ Manage Groups", "Edit existing server groups")
+	migrateGroupsItem := a.groupManagementMenu.AddSubMenuItem("🔄 Migrate to IDs", "Add IDs to existing groups in config")
 	a.groupManagementMenu.AddSeparator()
 
 	// Show existing groups from API
@@ -1711,6 +1675,8 @@ func (a *App) handleGroupManagement() {
 				a.handleCreateGroup()
 			case <-manageGroupsItem.ClickedCh:
 				a.handleManageGroups()
+			case <-migrateGroupsItem.ClickedCh:
+				a.handleMigrateGroups()
 			case <-a.ctx.Done():
 				return
 			}
@@ -1740,14 +1706,16 @@ func (a *App) saveGroupsToConfig() error {
 		return fmt.Errorf("failed to parse config JSON: %w", err)
 	}
 
-	// Convert serverGroups to config format
+	// Convert serverGroups to config format with IDs
 	groups := make([]map[string]interface{}, 0, len(a.serverGroups))
 	for _, group := range a.serverGroups {
 		if group.Enabled {
 			groups = append(groups, map[string]interface{}{
+				"id":          group.ID,
 				"name":        group.Name,
 				"description": group.Description,
 				"color":       group.Color,
+				"color_emoji": group.ColorEmoji,
 				"enabled":     group.Enabled,
 			})
 		}
@@ -1756,21 +1724,22 @@ func (a *App) saveGroupsToConfig() error {
 	// Update the groups in the config
 	configData["groups"] = groups
 
-	// Update server group assignments
+	// Update server group assignments using group IDs
 	if servers, ok := configData["mcpServers"].([]interface{}); ok {
 		for _, serverInterface := range servers {
 			if server, ok := serverInterface.(map[string]interface{}); ok {
 				if serverName, ok := server["name"].(string); ok {
 					// Find which group this server belongs to
-					server["group_name"] = "" // Reset first
-					for groupName, group := range a.serverGroups {
+					delete(server, "group_name") // Remove old field
+					server["group_id"] = 0       // Reset to 0 (no group)
+					for _, group := range a.serverGroups {
 						for _, assignedServerName := range group.ServerNames {
 							if assignedServerName == serverName {
-								server["group_name"] = groupName
+								server["group_id"] = group.ID
 								break
 							}
 						}
-						if server["group_name"] != "" {
+						if groupID, ok := server["group_id"].(int); ok && groupID != 0 {
 							break
 						}
 					}
@@ -1825,9 +1794,54 @@ func (a *App) handleManageGroups() {
 	}
 }
 
+// handleMigrateGroups manually migrates config to use group IDs
+func (a *App) handleMigrateGroups() {
+	a.logger.Info("Manual migration to group IDs requested")
+	
+	if a.server == nil {
+		a.logger.Error("Server interface not available for migration")
+		return
+	}
+
+	configPath := a.server.GetConfigPath()
+	if configPath == "" {
+		a.logger.Error("Config path not available for migration")
+		return
+	}
+
+	// Force reload groups from config
+	a.loadGroupsFromConfig()
+	
+	// Force migration
+	a.forceMigrateConfigToIDs()
+	
+	a.logger.Info("Manual migration completed")
+}
+
+// forceMigrateConfigToIDs forces migration even if groups already have IDs
+func (a *App) forceMigrateConfigToIDs() {
+	// Assign IDs to all groups (reassign if needed)
+	for _, group := range a.serverGroups {
+		if group.ID == 0 {
+			group.ID = a.getNextGroupID()
+		}
+	}
+	
+	// Force save config
+	if err := a.saveGroupsToConfig(); err != nil {
+		a.logger.Error("Failed to save migrated config", zap.Error(err))
+	} else {
+		a.logger.Info("Successfully migrated config to use group IDs", zap.Int("groups", len(a.serverGroups)))
+	}
+}
+
 // refreshGroupsMenu refreshes the groups submenu with current groups
 func (a *App) refreshGroupsMenu() {
 	a.logger.Info("refreshGroupsMenu called - START", zap.Int("local_groups_count", len(a.serverGroups)))
+	
+	// FORCE reload from config first to ensure we have the latest colors
+	a.logger.Info("Force reloading groups from config to get latest colors")
+	a.loadGroupsFromConfig()
 	
 	// Clear existing group menu items
 	for _, item := range a.groupMenuItems {
@@ -1853,28 +1867,43 @@ func (a *App) refreshGroupsMenu() {
 		// Try to get groups from config first, then fall back to API
 		groupsLoaded := false
 		
-		// TODO: Load from config when available
-		// For now, fetch from API as fallback
-		if apiGroups, err := a.fetchGroupsFromAPI(); err == nil && len(apiGroups) > 0 {
-			a.logger.Debug("Successfully fetched API groups, populating local groups", zap.Int("count", len(apiGroups)))
-			for _, apiGroup := range apiGroups {
-				if name, ok := apiGroup["name"].(string); ok {
-					color, _ := apiGroup["color"].(string)
-					if color == "" { color = "#007bff" }
-					
-					// Create local ServerGroup from API group
-					a.serverGroups[name] = &ServerGroup{
-						Name: name,
-						Description: "Synced from API",
-						Color: color,
-						ColorEmoji: a.getColorEmojiForHex(color),
-						ServerNames: make([]string, 0),
-						Enabled: true,
-					}
-					a.logger.Debug("Added API group to local groups", zap.String("name", name), zap.String("color", color))
-				}
-			}
+		// Load from config first
+		if a.loadGroupsFromConfig() {
+			a.logger.Debug("Successfully loaded groups from config", zap.Int("count", len(a.serverGroups)))
 			groupsLoaded = true
+		}
+		
+		// If no groups in config, fetch from API as fallback
+		if !groupsLoaded {
+			if apiGroups, err := a.fetchGroupsFromAPI(); err == nil && len(apiGroups) > 0 {
+				a.logger.Debug("Successfully fetched API groups, populating local groups", zap.Int("count", len(apiGroups)))
+				for _, apiGroup := range apiGroups {
+					if name, ok := apiGroup["name"].(string); ok {
+						color, _ := apiGroup["color"].(string)
+						if color == "" { color = "#007bff" }
+						
+						// Create local ServerGroup from API group
+						a.serverGroups[name] = &ServerGroup{
+							ID:          a.getNextGroupID(),
+							Name:        name,
+							Description: "Synced from API",
+							Color: color,
+							ColorEmoji: a.getColorEmojiForHex(color),
+							ServerNames: make([]string, 0),
+							Enabled: true,
+						}
+						a.logger.Debug("Added API group to local groups", zap.String("name", name), zap.String("color", color))
+					}
+				}
+				groupsLoaded = true
+			}
+		}
+		
+		// Update MenuManager with new groups if any were loaded
+		if groupsLoaded {
+			// Populate server assignments from config
+			a.populateServerNamesFromConfig()
+			
 			// Update MenuManager with new groups
 			if a.menuManager != nil {
 				a.menuManager.SetServerGroups(&a.serverGroups)
@@ -1935,238 +1964,6 @@ func (a *App) refreshGroupsMenu() {
 	}
 }
 
-// refreshGroupedServersMenu refreshes the grouped servers submenu showing all servers organized by group
-func (a *App) refreshGroupedServersMenu() {
-	// Clear existing group server menu items
-	for _, item := range a.groupServerMenus {
-		if item != nil {
-			item.Hide()
-		}
-	}
-	a.groupServerMenus = make(map[string]*systray.MenuItem)
-
-	// Get all servers
-	allServers, err := a.stateManager.GetAllServers()
-	if err != nil {
-		a.logger.Error("Failed to get servers for grouped menu", zap.Error(err))
-		return
-	}
-
-	if len(a.serverGroups) == 0 {
-		// Show "no groups" message
-		noGroupsItem := a.groupedServersMenu.AddSubMenuItem("📋 No groups created", "Create server groups to organize your servers")
-		noGroupsItem.Disable()
-		a.groupServerMenus["no_groups"] = noGroupsItem
-		return
-	}
-
-	// Add separator before groups list
-	if len(a.serverGroups) > 0 {
-		a.groupedServersMenu.AddSeparator()
-	}
-
-	// Add each group with its servers
-	for groupName, group := range a.serverGroups {
-		if !group.Enabled {
-			continue
-		}
-
-		// Count servers in this group that actually exist
-		var groupServers []map[string]interface{}
-		for _, serverName := range group.ServerNames {
-			for _, server := range allServers {
-				if name, ok := server["name"].(string); ok && name == serverName {
-					groupServers = append(groupServers, server)
-					break
-				}
-			}
-		}
-
-		groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(groupServers))
-		groupItem := a.groupedServersMenu.AddSubMenuItem(groupTitle, group.Description)
-		a.groupServerMenus[groupName] = groupItem
-
-		if len(groupServers) == 0 {
-			// No servers in this group
-			emptyItem := groupItem.AddSubMenuItem("📭 No servers in group", "Add servers to this group")
-			emptyItem.Disable()
-		} else {
-			// Add each server in the group
-			for _, server := range groupServers {
-				serverName, _ := server["name"].(string)
-				enabled, _ := server["enabled"].(bool)
-				quarantined, _ := server["quarantined"].(bool)
-				state, _ := server["state"].(string)
-
-				// Determine server status icon
-				var statusIcon string
-				var statusText string
-				if quarantined {
-					statusIcon = "🚨"
-					statusText = "Quarantined"
-				} else if !enabled {
-					statusIcon = "⏸️"
-					statusText = "Disabled"
-				} else {
-					switch state {
-					case "ready":
-						statusIcon = "🟢"
-						statusText = "Connected"
-					case "connecting":
-						statusIcon = "🟡"
-						statusText = "Connecting"
-					case "error":
-						statusIcon = "🔴"
-						statusText = "Error"
-					default:
-						statusIcon = "⚫"
-						statusText = "Disconnected"
-					}
-				}
-
-				serverItemTitle := fmt.Sprintf("%s %s", statusIcon, serverName)
-				serverItem := groupItem.AddSubMenuItem(serverItemTitle, fmt.Sprintf("Server status: %s", statusText))
-
-				// Add server action options
-				toggleItem := serverItem.AddSubMenuItem("🔄 Toggle Enable/Disable", "Enable or disable this server")
-				viewItem := serverItem.AddSubMenuItem("👁️ View Details", "View server information")
-
-				// Add repository link if available
-				if repoURL, hasRepo := server["repository_url"].(string); hasRepo && repoURL != "" {
-					repoItem := serverItem.AddSubMenuItem("🔗 Repository", "Open server repository")
-
-					// Handle repository link clicks
-					go func(url string) {
-						for {
-							select {
-							case <-repoItem.ClickedCh:
-								a.openFile(url, "repository")
-							case <-a.ctx.Done():
-								return
-							}
-						}
-					}(repoURL)
-				}
-
-				// Handle server action clicks
-				go func(sName string, toggle, view *systray.MenuItem) {
-					for {
-						select {
-						case <-toggle.ClickedCh:
-							a.handleServerAction(sName, "toggle")
-						case <-view.ClickedCh:
-							a.handleServerAction(sName, "view")
-						case <-a.ctx.Done():
-							return
-						}
-					}
-				}(serverName, toggleItem, viewItem)
-			}
-		}
-	}
-
-	// Add ungrouped servers if any exist
-	var ungroupedServers []map[string]interface{}
-	for _, server := range allServers {
-		serverName, _ := server["name"].(string)
-		isGrouped := false
-
-		// Check if server belongs to any group
-		for _, group := range a.serverGroups {
-			for _, groupedServerName := range group.ServerNames {
-				if groupedServerName == serverName {
-					isGrouped = true
-					break
-				}
-			}
-			if isGrouped {
-				break
-			}
-		}
-
-		if !isGrouped {
-			ungroupedServers = append(ungroupedServers, server)
-		}
-	}
-
-	if len(ungroupedServers) > 0 {
-		a.groupedServersMenu.AddSeparator()
-		ungroupedTitle := fmt.Sprintf("📂 Ungrouped Servers (%d)", len(ungroupedServers))
-		ungroupedItem := a.groupedServersMenu.AddSubMenuItem(ungroupedTitle, "Servers not assigned to any group")
-		a.groupServerMenus["ungrouped"] = ungroupedItem
-
-		for _, server := range ungroupedServers {
-			serverName, _ := server["name"].(string)
-			enabled, _ := server["enabled"].(bool)
-			quarantined, _ := server["quarantined"].(bool)
-			state, _ := server["state"].(string)
-
-			// Determine server status icon
-			var statusIcon string
-			var statusText string
-			if quarantined {
-				statusIcon = "🚨"
-				statusText = "Quarantined"
-			} else if !enabled {
-				statusIcon = "⏸️"
-				statusText = "Disabled"
-			} else {
-				switch state {
-				case "ready":
-					statusIcon = "🟢"
-					statusText = "Connected"
-				case "connecting":
-					statusIcon = "🟡"
-					statusText = "Connecting"
-				case "error":
-					statusIcon = "🔴"
-					statusText = "Error"
-				default:
-					statusIcon = "⚫"
-					statusText = "Disconnected"
-				}
-			}
-
-			serverItemTitle := fmt.Sprintf("%s %s", statusIcon, serverName)
-			serverItem := ungroupedItem.AddSubMenuItem(serverItemTitle, fmt.Sprintf("Server status: %s", statusText))
-
-			// Add server action options
-			toggleItem := serverItem.AddSubMenuItem("🔄 Toggle Enable/Disable", "Enable or disable this server")
-			viewItem := serverItem.AddSubMenuItem("👁️ View Details", "View server information")
-
-			// Add repository link if available
-			if repoURL, hasRepo := server["repository_url"].(string); hasRepo && repoURL != "" {
-				repoItem := serverItem.AddSubMenuItem("🔗 Repository", "Open server repository")
-
-				// Handle repository link clicks
-				go func(url string) {
-					for {
-						select {
-						case <-repoItem.ClickedCh:
-							a.openFile(url, "repository")
-						case <-a.ctx.Done():
-							return
-						}
-					}
-				}(repoURL)
-			}
-
-			// Handle server action clicks
-			go func(sName string, toggle, view *systray.MenuItem) {
-				for {
-					select {
-					case <-toggle.ClickedCh:
-						a.handleServerAction(sName, "toggle")
-					case <-view.ClickedCh:
-						a.handleServerAction(sName, "view")
-					case <-a.ctx.Done():
-						return
-					}
-				}
-			}(serverName, toggleItem, viewItem)
-		}
-	}
-}
 
 // handleAddServerToGroup handles adding a server to a specific group
 func (a *App) handleAddServerToGroup(groupName string) {
@@ -2685,9 +2482,10 @@ func (a *App) loadGroupsForServerMenus() {
 				
 				// Create local ServerGroup from API group
 				a.serverGroups[name] = &ServerGroup{
-					Name: name,
+					ID:          a.getNextGroupID(),
+					Name:        name,
 					Description: "Available for server assignment",
-					Color: color,
+					Color:       color,
 					ColorEmoji: a.getColorEmojiForHex(color),
 					ServerNames: make([]string, 0),
 					Enabled: true,
@@ -2695,12 +2493,18 @@ func (a *App) loadGroupsForServerMenus() {
 				a.logger.Info("Added API group for server assignment", zap.String("name", name), zap.String("color", color))
 			}
 		}
-		
+
+		// Populate ServerNames from config assignments
+		a.populateServerNamesFromConfig()
+
 		// Update MenuManager with new groups
 		if a.menuManager != nil {
 			a.menuManager.SetServerGroups(&a.serverGroups)
 			a.logger.Info("Updated MenuManager with groups", zap.Int("group_count", len(a.serverGroups)))
-			
+
+			// Create/update Group Management submenus
+			a.updateGroupManagementSubmenus()
+
 			// Trigger a refresh of all server menus to show the groups
 			if a.syncManager != nil {
 				a.syncManager.SyncDelayed()
@@ -2709,6 +2513,191 @@ func (a *App) loadGroupsForServerMenus() {
 		}
 	} else {
 		a.logger.Error("Failed to fetch API groups for server menus", zap.Error(err))
+	}
+}
+
+// populateServerNamesFromConfig reads the config file and populates ServerNames for each group
+func (a *App) populateServerNamesFromConfig() {
+	if a.server == nil {
+		a.logger.Error("Server interface not available for config reading")
+		return
+	}
+
+	configPath := a.server.GetConfigPath()
+	if configPath == "" {
+		a.logger.Error("Config path not available")
+		return
+	}
+
+	// Read the current config file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		a.logger.Error("Failed to read config file for group population", zap.Error(err))
+		return
+	}
+
+	var configData map[string]interface{}
+	if err := json.Unmarshal(data, &configData); err != nil {
+		a.logger.Error("Failed to parse config JSON for group population", zap.Error(err))
+		return
+	}
+
+	// Clear existing server assignments
+	for _, group := range a.serverGroups {
+		group.ServerNames = make([]string, 0)
+	}
+
+	// Read server assignments from config
+	if servers, ok := configData["mcpServers"].([]interface{}); ok {
+		for _, serverInterface := range servers {
+			if server, ok := serverInterface.(map[string]interface{}); ok {
+				if serverName, ok := server["name"].(string); ok {
+					// Check for group_id (new format) or group_name (legacy format)
+					var targetGroup *ServerGroup
+					
+					if groupID, ok := server["group_id"].(float64); ok && groupID != 0 {
+						// New format: use group_id
+						targetGroup = a.getGroupByID(int(groupID))
+					} else if groupName, ok := server["group_name"].(string); ok && groupName != "" {
+						// Legacy format: use group_name
+						targetGroup = a.getGroupByName(groupName)
+					}
+					
+					if targetGroup != nil {
+						// Check if server is not already in the group
+						found := false
+						for _, existingServer := range targetGroup.ServerNames {
+							if existingServer == serverName {
+								found = true
+								break
+							}
+						}
+						if !found {
+							targetGroup.ServerNames = append(targetGroup.ServerNames, serverName)
+							a.logger.Debug("Added server to group from config",
+								zap.String("server", serverName),
+								zap.String("group", targetGroup.Name),
+								zap.Int("group_id", targetGroup.ID))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	a.logger.Info("Populated server names from config", zap.Int("groups_count", len(a.serverGroups)))
+}
+
+// loadGroupsFromConfig loads groups from the configuration file
+func (a *App) loadGroupsFromConfig() bool {
+	if a.server == nil {
+		a.logger.Error("Server interface not available for config reading")
+		return false
+	}
+
+	configPath := a.server.GetConfigPath()
+	if configPath == "" {
+		a.logger.Error("Config path not available")
+		return false
+	}
+
+	// Read the current config file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		a.logger.Debug("Failed to read config file for group loading", zap.Error(err))
+		return false
+	}
+
+	var configData map[string]interface{}
+	if err := json.Unmarshal(data, &configData); err != nil {
+		a.logger.Error("Failed to parse config JSON for group loading", zap.Error(err))
+		return false
+	}
+
+	// Load groups from config
+	if groups, ok := configData["groups"].([]interface{}); ok && len(groups) > 0 {
+		a.logger.Debug("Found groups in config", zap.Int("count", len(groups)))
+		
+		for _, groupInterface := range groups {
+			if group, ok := groupInterface.(map[string]interface{}); ok {
+				name, nameOk := group["name"].(string)
+				if !nameOk || name == "" {
+					continue
+				}
+
+				// Get ID from config, or generate one if missing
+				id, idOk := group["id"].(float64) // JSON numbers are float64
+				if !idOk {
+					id = float64(a.getNextGroupID())
+				}
+
+				description, _ := group["description"].(string)
+				color, _ := group["color"].(string)
+				colorEmoji, _ := group["color_emoji"].(string)
+				enabled, _ := group["enabled"].(bool)
+				
+				// Set defaults
+				if description == "" {
+					description = fmt.Sprintf("Custom group: %s", name)
+				}
+				if color == "" {
+					color = "#007bff"
+				}
+				if colorEmoji == "" {
+					colorEmoji = a.getColorEmojiForHex(color)
+				}
+				
+				a.serverGroups[name] = &ServerGroup{
+					ID:          int(id),
+					Name:        name,
+					Description: description,
+					Color:       color,
+					ColorEmoji:  colorEmoji,
+					ServerNames: make([]string, 0),
+					Enabled:     enabled,
+				}
+
+				a.logger.Debug("Loaded group from config",
+					zap.String("name", name),
+					zap.Int("id", int(id)),
+					zap.String("color", color),
+					zap.Bool("enabled", enabled))
+			}
+		}
+
+		a.logger.Info("Successfully loaded groups from config", zap.Int("count", len(a.serverGroups)))
+		// Migrate config if needed (add IDs to groups without them)
+		a.migrateConfigToIDs()
+		
+		return len(a.serverGroups) > 0
+	}
+
+	a.logger.Debug("No groups found in config file")
+	return false
+}
+
+// migrateConfigToIDs adds IDs to existing groups in config file if they don't have them
+func (a *App) migrateConfigToIDs() {
+	needsMigration := false
+	
+	// Check if any group is missing an ID
+	for _, group := range a.serverGroups {
+		if group.ID == 0 {
+			group.ID = a.getNextGroupID()
+			needsMigration = true
+			a.logger.Info("Assigned ID to existing group", 
+				zap.String("name", group.Name), 
+				zap.Int("id", group.ID))
+		}
+	}
+	
+	// Save config if migration was needed
+	if needsMigration {
+		if err := a.saveGroupsToConfig(); err != nil {
+			a.logger.Error("Failed to save migrated config", zap.Error(err))
+		} else {
+			a.logger.Info("Successfully migrated config to use group IDs")
+		}
 	}
 }
 
@@ -2733,6 +2722,7 @@ func (a *App) syncWithAPIGroups() {
 
 		// Create tray group from API group
 		newGroup := &ServerGroup{
+			ID:          a.getNextGroupID(),
 			Name:        name,
 			Description: fmt.Sprintf("Synced from API: %s", name),
 			Color:       color,
@@ -2756,9 +2746,11 @@ func (a *App) getColorEmoji(hexColor string) string {
 		"#dc3545": "🔴", // Red
 		"#007bff": "🔵", // Blue
 		"#6f42c1": "🟣", // Purple
+		"#6610f2": "🟣", // Purple (variant)
 		"#fd7e14": "🟠", // Orange
 		"#20c997": "🟢", // Teal (green)
-		"#e83e8c": "🟣", // Pink (purple)
+		"#e83e8c": "🩷", // Pink
+		"#ffc107": "🟡", // Yellow
 		"#6c757d": "⚫", // Gray (black)
 		"#343a40": "⚫", // Dark
 	}
@@ -2971,12 +2963,140 @@ func (a *App) restoreServerStatesAfterStart() error {
 	return nil
 }
 
+// updateGroupManagementSubmenus creates dynamic submenus for Group Management
+// showing each group with its corresponding servers loaded from config file
+func (a *App) updateGroupManagementSubmenus() {
+	a.logger.Info("Updating Group Management submenus")
+
+	// Clear existing group management menu items
+	if a.groupManagementMenu != nil {
+		// Remove all submenu items
+		for _, item := range a.groupMenuItems {
+			if item != nil {
+				item.Hide()
+			}
+		}
+		a.groupMenuItems = make(map[string]*systray.MenuItem)
+	}
+
+	// Check if server groups are available
+	if len(a.serverGroups) == 0 {
+		a.logger.Info("No groups available for Group Management menu")
+		noGroupsItem := a.groupManagementMenu.AddSubMenuItem("📋 No groups available", "Create groups to manage servers")
+		noGroupsItem.Disable()
+		a.groupMenuItems["no_groups"] = noGroupsItem
+		return
+	}
+
+	// Get server assignments to show which servers belong to each group
+	assignments, err := a.fetchServerAssignments()
+	if err != nil {
+		a.logger.Error("Failed to fetch server assignments for Group Management", zap.Error(err))
+	}
+
+	// Create submenu for each group showing its servers
+	for groupName, group := range a.serverGroups {
+		if !group.Enabled {
+			continue // Skip disabled groups
+		}
+
+		// Get servers assigned to this group
+		var assignedServers []string
+		for serverName, assignedGroup := range assignments {
+			if assignedGroup == groupName {
+				assignedServers = append(assignedServers, serverName)
+			}
+		}
+
+		// Create group submenu title with server count
+		groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(assignedServers))
+		groupItem := a.groupManagementMenu.AddSubMenuItem(groupTitle, fmt.Sprintf("Manage group '%s' and its servers", groupName))
+
+		// Add assigned servers as submenus under each group
+		if len(assignedServers) > 0 {
+			// Add a separator before server list
+			groupItem.AddSubMenuItem("───── Servers ─────", "").Disable()
+
+			for _, serverName := range assignedServers {
+				serverTitle := fmt.Sprintf("🖥️  %s", serverName)
+				serverItem := groupItem.AddSubMenuItem(serverTitle, fmt.Sprintf("Server '%s' assigned to group '%s'", serverName, groupName))
+
+				// Add options for this server
+				removeServerItem := serverItem.AddSubMenuItem("➖ Remove from Group", fmt.Sprintf("Remove '%s' from group '%s'", serverName, groupName))
+
+				// Handle remove server click
+				go func(sName, gName string, item *systray.MenuItem) {
+					for range item.ClickedCh {
+						a.handleRemoveServerFromGroup(sName, gName)
+						// Refresh the Group Management submenus after change
+						a.updateGroupManagementSubmenus()
+					}
+				}(serverName, groupName, removeServerItem)
+			}
+
+			// Add separator before group actions
+			groupItem.AddSubMenuItem("───── Actions ─────", "").Disable()
+		} else {
+			// No servers assigned to this group
+			noServersItem := groupItem.AddSubMenuItem("📭 No servers assigned", "Assign servers to this group")
+			noServersItem.Disable()
+		}
+
+		// Add group management actions
+		addServerItem := groupItem.AddSubMenuItem("➕ Add Server", fmt.Sprintf("Add a server to group '%s'", groupName))
+		editGroupItem := groupItem.AddSubMenuItem("✏️ Edit Group", fmt.Sprintf("Edit properties of group '%s'", groupName))
+		deleteGroupItem := groupItem.AddSubMenuItem("🗑️ Delete Group", fmt.Sprintf("Delete group '%s'", groupName))
+
+		// Handle group action clicks
+		go func(gName string, addItem, editItem, deleteItem *systray.MenuItem) {
+			for {
+				select {
+				case <-addItem.ClickedCh:
+					a.handleAddServerToGroup(gName)
+					// Refresh the Group Management submenus after change
+					a.updateGroupManagementSubmenus()
+				case <-editItem.ClickedCh:
+					a.handleEditGroup(gName)
+				case <-deleteItem.ClickedCh:
+					a.handleDeleteGroup(gName)
+					// Refresh the Group Management submenus after deletion
+					a.updateGroupManagementSubmenus()
+				}
+			}
+		}(groupName, addServerItem, editGroupItem, deleteGroupItem)
+
+		// Store the group menu item
+		a.groupMenuItems[groupName] = groupItem
+	}
+
+	a.logger.Info("Group Management submenus updated",
+		zap.Int("groups_count", len(a.serverGroups)),
+		zap.Int("assignments_count", len(assignments)))
+}
+
 // getColorEmojiForHex returns emoji for hex color
 func (a *App) getColorEmojiForHex(hex string) string {
+	a.logger.Debug("Converting hex color to emoji", zap.String("input_hex", hex))
+	
 	switch strings.ToLower(hex) {
 	case "#ff9900": return "🟠" // AWS Orange
-	case "#28a745": return "🟢" // Green  
+	case "#28a745": return "🟢" // Green
 	case "#dc3545": return "🔴" // Red
-	default: return "🔵" // Blue
+	case "#007bff": return "🔵" // Blue
+	case "#6f42c1": return "🟣" // Purple
+	case "#6610f2": return "🟣" // Purple (variant)
+	case "#fd7e14": return "🟠" // Orange
+	case "#20c997": return "🟢" // Teal (green)
+	case "#e83e8c": 
+		a.logger.Debug("Matched pink color", zap.String("hex", hex))
+		return "🩷" // Pink
+	case "#ffc107": 
+		a.logger.Debug("Matched yellow color", zap.String("hex", hex))
+		return "🟡" // Yellow
+	case "#6c757d": return "⚫" // Gray (black)
+	case "#343a40": return "⚫" // Dark
+	default: 
+		a.logger.Debug("Using default blue for unknown color", zap.String("hex", hex))
+		return "🔵" // Blue
 	}
 }

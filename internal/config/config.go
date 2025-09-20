@@ -118,7 +118,8 @@ type ServerConfig struct {
 	Created       time.Time         `json:"created" mapstructure:"created"`
 	Updated       time.Time         `json:"updated,omitempty" mapstructure:"updated"`
 	Isolation     *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
-	GroupName     string            `json:"group_name,omitempty" mapstructure:"group_name"` // Assigned group name
+	GroupID       int               `json:"group_id,omitempty" mapstructure:"group_id"`       // Assigned group ID (new format)
+	GroupName     string            `json:"group_name,omitempty" mapstructure:"group_name"`   // Assigned group name (legacy)
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -159,6 +160,7 @@ type IsolationConfig struct {
 
 // GroupConfig represents a server group configuration
 type GroupConfig struct {
+	ID          int    `json:"id" mapstructure:"id"`
 	Name        string `json:"name" mapstructure:"name"`
 	Description string `json:"description,omitempty" mapstructure:"description"`
 	Color       string `json:"color" mapstructure:"color"`

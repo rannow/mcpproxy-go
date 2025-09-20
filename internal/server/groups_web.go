@@ -538,45 +538,57 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 		color = "#007bff" // Default color
 	}
 
-	groupsMutex.Lock()
-	defer groupsMutex.Unlock()
+	// Update group with proper mutex handling to avoid deadlock
+	var updateResult struct {
+		success bool
+		errorMsg string
+	}
 
-	// Check if old group exists
-	_, exists := groups[oldName]
-	if !exists {
+	func() {
+		groupsMutex.Lock()
+		defer groupsMutex.Unlock()
+
+		// Check if old group exists
+		_, exists := groups[oldName]
+		if !exists {
+			updateResult.success = false
+			updateResult.errorMsg = fmt.Sprintf("Group '%s' not found", oldName)
+			return
+		}
+
+		// If name changed, check if new name already exists
+		if oldName != newName {
+			if _, exists := groups[newName]; exists {
+				updateResult.success = false
+				updateResult.errorMsg = fmt.Sprintf("Group '%s' already exists", newName)
+				return
+			}
+			// Remove old entry
+			delete(groups, oldName)
+		}
+
+		// Update/create group
+		groups[newName] = &Group{
+			Name:  newName,
+			Color: color,
+		}
+		updateResult.success = true
+	}()
+
+	// Handle error cases
+	if !updateResult.success {
 		response := map[string]interface{}{
 			"success": false,
-			"error":   fmt.Sprintf("Group '%s' not found", oldName),
+			"error":   updateResult.errorMsg,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 		return
 	}
 
-	// If name changed, check if new name already exists
-	if oldName != newName {
-		if _, exists := groups[newName]; exists {
-			response := map[string]interface{}{
-				"success": false,
-				"error":   fmt.Sprintf("Group '%s' already exists", newName),
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(response)
-			return
-		}
-		// Remove old entry
-		delete(groups, oldName)
-	}
-
-	// Update/create group
-	groups[newName] = &Group{
-		Name:  newName,
-		Color: color,
-	}
-
 	s.logger.Info("Updating group", zap.String("old_name", oldName), zap.String("new_name", newName), zap.String("color", color))
 
-	// Save configuration to persist groups
+	// Save configuration to persist groups (mutex is now released)
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Error("Failed to save configuration after updating group", zap.Error(err))
 	}
@@ -601,11 +613,25 @@ func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	groupsMutex.Lock()
-	defer groupsMutex.Unlock()
+	// Check if group exists and delete it (with proper mutex handling)
+	var groupExists bool
+	func() {
+		groupsMutex.Lock()
+		defer groupsMutex.Unlock()
 
-	// Check if group exists
-	if _, exists := groups[groupName]; !exists {
+		// Check if group exists
+		if _, exists := groups[groupName]; !exists {
+			groupExists = false
+			return
+		}
+
+		// Delete group
+		delete(groups, groupName)
+		groupExists = true
+	}()
+
+	// Handle group not found case
+	if !groupExists {
 		response := map[string]interface{}{
 			"success": false,
 			"error":   fmt.Sprintf("Group '%s' not found", groupName),
@@ -615,12 +641,9 @@ func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete group
-	delete(groups, groupName)
-
 	s.logger.Info("Deleting group", zap.String("name", groupName))
 
-	// Save configuration to persist groups
+	// Save configuration to persist groups (mutex is now released)
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Error("Failed to save configuration after deleting group", zap.Error(err))
 	}
@@ -647,9 +670,31 @@ func (s *Server) handleAssignServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	groupName, ok := assignmentData["group_name"].(string)
-	if !ok || strings.TrimSpace(groupName) == "" {
-		http.Error(w, "group_name is required", http.StatusBadRequest)
+	// Support both group_name (legacy) and group_id (new)
+	var groupName string
+	var groupID int
+	
+	if gName, ok := assignmentData["group_name"].(string); ok && strings.TrimSpace(gName) != "" {
+		groupName = gName
+		// Find group ID by name
+		groupsMutex.RLock()
+		if group, exists := groups[groupName]; exists {
+			groupID = group.ID
+		}
+		groupsMutex.RUnlock()
+	} else if gID, ok := assignmentData["group_id"].(float64); ok && gID > 0 {
+		groupID = int(gID)
+		// Find group name by ID
+		groupsMutex.RLock()
+		for name, group := range groups {
+			if group.ID == groupID {
+				groupName = name
+				break
+			}
+		}
+		groupsMutex.RUnlock()
+	} else {
+		http.Error(w, "group_name or group_id is required", http.StatusBadRequest)
 		return
 	}
 

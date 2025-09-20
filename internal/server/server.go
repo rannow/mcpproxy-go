@@ -23,6 +23,7 @@ import (
 
 // Group represents a server group
 type Group struct {
+	ID    int    `json:"id"`
 	Name  string `json:"name"`
 	Color string `json:"color"`
 }
@@ -1258,15 +1259,34 @@ func (s *Server) syncGroupsToConfig() {
 	groupsMutex.RLock()
 	defer groupsMutex.RUnlock()
 
+	s.logger.Debug("[GROUPS DEBUG] syncGroupsToConfig called",
+		zap.Int("in_memory_groups_count", len(groups)))
+
+	// Log all in-memory groups
+	for name, group := range groups {
+		s.logger.Debug("[GROUPS DEBUG] In-memory group found",
+			zap.String("name", name),
+			zap.String("group_name", group.Name),
+			zap.String("color", group.Color))
+	}
+
 	// Convert in-memory groups to config format
 	configGroups := make([]config.GroupConfig, 0, len(groups))
 	for _, group := range groups {
 		configGroups = append(configGroups, config.GroupConfig{
+			ID:      group.ID,
 			Name:    group.Name,
 			Color:   group.Color,
 			Enabled: true, // Groups are enabled by default
 		})
+		s.logger.Debug("[GROUPS DEBUG] Converting group to config format",
+			zap.String("name", group.Name),
+			zap.String("color", group.Color))
 	}
+
+	s.logger.Debug("[GROUPS DEBUG] About to overwrite config.Groups",
+		zap.Int("old_config_groups", len(s.config.Groups)),
+		zap.Int("new_config_groups", len(configGroups)))
 
 	s.config.Groups = configGroups
 	s.logger.Debug("Synced groups to config", zap.Int("count", len(configGroups)))
@@ -1277,13 +1297,20 @@ func (s *Server) syncServerGroupAssignments() {
 	assignmentsMutex.RLock()
 	defer assignmentsMutex.RUnlock()
 
-	// Update each server's group_name field in the config
+	// Update each server's group_id field in the config
 	for i := range s.config.Servers {
 		serverName := s.config.Servers[i].Name
 		if groupName, exists := serverGroupAssignments[serverName]; exists {
-			s.config.Servers[i].GroupName = groupName
+			// Find group ID by name
+			groupsMutex.RLock()
+			if group, groupExists := groups[groupName]; groupExists {
+				s.config.Servers[i].GroupID = group.ID
+				s.config.Servers[i].GroupName = "" // Clear legacy field
+			}
+			groupsMutex.RUnlock()
 		} else {
-			s.config.Servers[i].GroupName = ""
+			s.config.Servers[i].GroupID = 0
+			s.config.Servers[i].GroupName = "" // Clear legacy field
 		}
 	}
 
@@ -1296,24 +1323,49 @@ func (s *Server) initGroupsFromConfig() {
 	groupsMutex.Lock()
 	defer groupsMutex.Unlock()
 
+	s.logger.Debug("[GROUPS DEBUG] initGroupsFromConfig called",
+		zap.Int("config_groups_count", len(s.config.Groups)))
+
+	// Log all config groups
+	for i, configGroup := range s.config.Groups {
+		s.logger.Debug("[GROUPS DEBUG] Config group found",
+			zap.Int("index", i),
+			zap.String("name", configGroup.Name),
+			zap.String("color", configGroup.Color),
+			zap.Bool("enabled", configGroup.Enabled))
+	}
+
 	// Clear existing groups
 	groups = make(map[string]*Group)
 
 	// Load groups from config
+	loadedCount := 0
 	for _, configGroup := range s.config.Groups {
 		if configGroup.Enabled {
 			groups[configGroup.Name] = &Group{
+				ID:    configGroup.ID,
 				Name:  configGroup.Name,
 				Color: configGroup.Color,
 			}
+			loadedCount++
+			s.logger.Debug("[GROUPS DEBUG] Loaded group into memory",
+				zap.Int("id", configGroup.ID),
+				zap.String("name", configGroup.Name),
+				zap.String("color", configGroup.Color))
 		}
 	}
 
+	s.logger.Debug("[GROUPS DEBUG] Groups loaded from config",
+		zap.Int("loaded_count", loadedCount),
+		zap.Int("total_in_memory", len(groups)))
+
 	// Ensure default groups exist if no groups in config
 	if len(groups) == 0 {
+		s.logger.Debug("[GROUPS DEBUG] No groups loaded, creating defaults")
 		groups["AWS Services"] = &Group{Name: "AWS Services", Color: "#ff9900"}
 		groups["Development"] = &Group{Name: "Development", Color: "#28a745"}
 		groups["Production"] = &Group{Name: "Production", Color: "#dc3545"}
+		s.logger.Debug("[GROUPS DEBUG] Created default groups", zap.Int("default_count", len(groups)))
 	}
 
 	s.logger.Debug("Initialized groups from config", zap.Int("count", len(groups)))
