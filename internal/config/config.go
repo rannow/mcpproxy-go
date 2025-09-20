@@ -79,6 +79,9 @@ type Config struct {
 	// Groups configuration
 	Groups []GroupConfig `json:"groups,omitempty" mapstructure:"groups"`
 
+	// Server group assignments
+	ServerGroupAssignments map[string]string `json:"server_group_assignments,omitempty" mapstructure:"server-group-assignments"`
+
 	// GitHub repository URL for the project
 	GitHubURL string `json:"github_url,omitempty" mapstructure:"github-url"`
 }

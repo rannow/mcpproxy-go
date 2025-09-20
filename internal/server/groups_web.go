@@ -431,20 +431,30 @@ func (s *Server) handleGroupsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleGetGroups returns all groups
+// handleGetGroups returns all groups and server assignments
 func (s *Server) handleGetGroups(w http.ResponseWriter, r *http.Request) {
-	// Reload groups from config to ensure we have the latest data
-	s.initGroupsFromConfig()
-	
+
 	allGroups := s.getGroups()
 	groupList := make([]*Group, 0, len(allGroups))
 	for _, group := range allGroups {
 		groupList = append(groupList, group)
 	}
 
+	// Get server assignments
+	assignmentsMutex.RLock()
+	assignments := make([]map[string]interface{}, 0, len(serverGroupAssignments))
+	for serverName, groupName := range serverGroupAssignments {
+		assignments = append(assignments, map[string]interface{}{
+			"server_name": serverName,
+			"group_name":  groupName,
+		})
+	}
+	assignmentsMutex.RUnlock()
+
 	response := map[string]interface{}{
-		"success": true,
-		"groups":  groupList,
+		"success":     true,
+		"groups":      groupList,
+		"assignments": assignments,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -662,6 +672,11 @@ func (s *Server) handleAssignServer(w http.ResponseWriter, r *http.Request) {
 	assignmentsMutex.Lock()
 	serverGroupAssignments[serverName] = groupName
 	assignmentsMutex.Unlock()
+
+	// Save to configuration file
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after assigning server to group", zap.Error(err))
+	}
 
 	s.logger.Info("Server assigned to group via web interface", zap.String("server", serverName), zap.String("group", groupName))
 

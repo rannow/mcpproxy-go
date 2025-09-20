@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 // ServerGroupAssignment stores server-to-group assignments
@@ -85,6 +87,11 @@ func (s *Server) assignServerToGroup(args map[string]interface{}) (interface{}, 
 	serverGroupAssignments[serverName] = groupName
 	assignmentsMutex.Unlock()
 
+	// Save to configuration file
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after assigning server to group", zap.Error(err))
+	}
+
 	return map[string]interface{}{
 		"success": true,
 		"message": fmt.Sprintf("Server '%s' assigned to group '%s'", serverName, groupName),
@@ -101,6 +108,11 @@ func (s *Server) unassignServerFromGroup(args map[string]interface{}) (interface
 	assignmentsMutex.Lock()
 	delete(serverGroupAssignments, serverName)
 	assignmentsMutex.Unlock()
+
+	// Save to configuration file
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after unassigning server from group", zap.Error(err))
+	}
 
 	return map[string]interface{}{
 		"success": true,

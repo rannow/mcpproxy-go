@@ -37,6 +37,8 @@ var (
 		"read_cache":          true,
 		"list_registries":     true,
 		"search_servers":      true,
+		"groups":              true,
+		"list_available_groups": true,
 	}
 )
 
@@ -53,7 +55,7 @@ var (
 		Long: `Call a tool on an upstream server using the server:tool_name format, or call built-in tools directly.
 The upstream server is automatically derived from the tool name prefix for external tools.
 
-Built-in tools: upstream_servers, quarantine_security, retrieve_tools, call_tool, read_cache, list_registries, search_servers
+Built-in tools: upstream_servers, quarantine_security, retrieve_tools, call_tool, read_cache, list_registries, search_servers, groups, list_available_groups
 
 Examples:
   # Built-in tools (no server prefix)

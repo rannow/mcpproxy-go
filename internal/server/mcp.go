@@ -549,6 +549,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		"read_cache":             true,
 		"list_registries":        true,
 		"search_servers":         true,
+		"groups":                 true,
+		"list_available_groups":  true,
 	}
 
 	if proxyTools[toolName] {

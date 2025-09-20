@@ -141,6 +141,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize groups from config
 	server.initGroupsFromConfig()
 
+	// Initialize server-group assignments from config
+	server.initServerGroupAssignments()
+
 	// Start background initialization immediately
 	go server.backgroundInitialization()
 
@@ -350,6 +353,9 @@ func (s *Server) backgroundToolIndexing(ctx context.Context) {
 //nolint:unparam // function designed to be best-effort, always returns nil by design
 func (s *Server) loadConfiguredServers() error {
 	s.logger.Info("Synchronizing servers from configuration (config as source of truth)")
+
+	// Initialize server-group assignments from config
+	s.initServerGroupAssignments()
 
 	// Get current state for comparison
 	currentUpstreams := s.upstreamManager.GetAllServerNames()
@@ -1241,6 +1247,9 @@ func (s *Server) SaveConfiguration() error {
 	// Sync groups from in-memory storage to config
 	s.syncGroupsToConfig()
 
+	// Sync server-group assignments to config
+	s.syncServerGroupAssignments()
+
 	return config.SaveConfig(s.config, configPath)
 }
 
@@ -1261,6 +1270,25 @@ func (s *Server) syncGroupsToConfig() {
 
 	s.config.Groups = configGroups
 	s.logger.Debug("Synced groups to config", zap.Int("count", len(configGroups)))
+}
+
+// syncServerGroupAssignments syncs server-group assignments to config
+func (s *Server) syncServerGroupAssignments() {
+	assignmentsMutex.RLock()
+	defer assignmentsMutex.RUnlock()
+
+	// Update each server's group_name field in the config
+	for i := range s.config.Servers {
+		serverName := s.config.Servers[i].Name
+		if groupName, exists := serverGroupAssignments[serverName]; exists {
+			s.config.Servers[i].GroupName = groupName
+		} else {
+			s.config.Servers[i].GroupName = ""
+		}
+	}
+
+	s.logger.Debug("Synced server-group assignments to config",
+		zap.Int("assignments", len(serverGroupAssignments)))
 }
 
 // initGroupsFromConfig initializes in-memory groups from config
@@ -1289,6 +1317,25 @@ func (s *Server) initGroupsFromConfig() {
 	}
 
 	s.logger.Debug("Initialized groups from config", zap.Int("count", len(groups)))
+}
+
+// initServerGroupAssignments initializes server-group assignments from config
+func (s *Server) initServerGroupAssignments() {
+	assignmentsMutex.Lock()
+	defer assignmentsMutex.Unlock()
+
+	// Clear existing assignments
+	serverGroupAssignments = make(map[string]string)
+
+	// Load assignments from config
+	for _, server := range s.config.Servers {
+		if server.GroupName != "" {
+			serverGroupAssignments[server.Name] = server.GroupName
+		}
+	}
+
+	s.logger.Info("Initialized server-group assignments from config",
+		zap.Int("assignments", len(serverGroupAssignments)))
 }
 
 // getGroups returns a copy of all groups (thread-safe)
@@ -1324,6 +1371,14 @@ func (s *Server) ReloadConfiguration() error {
 	// Store old config for comparison
 	oldServerCount := len(s.config.Servers)
 
+	// Preserve current server-group assignments before config reload
+	assignmentsMutex.RLock()
+	savedAssignments := make(map[string]string)
+	for serverName, groupName := range serverGroupAssignments {
+		savedAssignments[serverName] = groupName
+	}
+	assignmentsMutex.RUnlock()
+
 	// Load configuration from file
 	configPath := config.GetConfigPath(s.config.DataDir)
 	newConfig, err := config.LoadFromFile(configPath)
@@ -1333,6 +1388,16 @@ func (s *Server) ReloadConfiguration() error {
 
 	// Update internal config
 	s.config = newConfig
+
+	// Restore preserved server-group assignments after config reload
+	assignmentsMutex.Lock()
+	for serverName, groupName := range savedAssignments {
+		serverGroupAssignments[serverName] = groupName
+	}
+	assignmentsMutex.Unlock()
+
+	s.logger.Debug("Preserved server-group assignments during config reload",
+		zap.Int("preserved_assignments", len(savedAssignments)))
 
 	// Reload configured servers (this is where the comprehensive sync happens)
 	s.logger.Debug("About to call loadConfiguredServers")
