@@ -5,6 +5,7 @@ package tray
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	_ "embed"
@@ -2775,19 +2776,102 @@ func (a *App) getColorEmoji(hexColor string) string {
 
 // fetchServerAssignments fetches server-to-group assignments
 func (a *App) fetchServerAssignments() (map[string]string, error) {
-	// For now, return empty assignments since we don't have persistent storage yet
-	// TODO: Implement actual assignment fetching from the groups API
-	return make(map[string]string), nil
+	baseURL := "http://localhost:8080"
+	resp, err := http.Get(baseURL + "/api/assignments")
+	if err != nil {
+		a.logger.Error("Failed to fetch server assignments from API", zap.Error(err))
+		return make(map[string]string), err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("API returned status %d", resp.StatusCode)
+		a.logger.Error("Server assignments API returned error", zap.Error(err))
+		return make(map[string]string), err
+	}
+
+	var response struct {
+		Success     bool `json:"success"`
+		Assignments []struct {
+			ServerName string `json:"server_name"`
+			GroupName  string `json:"group_name"`
+		} `json:"assignments"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		a.logger.Error("Failed to decode server assignments response", zap.Error(err))
+		return make(map[string]string), err
+	}
+
+	if !response.Success {
+		err := fmt.Errorf("API returned success=false")
+		a.logger.Error("Server assignments API returned failure", zap.Error(err))
+		return make(map[string]string), err
+	}
+
+	// Convert to map
+	assignments := make(map[string]string)
+	for _, assignment := range response.Assignments {
+		assignments[assignment.ServerName] = assignment.GroupName
+	}
+
+	a.logger.Info("Successfully fetched server assignments",
+		zap.Int("count", len(assignments)),
+		zap.Any("assignments", assignments))
+
+	return assignments, nil
 }
 
 // assignServerToGroup assigns a server to a group
 func (a *App) assignServerToGroup(serverName, groupName string) {
 	a.logger.Info("Assigning server to group", zap.String("server", serverName), zap.String("group", groupName))
-	
-	// TODO: Implement actual server-to-group assignment
-	// For now, just log the action
-	
-	a.logger.Info("Server assignment completed", zap.String("server", serverName), zap.String("group", groupName))
+
+	// Prepare assignment data
+	assignmentData := map[string]string{
+		"server_name": serverName,
+		"group_name":  groupName,
+	}
+
+	jsonData, err := json.Marshal(assignmentData)
+	if err != nil {
+		a.logger.Error("Failed to marshal assignment data", zap.Error(err))
+		return
+	}
+
+	// Send assignment request to API
+	baseURL := "http://localhost:8080"
+	resp, err := http.Post(baseURL+"/api/assign-server", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		a.logger.Error("Failed to send server assignment request", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		a.logger.Error("Server assignment API returned error", zap.Int("status", resp.StatusCode))
+		return
+	}
+
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		a.logger.Error("Failed to decode assignment response", zap.Error(err))
+		return
+	}
+
+	if !response.Success {
+		a.logger.Error("Server assignment failed", zap.String("error", response.Error))
+		return
+	}
+
+	a.logger.Info("Server assignment completed successfully",
+		zap.String("server", serverName),
+		zap.String("group", groupName),
+		zap.String("message", response.Message))
 }
 
 // ServerState represents the state of a server before stop
