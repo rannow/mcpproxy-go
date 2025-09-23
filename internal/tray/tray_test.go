@@ -553,6 +553,5 @@ func containsAll(slice, expected []string) bool {
 
 // testMenuItem is a dummy type for testing (since we can't create real systray items in tests)
 type testMenuItem struct {
-	title   string
-	tooltip string
+	title string
 }

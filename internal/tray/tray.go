@@ -433,7 +433,7 @@ func (a *App) onReady() {
 	if runtime.GOOS == osDarwin {
 		systray.SetTemplateIcon(iconData, iconData)
 	}
-	a.updateTooltip()
+	a.updateServerCountFromConfig()
 
 	// --- Initialize Menu Items ---
 	a.logger.Debug("Initializing tray menu items")
@@ -488,6 +488,7 @@ func (a *App) onReady() {
 	// --- Other Menu Items ---
 	openConfigItem := systray.AddMenuItem("Open config dir", "")
 	editConfigItem := systray.AddMenuItem("Edit config", "")
+	reloadConfigItem := systray.AddMenuItem("🔄 Reload Config", "")
 	openLogsItem := systray.AddMenuItem("Open logs dir", "")
 	githubItem := systray.AddMenuItem("🔗 GitHub Repository", "")
 
@@ -528,6 +529,8 @@ func (a *App) onReady() {
 				a.openConfigDir()
 			case <-editConfigItem.ClickedCh:
 				a.editConfigFile()
+			case <-reloadConfigItem.ClickedCh:
+				a.handleReloadConfig()
 			case <-openLogsItem.ClickedCh:
 				a.openLogsDir()
 			case <-githubItem.ClickedCh:
@@ -592,24 +595,6 @@ func (a *App) onReady() {
 	a.logger.Info("System tray is ready - menu items fully initialized")
 }
 
-// updateTooltip updates the tooltip based on the server's running state
-func (a *App) updateTooltip() {
-	if a.server == nil {
-		a.updateServerCountFromConfig()
-		return
-	}
-
-	// Get full status and use comprehensive tooltip
-	statusData := a.server.GetStatus()
-	if status, ok := statusData.(map[string]interface{}); ok {
-		a.updateTooltipFromStatusData(status)
-	} else {
-		// Fallback - no tooltip but still update server count
-		if !a.server.IsRunning() {
-			a.updateServerCountFromConfig()
-		}
-	}
-}
 
 // updateStatusFromData updates menu items based on real-time status data from the server
 func (a *App) updateStatusFromData(statusData interface{}) {
@@ -694,8 +679,6 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		a.logger.Debug("Set tray to stopped state")
 	}
 
-	// Update tooltip
-	a.updateTooltipFromStatusData(status)
 
 	// Update server menus using the manager (only if server is running)
 	if a.syncManager != nil {
@@ -715,17 +698,6 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	}
 }
 
-// updateTooltipFromStatusData updates the tray tooltip from status data map
-func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
-	running, _ := status["running"].(bool)
-
-	if !running {
-		return
-	}
-
-	// No tooltip logic needed anymore - tooltips have been removed
-	// This function remains for compatibility but does nothing
-}
 
 // updateServerCountDisplay updates the server count menu item
 func (a *App) updateServerCountDisplay(totalServers int) {
@@ -753,7 +725,6 @@ func (a *App) updateServerCountDisplay(totalServers int) {
 
 	a.logger.Debug("Setting server count display", zap.String("display_text", displayText))
 	a.serverCountItem.SetTitle(displayText)
-	// Tooltip removed
 }
 
 // updateServerCountFromConfig reads the config file and updates server count display
@@ -796,7 +767,7 @@ func (a *App) updateServersMenuFromStatusData(_ map[string]interface{}) {
 	}
 }
 
-// updateStatus updates the status menu item and tooltip
+// updateStatus updates the status menu item
 func (a *App) updateStatus() {
 	if a.server == nil {
 		return
@@ -1208,6 +1179,39 @@ func (a *App) editConfigFile() {
 	a.openFile(a.configPath, "config file")
 }
 
+// handleReloadConfig reloads the configuration from file
+func (a *App) handleReloadConfig() {
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+
+	a.logger.Info("Manual configuration reload requested from tray menu")
+
+	if a.server == nil {
+		a.logger.Warn("Server interface not available, cannot reload configuration")
+		return
+	}
+
+	// Trigger configuration reload in the server
+	if err := a.server.ReloadConfiguration(); err != nil {
+		a.logger.Error("Failed to reload configuration", zap.Error(err))
+		return
+	}
+
+	a.logger.Info("Configuration reloaded successfully from tray menu")
+
+	// Force a menu refresh after config reload to show any new servers or groups
+	if a.syncManager != nil {
+		if err := a.syncManager.SyncNow(); err != nil {
+			a.logger.Error("Failed to sync menus after config reload", zap.Error(err))
+		}
+	}
+
+	// Reload groups from config to reflect any changes
+	a.refreshGroupsMenu()
+}
+
 // openGitHubRepository opens the GitHub repository URL in the default browser
 func (a *App) openGitHubRepository() {
 	// Notify sync manager of user activity for adaptive frequency
@@ -1342,8 +1346,10 @@ func (a *App) refreshMenusImmediate() {
 		if a.menuManager != nil {
 			a.menuManager.SetServerGroups(&a.serverGroups)
 		}
+		// Update Group Management submenus after config reload
+		a.updateGroupManagementSubmenus()
 	}
-	
+
 	if err := a.syncManager.SyncNow(); err != nil {
 		a.logger.Error("Failed to refresh menus immediately", zap.Error(err))
 	}
@@ -1428,6 +1434,9 @@ func (a *App) handleServerAction(serverName, action string) {
 
 	case "configure":
 		err = a.handleServerConfiguration(serverName)
+
+	case "restart":
+		err = a.handleServerRestart(serverName)
 
 	default:
 		// Check if it's a group action
@@ -1565,10 +1574,8 @@ func (a *App) updateAutostartMenuItem() {
 
 	if a.autostartManager.IsEnabled() {
 		a.autostartItem.SetTitle("☑️ Start at Login")
-		// Tooltip removed
 	} else {
 		a.autostartItem.SetTitle("Start at Login")
-		// Tooltip removed
 	}
 }
 
@@ -1962,7 +1969,7 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 
 	for _, nameOption := range nameOptions {
 		if nameOption != groupName { // Don't show current name as option
-			nameItem := nameSection.AddSubMenuItem("→ " + nameOption, fmt.Sprintf("Rename group to '%s'", nameOption))
+			nameItem := nameSection.AddSubMenuItem("→ " + nameOption, "")
 
 			go func(oldName, newName string, item *systray.MenuItem) {
 				for range item.ClickedCh {
@@ -2012,7 +2019,7 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 	}(doneItem)
 
 	// Delete button
-	deleteItem := a.groupManagementMenu.AddSubMenuItem("🗑️ Delete Group", fmt.Sprintf("Delete group '%s'", groupName))
+	deleteItem := a.groupManagementMenu.AddSubMenuItem("🗑️ Delete Group", "")
 	go func(gName string, item *systray.MenuItem) {
 		for range item.ClickedCh {
 			a.handleDeleteGroup(gName)
@@ -2065,6 +2072,7 @@ func (a *App) handleRenameGroup(oldName, newName string) {
 		zap.String("new_name", newName))
 
 	// Refresh menus to show changes
+	a.updateGroupManagementSubmenus() // Update Group Management submenus to reflect rename
 	if a.syncManager != nil {
 		a.syncManager.SyncDelayed() // Refresh server menus to update group references
 	}
@@ -2098,6 +2106,7 @@ func (a *App) handleChangeGroupColor(groupName string, newColor struct{ Emoji, N
 		zap.String("new_emoji", newColor.Emoji))
 
 	// Refresh menus to show changes
+	a.updateGroupManagementSubmenus() // Update Group Management submenus to reflect color change
 	if a.syncManager != nil {
 		a.syncManager.SyncDelayed() // Refresh server menus to show new colors
 	}
@@ -2125,6 +2134,7 @@ func (a *App) handleDeleteGroup(groupName string) {
 
 	// Refresh the menu
 	a.refreshGroupsMenu()
+	a.updateGroupManagementSubmenus() // Update Group Management submenus to reflect deletion
 }
 
 // handleAssignServerToGroup assigns a server to a specific group
@@ -2155,6 +2165,7 @@ func (a *App) handleAssignServerToGroup(serverName, groupName string) error {
 
 	// Refresh menus to show changes
 	a.refreshGroupsMenu()
+	a.updateGroupManagementSubmenus() // Update Group Management submenus to reflect assignment
 	if a.syncManager != nil {
 		a.syncManager.SyncDelayed() // Refresh server menus to show group colors
 	}
@@ -2193,6 +2204,7 @@ func (a *App) handleRemoveServerFromGroup(serverName, groupName string) error {
 
 	// Refresh menus to show changes
 	a.refreshGroupsMenu()
+	a.updateGroupManagementSubmenus() // Update Group Management submenus to reflect removal
 	if a.syncManager != nil {
 		a.syncManager.SyncDelayed() // Refresh server menus to remove group colors
 	}
@@ -2314,6 +2326,61 @@ func (a *App) handleServerConfiguration(serverName string) error {
 
 	// Show the dialog
 	return dialog.Show(a.ctx, onSave, onCancel)
+}
+
+// handleServerRestart restarts a server by disabling and re-enabling it
+func (a *App) handleServerRestart(serverName string) error {
+	a.logger.Info("Restarting server", zap.String("server", serverName))
+
+	// Notify sync manager of user activity for adaptive frequency
+	if a.syncManager != nil {
+		a.syncManager.NotifyUserActivity()
+	}
+
+	// Get current server configuration to check if it's enabled
+	allServers, err := a.stateManager.GetAllServers()
+	if err != nil {
+		return fmt.Errorf("failed to get servers for restart: %w", err)
+	}
+
+	var serverEnabled bool
+	found := false
+	for _, server := range allServers {
+		if name, ok := server["name"].(string); ok && name == serverName {
+			if enabled, ok := server["enabled"].(bool); ok {
+				serverEnabled = enabled
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	// Only restart if the server is currently enabled
+	if !serverEnabled {
+		a.logger.Warn("Cannot restart disabled server", zap.String("server", serverName))
+		return fmt.Errorf("server '%s' is disabled and cannot be restarted", serverName)
+	}
+
+	// Restart by disabling then re-enabling
+	a.logger.Info("Disabling server for restart", zap.String("server", serverName))
+	if err := a.syncManager.HandleServerEnable(serverName, false); err != nil {
+		return fmt.Errorf("failed to disable server for restart: %w", err)
+	}
+
+	// Add a small delay to ensure the server is fully stopped
+	time.Sleep(500 * time.Millisecond)
+
+	a.logger.Info("Re-enabling server after restart", zap.String("server", serverName))
+	if err := a.syncManager.HandleServerEnable(serverName, true); err != nil {
+		return fmt.Errorf("failed to re-enable server after restart: %w", err)
+	}
+
+	a.logger.Info("Server restart completed successfully", zap.String("server", serverName))
+	return nil
 }
 // fetchGroupsFromAPI fetches groups from the web interface API
 func (a *App) fetchGroupsFromAPI() ([]map[string]interface{}, error) {
@@ -2892,7 +2959,7 @@ func (a *App) updateGroupManagementSubmenus() {
 
 		// Create group submenu title with server count
 		groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(assignedServers))
-		groupItem := a.groupManagementMenu.AddSubMenuItem(groupTitle, fmt.Sprintf("Manage group '%s' and its servers", groupName))
+		groupItem := a.groupManagementMenu.AddSubMenuItem(groupTitle, "")
 
 		// Add assigned servers as submenus under each group
 		if len(assignedServers) > 0 {
@@ -2901,10 +2968,10 @@ func (a *App) updateGroupManagementSubmenus() {
 
 			for _, serverName := range assignedServers {
 				serverTitle := fmt.Sprintf("🖥️  %s", serverName)
-				serverItem := groupItem.AddSubMenuItem(serverTitle, fmt.Sprintf("Server '%s' assigned to group '%s'", serverName, groupName))
+				serverItem := groupItem.AddSubMenuItem(serverTitle, "")
 
 				// Add options for this server
-				removeServerItem := serverItem.AddSubMenuItem("➖ Remove from Group", fmt.Sprintf("Remove '%s' from group '%s'", serverName, groupName))
+				removeServerItem := serverItem.AddSubMenuItem("➖ Remove from Group", "")
 
 				// Handle remove server click
 				go func(sName, gName string, item *systray.MenuItem) {

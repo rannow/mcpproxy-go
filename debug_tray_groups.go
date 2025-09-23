@@ -161,7 +161,6 @@ func main() {
 	
 	if groupIcon != "" {
 		fmt.Printf("  Display text would be: 🟢 %s %s\n", groupIcon, testServerName)
-		fmt.Printf("  Tooltip would be: %s - connected%s\n", testServerName, groupInfo)
 	} else {
 		fmt.Printf("  No group found for server %s\n", testServerName)
 		fmt.Printf("  Display text would be: 🟢 %s\n", testServerName)

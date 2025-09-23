@@ -32,7 +32,7 @@ func (h *NotificationHandler) SendNotification(notification *upstream.Notificati
 	// For now, we just log the notification
 	// In a future implementation, we could:
 	// 1. Show system tray notifications/balloons
-	// 2. Update tray icon/tooltip to reflect current status
+	// 2. Update tray icon to reflect current status
 	// 3. Add notification history to tray menu
 
 	// Note: Actual tray notification display would depend on OS capabilities

@@ -88,16 +88,31 @@ type Config struct {
 
 // LogConfig represents logging configuration
 type LogConfig struct {
-	Level         string `json:"level" mapstructure:"level"`
-	EnableFile    bool   `json:"enable_file" mapstructure:"enable-file"`
-	EnableConsole bool   `json:"enable_console" mapstructure:"enable-console"`
-	Filename      string `json:"filename" mapstructure:"filename"`
-	LogDir        string `json:"log_dir,omitempty" mapstructure:"log-dir"` // Custom log directory
-	MaxSize       int    `json:"max_size" mapstructure:"max-size"`         // MB
-	MaxBackups    int    `json:"max_backups" mapstructure:"max-backups"`   // number of backup files
-	MaxAge        int    `json:"max_age" mapstructure:"max-age"`           // days
-	Compress      bool   `json:"compress" mapstructure:"compress"`
-	JSONFormat    bool   `json:"json_format" mapstructure:"json-format"`
+	Level                string              `json:"level" mapstructure:"level"`
+	EnableFile           bool                `json:"enable_file" mapstructure:"enable-file"`
+	EnableConsole        bool                `json:"enable_console" mapstructure:"enable-console"`
+	Filename             string              `json:"filename" mapstructure:"filename"`
+	LogDir               string              `json:"log_dir,omitempty" mapstructure:"log-dir"` // Custom log directory
+	MaxSize              int                 `json:"max_size" mapstructure:"max-size"`         // MB
+	MaxBackups           int                 `json:"max_backups" mapstructure:"max-backups"`   // number of backup files
+	MaxAge               int                 `json:"max_age" mapstructure:"max-age"`           // days
+	Compress             bool                `json:"compress" mapstructure:"compress"`
+	JSONFormat           bool                `json:"json_format" mapstructure:"json-format"`
+	Communication        *CommunicationLogConfig `json:"communication,omitempty" mapstructure:"communication"` // Communication logging configuration
+}
+
+// CommunicationLogConfig represents communication logging configuration
+type CommunicationLogConfig struct {
+	Enabled           bool   `json:"enabled" mapstructure:"enabled"`                       // Enable communication logging
+	Filename          string `json:"filename" mapstructure:"filename"`                     // Communication log filename
+	LogRequests       bool   `json:"log_requests" mapstructure:"log-requests"`             // Log incoming requests
+	LogResponses      bool   `json:"log_responses" mapstructure:"log-responses"`           // Log outgoing responses
+	LogToolCalls      bool   `json:"log_tool_calls" mapstructure:"log-tool-calls"`         // Log tool calls to upstream servers
+	LogErrors         bool   `json:"log_errors" mapstructure:"log-errors"`                 // Log communication errors
+	IncludePayload    bool   `json:"include_payload" mapstructure:"include-payload"`       // Include full payload in logs
+	MaxPayloadSize    int    `json:"max_payload_size" mapstructure:"max-payload-size"`     // Maximum payload size to log (bytes)
+	IncludeHeaders    bool   `json:"include_headers" mapstructure:"include-headers"`       // Include HTTP headers in logs
+	FilterSensitive   bool   `json:"filter_sensitive" mapstructure:"filter-sensitive"`     // Filter sensitive data like API keys
 }
 
 // ServerConfig represents upstream MCP server configuration
@@ -261,6 +276,22 @@ type ToolStatEntry struct {
 	Count    uint64 `json:"count"`
 }
 
+// DefaultCommunicationLogConfig returns default communication logging configuration
+func DefaultCommunicationLogConfig() *CommunicationLogConfig {
+	return &CommunicationLogConfig{
+		Enabled:           false, // Disabled by default to avoid excessive logging
+		Filename:          "communication.log",
+		LogRequests:       true,
+		LogResponses:      true,
+		LogToolCalls:      true,
+		LogErrors:         true,
+		IncludePayload:    true,
+		MaxPayloadSize:    10240, // 10KB default limit
+		IncludeHeaders:    false, // Headers disabled by default for privacy
+		FilterSensitive:   true,  // Filter sensitive data by default
+	}
+}
+
 // DefaultDockerIsolationConfig returns default Docker isolation configuration
 func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 	return &DockerIsolationConfig{
@@ -340,6 +371,7 @@ func DefaultConfig() *Config {
 			MaxAge:        30, // 30 days
 			Compress:      true,
 			JSONFormat:    false, // Use console format for readability
+			Communication: DefaultCommunicationLogConfig(),
 		},
 
 		// Security defaults - permissive by default for compatibility
@@ -437,6 +469,35 @@ func (c *Config) Validate() error {
 	// Ensure DockerIsolation config is not nil
 	if c.DockerIsolation == nil {
 		c.DockerIsolation = DefaultDockerIsolationConfig()
+	}
+
+	// Ensure Logging config is not nil
+	if c.Logging == nil {
+		c.Logging = &LogConfig{
+			Level:         "info",
+			EnableFile:    false,
+			EnableConsole: true,
+			Filename:      "main.log",
+			MaxSize:       10,
+			MaxBackups:    5,
+			MaxAge:        30,
+			Compress:      true,
+			JSONFormat:    false,
+			Communication: DefaultCommunicationLogConfig(),
+		}
+	}
+
+	// Ensure Communication config is not nil
+	if c.Logging.Communication == nil {
+		c.Logging.Communication = DefaultCommunicationLogConfig()
+	}
+
+	// Validate communication log configuration
+	if c.Logging.Communication.MaxPayloadSize < 0 {
+		c.Logging.Communication.MaxPayloadSize = 10240 // Default 10KB
+	}
+	if c.Logging.Communication.Filename == "" {
+		c.Logging.Communication.Filename = "communication.log"
 	}
 
 	return nil

@@ -54,15 +54,16 @@ const (
 
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
-	server          *mcpserver.MCPServer
-	storage         *storage.Manager
-	index           *index.Manager
-	upstreamManager *upstream.Manager
-	cacheManager    *cache.Manager
-	truncator       *truncate.Truncator
-	logger          *zap.Logger
-	mainServer      *Server        // Reference to main server for config persistence
-	config          *config.Config // Add config reference for security checks
+	server             *mcpserver.MCPServer
+	storage            *storage.Manager
+	index              *index.Manager
+	upstreamManager    *upstream.Manager
+	cacheManager       *cache.Manager
+	truncator          *truncate.Truncator
+	logger             *zap.Logger
+	mainServer         *Server        // Reference to main server for config persistence
+	config             *config.Config // Add config reference for security checks
+	communicationLogger *logs.CommunicationLogger // Communication logger for debugging
 
 	// Docker availability cache
 	dockerAvailableCache *bool
@@ -99,16 +100,24 @@ func NewMCPProxyServer(
 		capabilities...,
 	)
 
+	// Initialize communication logger
+	communicationLogger, err := logs.NewCommunicationLogger(config.Logging)
+	if err != nil {
+		logger.Warn("Failed to create communication logger", zap.Error(err))
+		communicationLogger = nil // Continue without communication logging
+	}
+
 	proxy := &MCPProxyServer{
-		server:          mcpServer,
-		storage:         storage,
-		index:           index,
-		upstreamManager: upstreamManager,
-		cacheManager:    cacheManager,
-		truncator:       truncator,
-		logger:          logger,
-		mainServer:      mainServer,
-		config:          config,
+		server:              mcpServer,
+		storage:             storage,
+		index:               index,
+		upstreamManager:     upstreamManager,
+		cacheManager:        cacheManager,
+		truncator:           truncator,
+		logger:              logger,
+		mainServer:          mainServer,
+		config:              config,
+		communicationLogger: communicationLogger,
 	}
 
 	// Register proxy tools
@@ -505,17 +514,42 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 
 // handleCallTool implements the call_tool functionality
 func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	startTime := time.Now()
+	var requestID string
+
+	// Generate request ID for communication logging
+	if p.communicationLogger != nil && p.communicationLogger.IsEnabled() {
+		requestID = fmt.Sprintf("req_%d_%d", startTime.UnixNano(), time.Now().Nanosecond())
+	}
+
 	// Add panic recovery to ensure server resilience
 	defer func() {
 		if r := recover(); r != nil {
 			p.logger.Error("Recovered from panic in handleCallTool",
 				zap.Any("panic", r),
 				zap.Any("request", request))
+			// Log panic as communication error
+			if p.communicationLogger != nil {
+				p.communicationLogger.LogError(ctx,
+					fmt.Sprintf("Panic in handleCallTool: %v", r),
+					"", "", "call_tool", request.Params.Arguments, requestID)
+			}
 		}
 	}()
 
+	// Log incoming request
+	if p.communicationLogger != nil {
+		p.communicationLogger.LogRequest(ctx, "call_tool", request.Params.Arguments, nil, requestID)
+	}
+
 	toolName, err := request.RequireString("name")
 	if err != nil {
+		// Log error
+		if p.communicationLogger != nil {
+			p.communicationLogger.LogError(ctx,
+				fmt.Sprintf("Missing required parameter 'name': %v", err),
+				"", "", "call_tool", request.Params.Arguments, requestID)
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
 	}
 
@@ -619,8 +653,15 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return mcp.NewToolResultError(fmt.Sprintf("No client found for server: %s", serverName)), nil
 	}
 
+	// Log tool call to upstream server
+	if p.communicationLogger != nil {
+		p.communicationLogger.LogToolCall(ctx, serverName, actualToolName, args, nil, requestID)
+	}
+
 	// Call tool via upstream manager with circuit breaker pattern
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
+	duration := time.Since(startTime)
+
 	if err != nil {
 		// Log upstream errors for debugging server stability
 		p.logger.Debug("Upstream tool call failed",
@@ -628,6 +669,13 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("tool", actualToolName),
 			zap.Error(err),
 			zap.String("error_type", "upstream_failure"))
+
+		// Log communication error
+		if p.communicationLogger != nil {
+			p.communicationLogger.LogError(ctx,
+				fmt.Sprintf("Upstream tool call failed: %v", err),
+				serverName, actualToolName, "", args, requestID)
+		}
 
 		// Errors are now enriched at their source with context and guidance
 		// Log error with additional context for debugging
@@ -639,6 +687,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("actual_tool", actualToolName))
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+	}
+
+	// Log tool response from upstream server
+	if p.communicationLogger != nil {
+		p.communicationLogger.LogToolResponse(ctx, serverName, actualToolName, result, duration, requestID)
 	}
 
 	// Increment usage stats
@@ -679,6 +732,16 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		response = truncResult.TruncatedContent
+	}
+
+	// Log response
+	if p.communicationLogger != nil {
+		finalDuration := time.Since(startTime)
+		responseData := map[string]interface{}{
+			"response": response,
+			"truncated": p.truncator.ShouldTruncate(response),
+		}
+		p.communicationLogger.LogResponse(ctx, "call_tool", responseData, nil, finalDuration, requestID)
 	}
 
 	return mcp.NewToolResultText(response), nil
