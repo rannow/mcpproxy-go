@@ -510,6 +510,7 @@ func (a *App) onReady() {
     startupStartItem := startupMenu.AddSubMenuItem("Start", "")
     startupStopItem := startupMenu.AddSubMenuItem("Stop", "")
     startupRestartItem := startupMenu.AddSubMenuItem("Restart", "")
+    startupEditItem := startupMenu.AddSubMenuItem("✏️ Edit Script", "Open startup script file for editing")
 
 	// Version information
 	versionTitle := fmt.Sprintf("ℹ️ Version %s", a.version)
@@ -543,6 +544,7 @@ func (a *App) onReady() {
         if a.server != nil {
             status := a.server.GetStartupScriptStatus()
             title := "Status: Disabled"
+            pathVal := ""
             if status != nil {
                 if enabled, ok := status["enabled"].(bool); ok && enabled {
                     if running, ok2 := status["running"].(bool); ok2 && running {
@@ -551,8 +553,14 @@ func (a *App) onReady() {
                         title = "Status: Stopped"
                     }
                 }
+                if p, ok := status["path"].(string); ok { pathVal = p }
             }
             startupStatusItem.SetTitle(title)
+            if pathVal != "" {
+                startupEditItem.Enable()
+            } else {
+                startupEditItem.Disable()
+            }
         }
     }
     refreshStartup()
@@ -582,6 +590,24 @@ func (a *App) onReady() {
             case <-startupRestartItem.ClickedCh:
                 if a.server != nil { _ = a.server.RestartStartupScript(a.ctx) }
                 refreshStartup()
+            case <-startupEditItem.ClickedCh:
+                if a.server != nil {
+                    status := a.server.GetStartupScriptStatus()
+                    if status != nil {
+                        if p, ok := status["path"].(string); ok && p != "" {
+                            // Basic ~ expansion
+                            if strings.HasPrefix(p, "~") {
+                                if home, err := os.UserHomeDir(); err == nil {
+                                    p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+                                }
+                            }
+                            a.openFile(p, "startup script")
+                        } else {
+                            // Fallback: open config to set path
+                            a.editConfigFile()
+                        }
+                    }
+                }
 			case <-a.groupManagementMenu.ClickedCh:
 				a.openGroupManagementWeb()
 			case <-a.connectedServersMenu.ClickedCh:
