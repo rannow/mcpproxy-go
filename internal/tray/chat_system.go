@@ -145,14 +145,14 @@ func (cs *ChatSystem) CreateSession(serverName string) (*ChatSession, error) {
 }
 
 // ProcessMessage processes a user message and generates agent responses
-func (cs *ChatSystem) ProcessMessage(sessionID string, userMessage string) (*ChatSession, error) {
+func (cs *ChatSystem) ProcessMessage(sessionID string, agentType AgentType, userMessage string, serverName string) (string, error) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 
 	// Load session
 	session, err := cs.storage.LoadSession(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load session: %w", err)
+		return "", fmt.Errorf("failed to load session: %w", err)
 	}
 
 	// Add user message
@@ -166,27 +166,39 @@ func (cs *ChatSystem) ProcessMessage(sessionID string, userMessage string) (*Cha
 	session.Messages = append(session.Messages, userMsg)
 	session.UpdatedAt = time.Now()
 
-	// Determine which agent should handle this message
-	responsibleAgent := cs.selectAgent(userMsg, session)
+	// Get the specified agent
+	agent, exists := cs.agents[agentType]
+	if !exists {
+		return "", fmt.Errorf("agent type %s not available", agentType)
+	}
 
 	// Process message with selected agent
 	ctx := context.Background()
-	agentResponse, err := responsibleAgent.ProcessMessage(ctx, userMsg, session)
+	agentResponse, err := agent.ProcessMessage(ctx, userMsg, session)
 	if err != nil {
 		cs.logger.Error("Agent failed to process message",
 			zap.Error(err),
-			zap.String("agent", string(responsibleAgent.GetAgentType())))
+			zap.String("agent", string(agentType)))
 
-		// Create error response
-		agentResponse = &ChatMessage{
+		// Add error response to session
+		errorMsg := ChatMessage{
 			ID:        generateMessageID(),
 			Role:      "assistant",
 			Content:   fmt.Sprintf("I encountered an error while processing your request: %v", err),
-			AgentType: string(responsibleAgent.GetAgentType()),
+			AgentType: string(agentType),
 			Timestamp: time.Now(),
 		}
+		session.Messages = append(session.Messages, errorMsg)
+		session.UpdatedAt = time.Now()
+
+		// Save session and return error
+		if saveErr := cs.storage.SaveSession(session); saveErr != nil {
+			cs.logger.Error("Failed to save session after error", zap.Error(saveErr))
+		}
+		return "", err
 	}
 
+	// Add successful agent response to session
 	session.Messages = append(session.Messages, *agentResponse)
 	session.UpdatedAt = time.Now()
 
@@ -195,7 +207,7 @@ func (cs *ChatSystem) ProcessMessage(sessionID string, userMessage string) (*Cha
 		cs.logger.Error("Failed to save session after processing", zap.Error(err))
 	}
 
-	return session, nil
+	return agentResponse.Content, nil
 }
 
 // selectAgent determines which agent should handle a message
@@ -262,6 +274,33 @@ func (cs *ChatSystem) DeleteSession(sessionID string) error {
 // generateSessionID generates a unique session ID
 func generateSessionID() string {
 	return fmt.Sprintf("session_%d", time.Now().UnixNano())
+}
+
+// StartSession creates a new chat session for a server
+func (cs *ChatSystem) StartSession(serverName string) (*ChatSession, error) {
+	return cs.CreateSession(serverName)
+}
+
+// LoadSession loads an existing chat session for a server
+func (cs *ChatSystem) LoadSession(serverName string) (*ChatSession, error) {
+	sessions, err := cs.GetSessionsByServer(serverName)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sessions) == 0 {
+		return nil, fmt.Errorf("no session found for server %s", serverName)
+	}
+
+	// Return the most recent session
+	latestSession := sessions[0]
+	for _, session := range sessions {
+		if session.UpdatedAt.After(latestSession.UpdatedAt) {
+			latestSession = session
+		}
+	}
+
+	return latestSession, nil
 }
 
 // generateMessageID generates a unique message ID

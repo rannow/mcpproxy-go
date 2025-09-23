@@ -112,6 +112,12 @@ type ServerInterface interface {
 
 	// OAuth control
 	TriggerOAuthLogin(serverName string) error
+
+	// Startup script control
+	StartStartupScript(ctx context.Context) error
+	StopStartupScript() error
+	RestartStartupScript(ctx context.Context) error
+	GetStartupScriptStatus() map[string]interface{}
 }
 
 // App represents the system tray application
@@ -142,6 +148,9 @@ type App struct {
 	menuManager  *MenuManager
 	syncManager  *SynchronizationManager
 	diagnosticAgent *DiagnosticAgent
+
+	// Chat system for multi-agent diagnostics
+	chatSystem *ChatSystem
 
 	// Autostart manager
 	autostartManager *AutostartManager
@@ -465,6 +474,10 @@ func (a *App) onReady() {
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
 	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar())
 
+	// Initialize chat system
+	storage := NewFileChatStorage(a.logger.Desugar())
+	a.chatSystem = NewChatSystem(a.logger.Desugar(), storage, a.server)
+
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
 	a.menuManager.SetActionCallback(a.handleServerAction)
@@ -485,12 +498,18 @@ func (a *App) onReady() {
 	// Load initial server count from config
 	a.updateServerCountFromConfig()
 
-	// --- Other Menu Items ---
-	openConfigItem := systray.AddMenuItem("Open config dir", "")
-	editConfigItem := systray.AddMenuItem("Edit config", "")
-	reloadConfigItem := systray.AddMenuItem("🔄 Reload Config", "")
-	openLogsItem := systray.AddMenuItem("Open logs dir", "")
-	githubItem := systray.AddMenuItem("🔗 GitHub Repository", "")
+    // --- Other Menu Items ---
+    openConfigItem := systray.AddMenuItem("Open config dir", "")
+    editConfigItem := systray.AddMenuItem("Edit config", "")
+    reloadConfigItem := systray.AddMenuItem("🔄 Reload Config", "")
+    openLogsItem := systray.AddMenuItem("Open logs dir", "")
+    githubItem := systray.AddMenuItem("🔗 GitHub Repository", "")
+    // Startup script submenu
+    startupMenu := systray.AddMenuItem("🚀 Startup Script", "Manage startup script")
+    startupStatusItem := startupMenu.AddSubMenuItem("Status: Loading...", "")
+    startupStartItem := startupMenu.AddSubMenuItem("Start", "")
+    startupStopItem := startupMenu.AddSubMenuItem("Stop", "")
+    startupRestartItem := startupMenu.AddSubMenuItem("Restart", "")
 
 	// Version information
 	versionTitle := fmt.Sprintf("ℹ️ Version %s", a.version)
@@ -519,7 +538,26 @@ func (a *App) onReady() {
 
 	a.syncManager.Start()
 
-	// --- Click Handlers ---
+    // Helper to refresh startup status
+    refreshStartup := func() {
+        if a.server != nil {
+            status := a.server.GetStartupScriptStatus()
+            title := "Status: Disabled"
+            if status != nil {
+                if enabled, ok := status["enabled"].(bool); ok && enabled {
+                    if running, ok2 := status["running"].(bool); ok2 && running {
+                        title = "Status: Running"
+                    } else {
+                        title = "Status: Stopped"
+                    }
+                }
+            }
+            startupStatusItem.SetTitle(title)
+        }
+    }
+    refreshStartup()
+
+    // --- Click Handlers ---
 	go func() {
 		for {
 			select {
@@ -533,8 +571,17 @@ func (a *App) onReady() {
 				a.handleReloadConfig()
 			case <-openLogsItem.ClickedCh:
 				a.openLogsDir()
-			case <-githubItem.ClickedCh:
+            case <-githubItem.ClickedCh:
 				a.openGitHubRepository()
+            case <-startupStartItem.ClickedCh:
+                if a.server != nil { _ = a.server.StartStartupScript(a.ctx) }
+                refreshStartup()
+            case <-startupStopItem.ClickedCh:
+                if a.server != nil { _ = a.server.StopStartupScript() }
+                refreshStartup()
+            case <-startupRestartItem.ClickedCh:
+                if a.server != nil { _ = a.server.RestartStartupScript(a.ctx) }
+                refreshStartup()
 			case <-a.groupManagementMenu.ClickedCh:
 				a.openGroupManagementWeb()
 			case <-a.connectedServersMenu.ClickedCh:
@@ -2264,8 +2311,9 @@ func (a *App) handleServerConfiguration(serverName string) error {
 	// Create and show configuration dialog
 	dialog := NewServerConfigDialog(a.logger, targetServer, serverName)
 	
-	// Set diagnostic agent and server manager
+	// Set diagnostic agent, chat system, and server manager
 	dialog.diagnosticAgent = a.diagnosticAgent
+	dialog.chatSystem = a.chatSystem
 	if a.server != nil {
 		dialog.serverManager = a.server
 	}

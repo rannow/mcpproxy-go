@@ -21,6 +21,7 @@ import (
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
+    "mcpproxy-go/internal/startup"
 )
 
 // Group represents a server group
@@ -56,6 +57,9 @@ type Server struct {
 	cacheManager    *cache.Manager
 	truncator       *truncate.Truncator
 	mcpProxy        *MCPProxyServer
+
+	// Startup script manager
+	startupManager *startup.Manager
 
 	// Server control
 	httpServer *http.Server
@@ -117,7 +121,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Create a context that will be used for background operations
 	ctx, cancel := context.WithCancel(context.Background())
 
-	server := &Server{
+    server := &Server{
 		config:          cfg,
 		configPath:      configPath,
 		logger:          logger,
@@ -135,6 +139,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 			LastUpdated: time.Now(),
 		},
 	}
+
+	// Initialize startup script manager
+	server.startupManager = startup.NewManager(cfg.StartupScript, logger.Sugar())
 
 	// Create MCP proxy server
 	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, cacheManager, truncator, logger, server, cfg.DebugSearch, cfg)
@@ -518,7 +525,16 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = s.logger.Sync()
 	}()
 
-	// Determine transport mode based on listen address
+    // Start startup script (best-effort) before serving
+    if s.startupManager != nil {
+        if err := s.startupManager.Start(ctx); err != nil {
+            s.logger.Warn("Failed to start startup script", zap.Error(err))
+        } else {
+            s.logger.Info("Startup script initialization completed")
+        }
+    }
+
+    // Determine transport mode based on listen address
 	if s.config.Listen != "" && s.config.Listen != ":0" {
 		// Start the MCP server in HTTP mode (Streamable HTTP)
 		s.logger.Info("Starting MCP server",
@@ -588,7 +604,15 @@ func (s *Server) Shutdown() error {
 
 	s.logger.Info("Shutting down MCP proxy server...")
 
-	// Gracefully shutdown HTTP server first to stop accepting new connections
+    // First stop startup script and its subprocesses
+    if s.startupManager != nil {
+        s.logger.Info("Stopping startup script")
+        if err := s.startupManager.Stop(); err != nil {
+            s.logger.Warn("Failed to stop startup script", zap.Error(err))
+        }
+    }
+
+    // Gracefully shutdown HTTP server first to stop accepting new connections
 	if httpServer != nil {
 		s.logger.Info("Gracefully shutting down HTTP server...")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1071,11 +1095,21 @@ func (s *Server) StopServer() error {
 	s.logger.Info("STOPSERVER - HTTP server cleanup completed")
 	_ = s.logger.Sync()
 
-	// Upstream servers already disconnected early in this method
+    // Upstream servers already disconnected early in this method
 	s.logger.Info("STOPSERVER - Upstream servers already disconnected early")
 	_ = s.logger.Sync()
 
-	// Set running to false immediately after server is shut down
+    // Stop startup script as part of stop sequence
+    if s.startupManager != nil {
+        s.logger.Info("STOPSERVER - Stopping startup script")
+        _ = s.logger.Sync()
+        if err := s.startupManager.Stop(); err != nil {
+            s.logger.Warn("STOPSERVER - Failed to stop startup script", zap.Error(err))
+            _ = s.logger.Sync()
+        }
+    }
+
+    // Set running to false immediately after server is shut down
 	s.running = false
 
 	// Notify about server stopped with explicit status update
@@ -1860,4 +1894,61 @@ func (s *Server) GetGitHubURL() string {
 	}
 	// Fallback to default GitHub URL if not configured
 	return "https://github.com/smart-mcp-proxy/mcpproxy-go"
+}
+
+// --- Startup Script Management (exposed for tray/MCP) ---
+
+// StartStartupScript starts the configured startup script if enabled
+func (s *Server) StartStartupScript(ctx context.Context) error {
+    if s.startupManager == nil {
+        return fmt.Errorf("startup manager not initialized")
+    }
+    return s.startupManager.Start(ctx)
+}
+
+// StopStartupScript stops the startup script and child processes
+func (s *Server) StopStartupScript() error {
+    if s.startupManager == nil {
+        return nil
+    }
+    return s.startupManager.Stop()
+}
+
+// RestartStartupScript restarts the startup script
+func (s *Server) RestartStartupScript(ctx context.Context) error {
+    if s.startupManager == nil {
+        return fmt.Errorf("startup manager not initialized")
+    }
+    return s.startupManager.Restart(ctx)
+}
+
+// GetStartupScriptStatus returns status information about the startup script
+func (s *Server) GetStartupScriptStatus() map[string]interface{} {
+    if s.startupManager == nil {
+        return map[string]interface{}{"enabled": false, "running": false}
+    }
+    return s.startupManager.Status()
+}
+
+// UpdateStartupScript updates startup script configuration and persists it
+func (s *Server) UpdateStartupScript(cfg *config.StartupScriptConfig) error {
+    if cfg == nil {
+        return fmt.Errorf("nil startup script config")
+    }
+    // Basic validation
+    if err := startup.ValidateConfig(cfg); err != nil {
+        return err
+    }
+    // Update in-memory
+    s.config.StartupScript = cfg
+    if s.startupManager != nil {
+        s.startupManager.UpdateConfig(cfg)
+    } else {
+        s.startupManager = startup.NewManager(cfg, s.logger.Sugar())
+    }
+    // Persist to disk
+    if err := s.SaveConfiguration(); err != nil {
+        return err
+    }
+    return nil
 }

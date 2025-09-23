@@ -84,6 +84,9 @@ type Config struct {
 
 	// GitHub repository URL for the project
 	GitHubURL string `json:"github_url,omitempty" mapstructure:"github-url"`
+
+	// Startup script configuration, executed when mcpproxy starts
+	StartupScript *StartupScriptConfig `json:"startup_script,omitempty" mapstructure:"startup-script"`
 }
 
 // LogConfig represents logging configuration
@@ -113,6 +116,18 @@ type CommunicationLogConfig struct {
 	MaxPayloadSize    int    `json:"max_payload_size" mapstructure:"max-payload-size"`     // Maximum payload size to log (bytes)
 	IncludeHeaders    bool   `json:"include_headers" mapstructure:"include-headers"`       // Include HTTP headers in logs
 	FilterSensitive   bool   `json:"filter_sensitive" mapstructure:"filter-sensitive"`     // Filter sensitive data like API keys
+}
+
+// StartupScriptConfig represents configuration for an optional startup script that
+// runs when mcpproxy launches. The script can be managed via tray and MCP tools.
+type StartupScriptConfig struct {
+    Enabled     bool              `json:"enabled" mapstructure:"enabled"`
+    Path        string            `json:"path,omitempty" mapstructure:"path"`               // Script file path or shell command
+    Shell       string            `json:"shell,omitempty" mapstructure:"shell"`             // Shell to execute with -c (default: /bin/bash)
+    Args        []string          `json:"args,omitempty" mapstructure:"args"`               // Optional extra args to append after -c
+    WorkingDir  string            `json:"working_dir,omitempty" mapstructure:"working_dir"`
+    Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
+    Timeout     Duration          `json:"timeout,omitempty" mapstructure:"timeout"`         // Optional max runtime before forced stop (0 = no timeout)
 }
 
 // ServerConfig represents upstream MCP server configuration
@@ -440,6 +455,17 @@ func DefaultConfig() *Config {
 
 		// Default GitHub repository URL
 		GitHubURL: "https://github.com/smart-mcp-proxy/mcpproxy-go",
+
+		// Default startup script configuration (disabled by default)
+		StartupScript: &StartupScriptConfig{
+			Enabled:    false,
+			Shell:      "/bin/bash",
+			Path:       "",
+			Args:       []string{},
+			WorkingDir: "",
+			Env:        map[string]string{},
+			Timeout:    Duration(0),
+		},
 	}
 }
 
@@ -490,6 +516,14 @@ func (c *Config) Validate() error {
 	// Ensure Communication config is not nil
 	if c.Logging.Communication == nil {
 		c.Logging.Communication = DefaultCommunicationLogConfig()
+	}
+
+	// Ensure StartupScript defaults
+	if c.StartupScript == nil {
+		c.StartupScript = &StartupScriptConfig{Enabled: false, Shell: "/bin/bash", Args: []string{}, Env: map[string]string{}}
+	}
+	if c.StartupScript.Shell == "" {
+		c.StartupScript.Shell = "/bin/bash"
 	}
 
 	// Validate communication log configuration

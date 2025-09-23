@@ -31,10 +31,13 @@ type ServerConfigDialog struct {
 	// Dialog state
 	onSave   func(*config.ServerConfig) error
 	onCancel func()
-	
+
 	// Diagnostic agent
 	diagnosticAgent *DiagnosticAgent
-	
+
+	// Chat system
+	chatSystem *ChatSystem
+
 	// Server manager for tools fetching
 	serverManager interface {
 		GetServerTools(serverName string) ([]map[string]interface{}, error)
@@ -320,6 +323,143 @@ const configDialogTemplate = `<!DOCTYPE html>
         .btn-add:hover {
             background: #059669;
         }
+
+        /* Chat Interface Styles */
+        .chat-interface {
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            background: white;
+            overflow: hidden;
+        }
+
+        .chat-messages {
+            height: 300px;
+            overflow-y: auto;
+            padding: 15px;
+            border-bottom: 1px solid #dee2e6;
+            background: #f8f9fa;
+        }
+
+        .chat-message {
+            margin-bottom: 15px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-message.user {
+            align-items: flex-end;
+        }
+
+        .chat-message.agent {
+            align-items: flex-start;
+        }
+
+        .chat-message-header {
+            font-size: 12px;
+            color: #6c757d;
+            margin-bottom: 5px;
+        }
+
+        .chat-message-content {
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 15px;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+
+        .chat-message.user .chat-message-content {
+            background: #667eea;
+            color: white;
+            border-bottom-right-radius: 5px;
+        }
+
+        .chat-message.agent .chat-message-content {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-bottom-left-radius: 5px;
+        }
+
+        .chat-input-section {
+            padding: 15px;
+            background: white;
+        }
+
+        .chat-input-container {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .chat-input {
+            flex: 1;
+            margin-bottom: 0;
+        }
+
+        .btn-chat-send {
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-chat-send:hover {
+            background: #5a67d8;
+            transform: translateY(-1px);
+        }
+
+        .btn-chat-send:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .chat-agent-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .agent-selector {
+            padding: 5px 10px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .chat-typing {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 15px;
+            font-style: italic;
+            color: #6c757d;
+        }
+
+        .typing-indicator {
+            display: flex;
+            gap: 2px;
+        }
+
+        .typing-dot {
+            width: 4px;
+            height: 4px;
+            border-radius: 50%;
+            background: #6c757d;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes typing {
+            0%, 80%, 100% { opacity: 0.3; }
+            40% { opacity: 1; }
+        }
     </style>
 </head>
 <body>
@@ -458,6 +598,31 @@ const configDialogTemplate = `<!DOCTYPE html>
         <div class="section" style="margin-top: 20px;">
             <h3>🔍 Diagnostic Report</h3>
             <div id="diagnosticReport" class="diagnostic-report"></div>
+        </div>
+
+        <!-- Chat Interface Section -->
+        <div class="section" style="margin-top: 20px;">
+            <h3>💬 Diagnostic Chat Assistant</h3>
+            <div id="chatInterface" class="chat-interface">
+                <div id="chatMessages" class="chat-messages"></div>
+                <div class="chat-input-section">
+                    <div class="chat-input-container">
+                        <input type="text" id="chatInput" placeholder="Ask the diagnostic agent for help..." class="chat-input">
+                        <button type="button" id="chatSend" class="btn-chat-send">Send</button>
+                    </div>
+                    <div class="chat-agent-selector">
+                        <label for="agentSelector">Agent:</label>
+                        <select id="agentSelector" class="agent-selector">
+                            <option value="coordinator">🎯 Coordinator (General help)</option>
+                            <option value="log_analyzer">📊 Log Analyzer</option>
+                            <option value="doc_analyzer">📖 Documentation Analyzer</option>
+                            <option value="config_updater">⚙️ Config Updater</option>
+                            <option value="installer">📦 Installer</option>
+                            <option value="tester">🧪 Tester</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -748,10 +913,225 @@ const configDialogTemplate = `<!DOCTYPE html>
             });
         }
 
+        // Chat functionality
+        let chatSession = null;
+
+        function initializeChat() {
+            // Load existing chat session if available
+            fetch('/chat/session')
+            .then(response => response.json())
+            .then(session => {
+                chatSession = session;
+                displayChatHistory(session.messages || []);
+            })
+            .catch(error => {
+                console.log('No existing chat session, starting fresh');
+                // Start new session
+                startNewChatSession();
+            });
+
+            // Set up event listeners
+            const chatInput = document.getElementById('chatInput');
+            const chatSend = document.getElementById('chatSend');
+
+            chatSend.addEventListener('click', sendChatMessage);
+            chatInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendChatMessage();
+                }
+            });
+        }
+
+        function startNewChatSession() {
+            fetch('/chat/new', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ serverName: configData.ServerName })
+            })
+            .then(response => response.json())
+            .then(session => {
+                chatSession = session;
+                addWelcomeMessage();
+            })
+            .catch(error => {
+                console.error('Failed to start chat session:', error);
+            });
+        }
+
+        function addWelcomeMessage() {
+            const welcomeMsg = {
+                id: 'welcome',
+                type: 'agent',
+                agent_type: 'coordinator',
+                content: 'Hello! I\'m your diagnostic assistant. I can help you with:\n\n• Log analysis and error diagnosis\n• Configuration validation and updates\n• Service installation guidance\n• Tool testing and validation\n• General troubleshooting\n\nSelect an agent from the dropdown and ask your question!',
+                timestamp: new Date().toISOString()
+            };
+            displayMessage(welcomeMsg);
+        }
+
+        function displayChatHistory(messages) {
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.innerHTML = '';
+
+            if (messages.length === 0) {
+                addWelcomeMessage();
+                return;
+            }
+
+            messages.forEach(message => {
+                displayMessage(message);
+            });
+
+            // Scroll to bottom
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function displayMessage(message) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageElement = document.createElement('div');
+            messageElement.className = 'chat-message ' + message.type;
+
+            const timestamp = new Date(message.timestamp).toLocaleTimeString();
+            const agentName = getAgentDisplayName(message.agent_type);
+
+            messageElement.innerHTML = ` + "`" + `
+                <div class="chat-message-header">
+                    ` + "${message.type === 'user' ? 'You' : agentName} - ${timestamp}" + `
+                </div>
+                <div class="chat-message-content">` + "${escapeHtml(message.content)}" + `</div>
+            ` + "`" + `;
+
+            chatMessages.appendChild(messageElement);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function getAgentDisplayName(agentType) {
+            const agentNames = {
+                coordinator: '🎯 Coordinator',
+                log_analyzer: '📊 Log Analyzer',
+                doc_analyzer: '📖 Documentation Analyzer',
+                config_updater: '⚙️ Config Updater',
+                installer: '📦 Installer',
+                tester: '🧪 Tester'
+            };
+            return agentNames[agentType] || 'Agent';
+        }
+
+        function sendChatMessage() {
+            const chatInput = document.getElementById('chatInput');
+            const chatSend = document.getElementById('chatSend');
+            const agentSelector = document.getElementById('agentSelector');
+
+            const message = chatInput.value.trim();
+            if (!message) return;
+
+            const selectedAgent = agentSelector.value;
+
+            // Display user message immediately
+            const userMessage = {
+                type: 'user',
+                agent_type: selectedAgent,
+                content: message,
+                timestamp: new Date().toISOString()
+            };
+            displayMessage(userMessage);
+
+            // Clear input and disable send button
+            chatInput.value = '';
+            chatSend.disabled = true;
+            chatSend.textContent = 'Sending...';
+
+            // Show typing indicator
+            showTypingIndicator(selectedAgent);
+
+            // Send message to server
+            fetch('/chat/message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: chatSession.id,
+                    agentType: selectedAgent,
+                    message: message,
+                    serverName: configData.ServerName
+                })
+            })
+            .then(response => response.json())
+            .then(result => {
+                hideTypingIndicator();
+
+                if (result.success && result.response) {
+                    const agentMessage = {
+                        type: 'agent',
+                        agent_type: selectedAgent,
+                        content: result.response,
+                        timestamp: new Date().toISOString()
+                    };
+                    displayMessage(agentMessage);
+                } else {
+                    const errorMessage = {
+                        type: 'agent',
+                        agent_type: selectedAgent,
+                        content: 'Sorry, I encountered an error: ' + (result.error || 'Unknown error'),
+                        timestamp: new Date().toISOString()
+                    };
+                    displayMessage(errorMessage);
+                }
+            })
+            .catch(error => {
+                hideTypingIndicator();
+                console.error('Chat error:', error);
+                const errorMessage = {
+                    type: 'agent',
+                    agent_type: selectedAgent,
+                    content: 'Sorry, I couldn\'t process your message. Please try again.',
+                    timestamp: new Date().toISOString()
+                };
+                displayMessage(errorMessage);
+            })
+            .finally(() => {
+                chatSend.disabled = false;
+                chatSend.textContent = 'Send';
+                chatInput.focus();
+            });
+        }
+
+        function showTypingIndicator(agentType) {
+            const chatMessages = document.getElementById('chatMessages');
+            const typingElement = document.createElement('div');
+            typingElement.id = 'typingIndicator';
+            typingElement.className = 'chat-typing';
+            typingElement.innerHTML = ` + "`" + `
+                ` + "${getAgentDisplayName(agentType)}" + ` is typing
+                <div class="typing-indicator">
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                </div>
+            ` + "`" + `;
+
+            chatMessages.appendChild(typingElement);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function hideTypingIndicator() {
+            const typingIndicator = document.getElementById('typingIndicator');
+            if (typingIndicator) {
+                typingIndicator.remove();
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         // Load initial data on page load
         window.addEventListener('load', function() {
             loadConnectionStatus();
             loadTools();
+            initializeChat();
         });
     </script>
 </body>
@@ -787,6 +1167,9 @@ func (d *ServerConfigDialog) Show(ctx context.Context, onSave func(*config.Serve
 	mux.HandleFunc("/cancel", d.handleCancel)
 	mux.HandleFunc("/diagnostic", d.handleDiagnostic)
 	mux.HandleFunc("/tools", d.handleTools)
+	mux.HandleFunc("/chat/session", d.handleChatSession)
+	mux.HandleFunc("/chat/new", d.handleChatNew)
+	mux.HandleFunc("/chat/message", d.handleChatMessage)
 
 	d.httpServer = &http.Server{
 		Handler:      mux,
@@ -1005,4 +1388,106 @@ func (d *ServerConfigDialog) openBrowser(url string) error {
 	}
 
 	return cmd.Start()
+}
+
+// handleChatSession handles requests to get the current chat session
+func (d *ServerConfigDialog) handleChatSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.chatSystem == nil {
+		http.Error(w, "Chat system not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Try to load existing session for this server
+	session, err := d.chatSystem.LoadSession(d.serverName)
+	if err != nil {
+		// No existing session found
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "No existing session found",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(session)
+}
+
+// handleChatNew handles requests to start a new chat session
+func (d *ServerConfigDialog) handleChatNew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.chatSystem == nil {
+		http.Error(w, "Chat system not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var request struct {
+		ServerName string `json:"serverName"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	session, err := d.chatSystem.StartSession(request.ServerName)
+	if err != nil {
+		d.logger.Error("Failed to start chat session", zap.Error(err))
+		http.Error(w, "Failed to start session", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(session)
+}
+
+// handleChatMessage handles chat message requests
+func (d *ServerConfigDialog) handleChatMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.chatSystem == nil {
+		http.Error(w, "Chat system not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var request struct {
+		SessionID  string    `json:"sessionId"`
+		AgentType  AgentType `json:"agentType"`
+		Message    string    `json:"message"`
+		ServerName string    `json:"serverName"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		d.logger.Error("Failed to decode chat message request", zap.Error(err))
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	response, err := d.chatSystem.ProcessMessage(request.SessionID, request.AgentType, request.Message, request.ServerName)
+	if err != nil {
+		d.logger.Error("Failed to process chat message", zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"response": response,
+	})
 }

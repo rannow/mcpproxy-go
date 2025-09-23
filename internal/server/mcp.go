@@ -184,6 +184,38 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	)
 	p.server.AddTool(readCacheTool, p.handleReadCache)
 
+	// startup_script - Manage startup script lifecycle and configuration
+	startupTool := mcp.NewTool("startup_script",
+		mcp.WithDescription("Manage the startup script that runs when mcpproxy starts. Operations: status, start, stop, restart, update_config."),
+		mcp.WithString("operation",
+			mcp.Required(),
+			mcp.Description("Operation: status, start, stop, restart, update_config"),
+			mcp.Enum("status", "start", "stop", "restart", "update_config"),
+		),
+		mcp.WithString("path",
+			mcp.Description("Script path or command (for update_config)"),
+		),
+		mcp.WithString("shell",
+			mcp.Description("Shell to use, default /bin/bash (for update_config)"),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("JSON array of args, e.g. ['--flag'] (for update_config)"),
+		),
+		mcp.WithString("env_json",
+			mcp.Description("JSON object of env vars (for update_config)"),
+		),
+		mcp.WithString("working_dir",
+			mcp.Description("Working directory (for update_config)"),
+		),
+		mcp.WithBoolean("enabled",
+			mcp.Description("Enable/disable startup script (for update_config)"),
+		),
+		mcp.WithNumber("timeout_seconds",
+			mcp.Description("Timeout seconds before forced stop (for update_config)"),
+		),
+	)
+	p.server.AddTool(startupTool, p.handleStartupScriptTool)
+
 	// upstream_servers - Basic server management (with security checks)
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
 		upstreamServersTool := mcp.NewTool("upstream_servers",
@@ -404,6 +436,70 @@ func (p *MCPProxyServer) handleListRegistries(_ context.Context, _ mcp.CallToolR
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// handleStartupScriptTool manages the startup script via MCP tool
+func (p *MCPProxyServer) handleStartupScriptTool(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+    if p.mainServer == nil {
+        return mcp.NewToolResultError("Main server not available"), nil
+    }
+    operation, err := request.RequireString("operation")
+    if err != nil {
+        return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
+    }
+
+    switch operation {
+    case "status":
+        status := p.mainServer.GetStartupScriptStatus()
+        out, _ := json.Marshal(status)
+        return mcp.NewToolResultText(string(out)), nil
+    case "start":
+        if err := p.mainServer.StartStartupScript(ctx); err != nil {
+            return mcp.NewToolResultError(fmt.Sprintf("Failed to start startup script: %v", err)), nil
+        }
+        return mcp.NewToolResultText(`{"started":true}`), nil
+    case "stop":
+        if err := p.mainServer.StopStartupScript(); err != nil {
+            return mcp.NewToolResultError(fmt.Sprintf("Failed to stop startup script: %v", err)), nil
+        }
+        return mcp.NewToolResultText(`{"stopped":true}`), nil
+    case "restart":
+        if err := p.mainServer.RestartStartupScript(ctx); err != nil {
+            return mcp.NewToolResultError(fmt.Sprintf("Failed to restart startup script: %v", err)), nil
+        }
+        return mcp.NewToolResultText(`{"restarted":true}`), nil
+    case "update_config":
+        // Build config from optional fields
+        current := p.mainServer.config.StartupScript
+        cfg := &config.StartupScriptConfig{}
+        if current != nil { *cfg = *current }
+
+        if request.Params.Arguments != nil {
+            if argsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+                if v, ok := argsMap["path"].(string); ok { cfg.Path = v }
+                if v, ok := argsMap["shell"].(string); ok { cfg.Shell = v }
+                if v, ok := argsMap["working_dir"].(string); ok { cfg.WorkingDir = v }
+                if v, ok := argsMap["enabled"].(bool); ok { cfg.Enabled = v }
+                if vv, ok := argsMap["timeout_seconds"].(float64); ok { cfg.Timeout = config.Duration(time.Duration(int(vv)) * time.Second) }
+                if s, ok := argsMap["args_json"].(string); ok && s != "" {
+                    var arr []string
+                    if err := json.Unmarshal([]byte(s), &arr); err == nil { cfg.Args = arr }
+                }
+                if s, ok := argsMap["env_json"].(string); ok && s != "" {
+                    var env map[string]string
+                    if err := json.Unmarshal([]byte(s), &env); err == nil { cfg.Env = env }
+                }
+            }
+        }
+
+        if err := p.mainServer.UpdateStartupScript(cfg); err != nil {
+            return mcp.NewToolResultError(fmt.Sprintf("Failed to update startup script config: %v", err)), nil
+        }
+        out, _ := json.Marshal(map[string]interface{}{"updated": true, "config": cfg})
+        return mcp.NewToolResultText(string(out)), nil
+    default:
+        return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
+    }
 }
 
 // handleRetrieveTools implements the retrieve_tools functionality
