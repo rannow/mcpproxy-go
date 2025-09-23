@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"mcpproxy-go/internal/secureenv"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -524,6 +526,25 @@ func (c *Config) Validate() error {
 	}
 	if c.StartupScript.Shell == "" {
 		c.StartupScript.Shell = "/bin/bash"
+	}
+	// Default startup script path under data dir
+	if c.StartupScript.Path == "" {
+		// Ensure DataDir is set before this (loader guarantees this)
+		if c.DataDir != "" {
+			c.StartupScript.Path = filepath.Join(c.DataDir, "startup-script.sh")
+		}
+	}
+	// Create default startup script file if path is set but file does not exist
+	if c.StartupScript.Path != "" {
+		if _, err := os.Stat(c.StartupScript.Path); os.IsNotExist(err) {
+			// Ensure directory exists
+			_ = os.MkdirAll(filepath.Dir(c.StartupScript.Path), 0755)
+			content := []byte("#!/bin/bash\n# mcpproxy startup script\n# Add your initialization commands below\n\nexit 0\n")
+			_ = os.WriteFile(c.StartupScript.Path, content, 0755)
+		} else if err == nil {
+			// Ensure executable bit is set (best-effort)
+			_ = os.Chmod(c.StartupScript.Path, 0755)
+		}
 	}
 
 	// Validate communication log configuration
