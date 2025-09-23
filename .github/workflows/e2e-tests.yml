@@ -1,0 +1,341 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ${{ matrix.os }}
+
+    env:
+      GO111MODULE: "on"
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ["1.21", "1.22", "1.23.10"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/AppData/Local/go-build
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Build mcpproxy binary for tests (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy.exe ./cmd/mcpproxy
+
+      - name: Build mcpproxy binary for tests (Unix)
+        if: matrix.os != 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
+
+      - name: Run unit tests
+        run: go test -v -race -timeout 30s ./internal/...
+
+      - name: Run E2E tests
+        run: go test -v -race -timeout 5m ./internal/server -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 300s
+
+      - name: Run Logging E2E tests
+        run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 300s
+
+      - name: Run E2E tests with race detector
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23.10'
+        run: go test -v -race -timeout 10m ./internal/server -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 600s
+
+      - name: Run Logging E2E tests with race detector
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23.10'
+        run: go test -v -race -timeout 10m ./internal/logs -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 600s
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+
+    env:
+      GO111MODULE: "on"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.10"
+
+      - name: Build mcpproxy
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
+
+      - name: Test mcpproxy binary
+        run: |
+          # Test version command
+          ./mcpproxy --version
+
+          # Test help command
+          ./mcpproxy --help
+
+          # Test logging functionality
+          timeout 10s ./mcpproxy serve --log-to-file --log-level debug --listen :0 --tray=false || true
+
+          # Verify log file was created in standard OS location
+          if [ "$(uname)" = "Linux" ]; then
+            if [ -f "$HOME/.local/state/mcpproxy/logs/main.log" ]; then
+              echo "✓ Log file created in Linux standard location"
+              head -5 "$HOME/.local/state/mcpproxy/logs/main.log"
+            else
+              echo "⚠ Log file not found in expected location"
+            fi
+          fi
+
+      - name: Run tests with coverage (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          go test -v -race '-coverprofile=coverage.out' -covermode=atomic ./internal/server -run TestE2E
+          go test -v -race '-coverprofile=coverage-logs.out' -covermode=atomic ./internal/logs -run TestE2E
+          go tool cover '-html=coverage.out' -o coverage.html
+          go tool cover '-html=coverage-logs.out' -o coverage-logs.html
+
+      - name: Run tests with coverage (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./internal/server -run TestE2E
+          go test -v -race -coverprofile=coverage-logs.out -covermode=atomic ./internal/logs -run TestE2E
+          go tool cover -html=coverage.out -o coverage.html
+          go tool cover -html=coverage-logs.out -o coverage-logs.html
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.out
+          flags: e2e-tests
+          name: e2e-coverage
+          fail_ci_if_error: false
+
+  logging-tests:
+    name: Cross-Platform Logging Tests
+    runs-on: ${{ matrix.os }}
+
+    env:
+      GO111MODULE: "on"
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            log_path_check: "$HOME/.local/state/mcpproxy/logs"
+            log_standard: "XDG Base Directory Specification"
+          - os: macos-latest
+            log_path_check: "$HOME/Library/Logs/mcpproxy"
+            log_standard: "macOS File System Programming Guide"
+          - os: windows-latest
+            log_path_check: "$env:LOCALAPPDATA\\mcpproxy\\logs"
+            log_standard: "Windows Application Data Guidelines"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.10"
+
+      - name: Run logging unit tests
+        run: go test -v -race -timeout 2m ./internal/logs
+
+      - name: Run logging E2E tests
+        run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
+
+      - name: Build mcpproxy for logging test (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy.exe ./cmd/mcpproxy
+
+      - name: Build mcpproxy for logging test (Unix)
+        if: matrix.os != 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
+
+      - name: Test OS-specific log directory creation (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          echo "Testing logging on ${{ matrix.os }}"
+          echo "Expected log path: ${{ matrix.log_path_check }}"
+          echo "OS Standard: ${{ matrix.log_standard }}"
+
+          # Run mcpproxy briefly to create log files
+          ./mcpproxy serve --log-to-file --log-level info --listen :0 --tray=false &
+          MCPPROXY_PID=$!
+          sleep 5
+          kill $MCPPROXY_PID 2>/dev/null || true
+          wait $MCPPROXY_PID 2>/dev/null || true
+
+          # Check if log directory was created
+          if [ -d "${{ matrix.log_path_check }}" ]; then
+            echo "✓ Log directory created successfully"
+            ls -la "${{ matrix.log_path_check }}"
+            
+            # Check if log file exists and has content
+            if [ -f "${{ matrix.log_path_check }}/main.log" ]; then
+              echo "✓ Log file created successfully"
+              echo "Log file size: $(wc -c < "${{ matrix.log_path_check }}/main.log") bytes"
+              echo "First few lines:"
+              head -3 "${{ matrix.log_path_check }}/main.log"
+              
+              # Verify log contains expected content
+              if grep -q "Log directory configured" "${{ matrix.log_path_check }}/main.log"; then
+                echo "✓ Log contains expected startup messages"
+              else
+                echo "⚠ Log missing expected startup messages"
+              fi
+              
+              if grep -q "${{ matrix.log_standard }}" "${{ matrix.log_path_check }}/main.log"; then
+                echo "✓ Log contains OS standard compliance information"
+              else
+                echo "⚠ Log missing OS standard compliance information"
+              fi
+            else
+              echo "✗ Log file not created"
+              exit 1
+            fi
+          else
+            echo "✗ Log directory not created"
+            exit 1
+          fi
+
+      - name: Test OS-specific log directory creation (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Write-Host "Testing logging on Windows"
+          Write-Host "Expected log path: $env:LOCALAPPDATA\mcpproxy\logs"
+          Write-Host "OS Standard: Windows Application Data Guidelines"
+
+          # Run mcpproxy briefly to create log files
+          try {
+            $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "serve", "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru
+            Start-Sleep -Seconds 5
+            $process | Stop-Process -Force -ErrorAction SilentlyContinue
+          } catch {
+            Write-Host "Error starting/stopping mcpproxy: $_"
+          }
+
+          # Check if log directory was created
+          $logPath = "$env:LOCALAPPDATA\mcpproxy\logs"
+          if (-not (Test-Path $logPath)) {
+            Write-Host "✗ Log directory not created"
+            exit 1
+          }
+
+          Write-Host "✓ Log directory created successfully"
+          Get-ChildItem $logPath
+
+          # Check if log file exists and has content
+          $logFile = Join-Path $logPath "main.log"
+          if (-not (Test-Path $logFile)) {
+            Write-Host "✗ Log file not created"
+            exit 1
+          }
+
+          Write-Host "✓ Log file created successfully"
+          $fileSize = (Get-Item $logFile).Length
+          Write-Host "Log file size: $fileSize bytes"
+          Write-Host "First few lines:"
+          Get-Content $logFile -Head 3
+
+          # Verify log contains expected content
+          $content = Get-Content $logFile -Raw
+          if ($content -match "Log directory configured") {
+            Write-Host "✓ Log contains expected startup messages"
+          } else {
+            Write-Host "⚠ Log missing expected startup messages"
+          }
+
+          if ($content -match "Windows Application Data Guidelines") {
+            Write-Host "✓ Log contains OS standard compliance information"
+          } else {
+            Write-Host "⚠ Log missing OS standard compliance information"
+          }
+
+      - name: Test log rotation
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "Testing log rotation functionality"
+          go test -v -timeout 2m ./internal/logs -run TestE2E_LogRotation
+
+      - name: Test concurrent logging
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "Testing concurrent logging functionality"
+          go test -v -race -timeout 3m ./internal/logs -run TestE2E_ConcurrentLogging
+
+  stress-tests:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.10"
+
+      - name: Run concurrent stress tests
+        run: |
+          # Run the concurrent test multiple times to catch race conditions
+          for i in {1..5}; do
+            echo "Stress test iteration $i"
+            go test -v -race -timeout 10m ./internal/server -run TestE2E_ConcurrentOperations
+          done
+
+      - name: Run memory stress test
+        run: |
+          # Run tests with memory limit
+          GOMAXPROCS=1 GOMEMLIMIT=100MiB go test -v -timeout 15m ./internal/server -run TestE2E

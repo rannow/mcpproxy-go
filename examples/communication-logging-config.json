@@ -1,0 +1,42 @@
+{
+  "listen": ":8080",
+  "data_dir": "~/.mcpproxy",
+  "enable_tray": true,
+  "top_k": 5,
+  "tools_limit": 15,
+  "tool_response_limit": 20000,
+  "call_tool_timeout": "2m",
+  "logging": {
+    "level": "info",
+    "enable_file": true,
+    "enable_console": true,
+    "filename": "main.log",
+    "max_size": 10,
+    "max_backups": 5,
+    "max_age": 30,
+    "compress": true,
+    "json_format": false,
+    "communication": {
+      "enabled": true,
+      "filename": "communication.log",
+      "log_requests": true,
+      "log_responses": true,
+      "log_tool_calls": true,
+      "log_errors": true,
+      "include_payload": true,
+      "max_payload_size": 10240,
+      "include_headers": false,
+      "filter_sensitive": true
+    }
+  },
+  "mcpServers": [
+    {
+      "name": "example-server",
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-everything"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": false
+    }
+  ]
+}

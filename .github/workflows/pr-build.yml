@@ -1,0 +1,183 @@
+name: PR Build
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-linux-amd64
+            archive_format: tar.gz
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-linux-arm64
+            archive_format: tar.gz
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-windows-amd64.exe
+            archive_format: zip
+          - os: ubuntu-latest
+            goos: windows
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-windows-arm64.exe
+            archive_format: zip
+          - os: macos-14
+            goos: darwin
+            goarch: amd64
+            cgo: "1"
+            name: mcpproxy-darwin-amd64
+            archive_format: tar.gz
+          - os: macos-14
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+            name: mcpproxy-darwin-arm64
+            archive_format: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.10"
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests (with nogui for CI)
+        run: go test -tags nogui -v ./...
+
+      - name: Generate PR version
+        id: version
+        shell: bash
+        run: |
+          # Get the latest tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          # Get short commit hash
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          # Create version: last-tag-dev-hash
+          VERSION="${LATEST_TAG}-dev-${COMMIT_HASH}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Generated PR version: ${VERSION}"
+
+      - name: Build binary and create archives
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # ✅ Force minimum supported macOS version for compatibility
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          # Defensive CGO flags to ensure proper deployment target
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
+
+          # Determine clean binary name
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            CLEAN_BINARY="mcpproxy.exe"
+          else
+            CLEAN_BINARY="mcpproxy"
+          fi
+
+          # Create clean binary for archive
+          go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+
+          # Ad-hoc sign macOS binaries (development only)
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Ad-hoc signing macOS binary for development..."
+            codesign --force --deep --sign - --identifier "com.smartmcpproxy.mcpproxy.dev" ${CLEAN_BINARY}
+            
+            # Verify signing
+            codesign --verify --verbose ${CLEAN_BINARY}
+            echo "Binary signed successfully (development)"
+          fi
+
+          # Create archive with version info
+          ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+          if [ "${{ matrix.archive_format }}" = "zip" ]; then
+            # Create archive
+            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+          else
+            # Create archive
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+          fi
+
+      - name: Create .icns icon (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          chmod +x scripts/create-icns.sh
+          ./scripts/create-icns.sh
+
+      - name: Create DMG installer (macOS)
+        if: matrix.goos == 'darwin'
+        env:
+          # Ensure DMG creation also uses correct deployment target
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          chmod +x scripts/create-dmg.sh
+
+          # Determine binary name
+          CLEAN_BINARY="mcpproxy"
+
+          # Create DMG
+          ./scripts/create-dmg.sh ${CLEAN_BINARY} ${VERSION} ${{ matrix.goarch }}
+
+          # Ad-hoc sign DMG (development only)
+          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+          echo "Ad-hoc signing DMG for development: ${DMG_NAME}"
+          codesign --force --deep --sign - "${DMG_NAME}"
+
+          echo "DMG created and signed (development): ${DMG_NAME}"
+
+      - name: Skip notarization (PR Build)
+        if: matrix.goos == 'darwin'
+        run: |
+          echo "Skipping notarization for PR build - this is a development build"
+          echo "Production builds go through full notarization in release workflow"
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
+          retention-days: 7
+
+      - name: Upload DMG installer (macOS)
+        if: matrix.goos == 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
+          retention-days: 7
