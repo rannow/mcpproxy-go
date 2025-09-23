@@ -38,7 +38,8 @@ var (
 	allowServerRemove bool
 	enablePrompts     bool
 
-	version = "v0.1.0" // This will be injected by -ldflags during build
+	version   = "v0.1.0" // This will be injected by -ldflags during build
+	buildTime = "unknown" // This will be injected by -ldflags during build
 )
 
 const (
@@ -407,7 +408,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Info("Starting system tray with auto-start server")
 
 		// Create and start tray on main thread (required for macOS)
-		trayApp := createTray(srv, logger.Sugar(), version, shutdownFunc)
+		trayApp := createTray(srv, logger.Sugar(), version, buildTime, shutdownFunc)
 
 		// Auto-start server in background
 		wg.Add(1)

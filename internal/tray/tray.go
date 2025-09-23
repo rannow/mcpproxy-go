@@ -116,10 +116,11 @@ type ServerInterface interface {
 
 // App represents the system tray application
 type App struct {
-	server   ServerInterface
-	logger   *zap.SugaredLogger
-	version  string
-	shutdown func()
+	server    ServerInterface
+	logger    *zap.SugaredLogger
+	version   string
+	buildTime string
+	shutdown  func()
 
 	// Menu items for dynamic updates
 	statusItem          *systray.MenuItem
@@ -180,12 +181,13 @@ type App struct {
 }
 
 // New creates a new tray application
-func New(server ServerInterface, logger *zap.SugaredLogger, version string, shutdown func()) *App {
+func New(server ServerInterface, logger *zap.SugaredLogger, version string, buildTime string, shutdown func()) *App {
 	app := &App{
-		server:   server,
-		logger:   logger,
-		version:  version,
-		shutdown: shutdown,
+		server:    server,
+		logger:    logger,
+		version:   version,
+		buildTime: buildTime,
+		shutdown:  shutdown,
 	}
 
 	// Initialize managers (will be fully set up in onReady)
@@ -435,10 +437,10 @@ func (a *App) onReady() {
 
 	// --- Initialize Menu Items ---
 	a.logger.Debug("Initializing tray menu items")
-	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
+	a.statusItem = systray.AddMenuItem("Status: Initializing...", "")
 	a.statusItem.Disable() // Initially disabled as it's just for display
-	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
-	a.serverCountItem = systray.AddMenuItem("📊 Servers: Loading...", "Total number of configured servers")
+	a.startStopItem = systray.AddMenuItem("Start Server", "")
+	a.serverCountItem = systray.AddMenuItem("📊 Servers: Loading...", "")
 	a.serverCountItem.Disable() // Display only
 
 	// Mark core menu items as ready - this will release waiting goroutines
@@ -447,15 +449,15 @@ func (a *App) onReady() {
 	systray.AddSeparator()
 
 	// --- Status-Based Server Menus ---
-	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "Connected and ready servers")
-	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "Servers that are enabled but not connected")
-	a.stoppedServersMenu = systray.AddMenuItem("⏹️ Stopped Servers", "Servers that have been stopped")
-	a.disabledServersMenu = systray.AddMenuItem("⏸️ Disabled Servers", "Servers that are disabled")
-	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "Servers in security quarantine")
+	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "")
+	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "")
+	a.stoppedServersMenu = systray.AddMenuItem("⏹️ Stopped Servers", "")
+	a.disabledServersMenu = systray.AddMenuItem("⏸️ Disabled Servers", "")
+	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "")
 	systray.AddSeparator()
 
 	// --- Group Management Menu ---
-	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "View and manage server groups")
+	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
@@ -484,20 +486,28 @@ func (a *App) onReady() {
 	a.updateServerCountFromConfig()
 
 	// --- Other Menu Items ---
-	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
-	editConfigItem := systray.AddMenuItem("Edit config", "Edit the configuration file")
-	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
-	githubItem := systray.AddMenuItem("🔗 GitHub Repository", "Open the project on GitHub")
+	openConfigItem := systray.AddMenuItem("Open config dir", "")
+	editConfigItem := systray.AddMenuItem("Edit config", "")
+	openLogsItem := systray.AddMenuItem("Open logs dir", "")
+	githubItem := systray.AddMenuItem("🔗 GitHub Repository", "")
+
+	// Version information
+	versionTitle := fmt.Sprintf("ℹ️ Version %s", a.version)
+	if a.buildTime != "unknown" && a.buildTime != "" {
+		versionTitle = fmt.Sprintf("ℹ️ Version %s (%s)", a.version, a.buildTime)
+	}
+	versionItem := systray.AddMenuItem(versionTitle, "")
+	versionItem.Disable() // Display only
 	systray.AddSeparator()
 
 	// --- Autostart Menu Item (macOS only) ---
 	if runtime.GOOS == osDarwin && a.autostartManager != nil {
-		a.autostartItem = systray.AddMenuItem("Start at Login", "Start mcpproxy automatically when you log in")
+		a.autostartItem = systray.AddMenuItem("Start at Login", "")
 		a.updateAutostartMenuItem()
 		systray.AddSeparator()
 	}
 
-	quitItem := systray.AddMenuItem("Quit", "Quit the application")
+	quitItem := systray.AddMenuItem("Quit", "")
 
 	// --- Set Initial State & Start Sync ---
 	a.updateStatus()
@@ -585,7 +595,6 @@ func (a *App) onReady() {
 // updateTooltip updates the tooltip based on the server's running state
 func (a *App) updateTooltip() {
 	if a.server == nil {
-		systray.SetTooltip("mcpproxy is stopped")
 		a.updateServerCountFromConfig()
 		return
 	}
@@ -595,11 +604,8 @@ func (a *App) updateTooltip() {
 	if status, ok := statusData.(map[string]interface{}); ok {
 		a.updateTooltipFromStatusData(status)
 	} else {
-		// Fallback to basic tooltip if status format is unexpected
-		if a.server.IsRunning() {
-			systray.SetTooltip(fmt.Sprintf("mcpproxy is running on %s", a.server.GetListenAddress()))
-		} else {
-			systray.SetTooltip("mcpproxy is stopped")
+		// Fallback - no tooltip but still update server count
+		if !a.server.IsRunning() {
 			a.updateServerCountFromConfig()
 		}
 	}
@@ -714,59 +720,11 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 	running, _ := status["running"].(bool)
 
 	if !running {
-		systray.SetTooltip("mcpproxy is stopped")
 		return
 	}
 
-	// Build comprehensive tooltip for running server
-	listenAddr, _ := status["listen_addr"].(string)
-	phase, _ := status["phase"].(string)
-	toolsIndexed, _ := status["tools_indexed"].(int)
-
-	// Get upstream stats for connected servers and total tools
-	upstreamStats, _ := status["upstream_stats"].(map[string]interface{})
-
-	var connectedServers, totalServers, totalTools int
-	if upstreamStats != nil {
-		if connected, ok := upstreamStats["connected_servers"].(int); ok {
-			connectedServers = connected
-		}
-		if total, ok := upstreamStats["total_servers"].(int); ok {
-			totalServers = total
-		}
-		if tools, ok := upstreamStats["total_tools"].(int); ok {
-			totalTools = tools
-		}
-	}
-
-	// Build multi-line tooltip with comprehensive information
-	var tooltipLines []string
-
-	// Main status line
-	tooltipLines = append(tooltipLines, fmt.Sprintf("mcpproxy (%s) - %s", phase, listenAddr))
-
-	// Server connection status
-	if totalServers > 0 {
-		tooltipLines = append(tooltipLines, fmt.Sprintf("Servers: %d/%d connected", connectedServers, totalServers))
-	} else {
-		tooltipLines = append(tooltipLines, "Servers: none configured")
-	}
-
-	// Tool count - this is the key information the user wanted
-	if totalTools > 0 {
-		tooltipLines = append(tooltipLines, fmt.Sprintf("Tools: %d available", totalTools))
-	} else if toolsIndexed > 0 {
-		// Fallback to indexed count if total tools not available
-		tooltipLines = append(tooltipLines, fmt.Sprintf("Tools: %d indexed", toolsIndexed))
-	} else {
-		tooltipLines = append(tooltipLines, "Tools: none available")
-	}
-
-	tooltip := strings.Join(tooltipLines, "\n")
-	systray.SetTooltip(tooltip)
-
-	// Note: We no longer update server count here because we want to show
-	// the static count from config, not the dynamic count from server status
+	// No tooltip logic needed anymore - tooltips have been removed
+	// This function remains for compatibility but does nothing
 }
 
 // updateServerCountDisplay updates the server count menu item
@@ -795,7 +753,7 @@ func (a *App) updateServerCountDisplay(totalServers int) {
 
 	a.logger.Debug("Setting server count display", zap.String("display_text", displayText))
 	a.serverCountItem.SetTitle(displayText)
-	a.serverCountItem.SetTooltip(fmt.Sprintf("%d servers configured in total", totalServers))
+	// Tooltip removed
 }
 
 // updateServerCountFromConfig reads the config file and updates server count display
@@ -1607,10 +1565,10 @@ func (a *App) updateAutostartMenuItem() {
 
 	if a.autostartManager.IsEnabled() {
 		a.autostartItem.SetTitle("☑️ Start at Login")
-		a.autostartItem.SetTooltip("mcpproxy will start automatically when you log in (click to disable)")
+		// Tooltip removed
 	} else {
 		a.autostartItem.SetTitle("Start at Login")
-		a.autostartItem.SetTooltip("Start mcpproxy automatically when you log in (click to enable)")
+		// Tooltip removed
 	}
 }
 

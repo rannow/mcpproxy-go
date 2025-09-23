@@ -23,7 +23,7 @@ func (s *StubTray) Run(ctx context.Context) error {
 }
 
 // createTray creates a stub tray implementation for headless/Linux platforms
-func createTray(_ *server.Server, logger *zap.SugaredLogger, _ string, _ func()) TrayInterface {
+func createTray(_ *server.Server, logger *zap.SugaredLogger, _ string, _ string, _ func()) TrayInterface {
 	return &StubTray{
 		logger: logger,
 	}

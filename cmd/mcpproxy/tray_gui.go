@@ -10,6 +10,6 @@ import (
 )
 
 // createTray creates a new tray application for GUI platforms
-func createTray(srv *server.Server, logger *zap.SugaredLogger, version string, shutdownFunc func()) TrayInterface {
-	return tray.New(srv, logger, version, shutdownFunc)
+func createTray(srv *server.Server, logger *zap.SugaredLogger, version string, buildTime string, shutdownFunc func()) TrayInterface {
+	return tray.New(srv, logger, version, buildTime, shutdownFunc)
 }
