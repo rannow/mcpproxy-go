@@ -44,6 +44,8 @@ type UpstreamRecord struct {
 	Created       time.Time               `json:"created"`
 	Updated       time.Time               `json:"updated"`
 	Isolation     *config.IsolationConfig `json:"isolation,omitempty"` // Per-server isolation settings
+	GroupID       int                     `json:"group_id,omitempty"`
+	GroupName     string                  `json:"group_name,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

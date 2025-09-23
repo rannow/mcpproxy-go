@@ -85,6 +85,8 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		Created:       serverConfig.Created,
 		Updated:       time.Now(),
 		Isolation:     serverConfig.Isolation,
+		GroupID:       serverConfig.GroupID,
+		GroupName:     serverConfig.GroupName,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -116,6 +118,8 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		Created:       record.Created,
 		Updated:       record.Updated,
 		Isolation:     record.Isolation,
+		GroupID:       record.GroupID,
+		GroupName:     record.GroupName,
 	}, nil
 }
 
@@ -147,6 +151,8 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			Created:       record.Created,
 			Updated:       record.Updated,
 			Isolation:     record.Isolation,
+			GroupID:       record.GroupID,
+			GroupName:     record.GroupName,
 		})
 	}
 
@@ -194,6 +200,8 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 				Created:       record.Created,
 				Updated:       record.Updated,
 				Isolation:     record.Isolation,
+				GroupID:       record.GroupID,
+				GroupName:     record.GroupName,
 			})
 
 			m.logger.Debugw("Added server to quarantined list",

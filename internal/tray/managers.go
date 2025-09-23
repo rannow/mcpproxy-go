@@ -516,6 +516,8 @@ func (m *MenuManager) updateMenuForStatus(menu *systray.MenuItem, servers []map[
 	var currentServerNames []string
 	for _, server := range servers {
 		if name, ok := server["name"].(string); ok {
+			// Ensure group info is attached if missing
+			m.attachGroupInfo(name, server)
 			currentServerMap[name] = server
 			currentServerNames = append(currentServerNames, name)
 		}
@@ -1006,27 +1008,15 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		statusText = "disconnected"
 	}
 
-	// Check if server belongs to a custom group and add group color
 	var groupIcon string
 	var groupInfo string
 	if m.serverGroups != nil {
-		for groupName, group := range *m.serverGroups {
-			if group.Enabled {
-				for _, groupServerName := range group.ServerNames {
-					if groupServerName == serverName {
-						groupIcon = group.ColorEmoji
-						groupInfo = fmt.Sprintf(" [%s %s]", groupIcon, groupName)
-						break
-					}
-				}
-			}
-			if groupIcon != "" {
-				break
-			}
+		if g := m.findGroupForServer(serverName, server); g != nil && g.Enabled {
+			groupIcon = g.ColorEmoji
+			groupInfo = fmt.Sprintf(" [%s %s]", groupIcon, g.Name)
 		}
 	}
 
-	// Build display text with optional group indicator
 	if groupIcon != "" {
 		displayText = fmt.Sprintf("%s %s %s", statusIcon, groupIcon, serverName)
 		tooltip = fmt.Sprintf("%s - %s%s", serverName, statusText, groupInfo)
@@ -1036,6 +1026,36 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	}
 
 	return
+}
+
+func (m *MenuManager) findGroupForServer(serverName string, server map[string]interface{}) *ServerGroup {
+	// Prefer explicit group_id
+	if v, ok := server["group_id"]; ok {
+		switch id := v.(type) {
+		case int:
+			for _, g := range *m.serverGroups { if g.ID == id { m.logger.Debug("Group match via group_id (int)", zap.String("server", serverName), zap.Int("group_id", id), zap.String("group", g.Name)); return g } }
+		case float64:
+			gid := int(id)
+			for _, g := range *m.serverGroups { if g.ID == gid { m.logger.Debug("Group match via group_id (float64)", zap.String("server", serverName), zap.Int("group_id", gid), zap.String("group", g.Name)); return g } }
+		}
+	}
+	// Then group_name
+	// if gname, ok := server["group_name"].(string); ok && gname != "" {
+	// 	ln := strings.ToLower(strings.TrimSpace(gname))
+	// 	for name, g := range *m.serverGroups {
+	// 		if strings.ToLower(strings.TrimSpace(name)) == ln { m.logger.Debug("Group match via group_name", zap.String("server", serverName), zap.String("group_name", gname), zap.String("group", g.Name)); return g }
+	// 	}
+	// }
+	// Fallback: scan assignments
+	lnServer := strings.ToLower(strings.TrimSpace(serverName))
+	for _, g := range *m.serverGroups {
+		if !g.Enabled { continue }
+		for _, s := range g.ServerNames {
+			if strings.ToLower(strings.TrimSpace(s)) == lnServer { m.logger.Debug("Group match via assignment list", zap.String("server", serverName), zap.String("group", g.Name)); return g }
+		}
+	}
+	m.logger.Debug("No group found for server", zap.String("server", serverName))
+	return nil
 }
 
 // serverSupportsOAuth determines if a server supports OAuth authentication
@@ -1506,3 +1526,22 @@ func (m *SynchronizationManager) HandleServerEnable(serverName string, enabled b
 }
 
 // Note: stringSlicesEqual function is defined in tray.go
+
+// attachGroupInfo populates group_id/group_name on server map if missing using serverGroups assignments
+func (m *MenuManager) attachGroupInfo(serverName string, server map[string]interface{}) {
+	if m.serverGroups == nil { return }
+	if _, ok := server["group_id"]; ok { return }
+	if gn, ok := server["group_name"].(string); ok && gn != "" { return }
+	ln := strings.ToLower(strings.TrimSpace(serverName))
+	for _, g := range *m.serverGroups {
+		if !g.Enabled { continue }
+		for _, s := range g.ServerNames {
+			if strings.ToLower(strings.TrimSpace(s)) == ln {
+				server["group_id"] = g.ID
+				// stop setting legacy group_name
+				m.logger.Debug("Attached group info to server", zap.String("server", serverName), zap.Int("group_id", g.ID))
+				return
+			}
+		}
+	}
+}

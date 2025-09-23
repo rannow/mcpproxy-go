@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"os"
 	
 	"go.uber.org/zap"
 )
@@ -673,16 +674,8 @@ func (s *Server) handleAssignServer(w http.ResponseWriter, r *http.Request) {
 	// Support both group_name (legacy) and group_id (new)
 	var groupName string
 	var groupID int
-	
-	if gName, ok := assignmentData["group_name"].(string); ok && strings.TrimSpace(gName) != "" {
-		groupName = gName
-		// Find group ID by name
-		groupsMutex.RLock()
-		if group, exists := groups[groupName]; exists {
-			groupID = group.ID
-		}
-		groupsMutex.RUnlock()
-	} else if gID, ok := assignmentData["group_id"].(float64); ok && gID > 0 {
+
+	if gID, ok := assignmentData["group_id"].(float64); ok && gID > 0 {
 		groupID = int(gID)
 		// Find group name by ID
 		groupsMutex.RLock()
@@ -693,8 +686,16 @@ func (s *Server) handleAssignServer(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		groupsMutex.RUnlock()
+	} else if gName, ok := assignmentData["group_name"].(string); ok && strings.TrimSpace(gName) != "" {
+		// Legacy name path
+		groupName = gName
+		groupsMutex.RLock()
+		if group, exists := groups[groupName]; exists {
+			groupID = group.ID
+		}
+		groupsMutex.RUnlock()
 	} else {
-		http.Error(w, "group_name or group_id is required", http.StatusBadRequest)
+		http.Error(w, "group_id or group_name is required", http.StatusBadRequest)
 		return
 	}
 
@@ -754,4 +755,66 @@ func (s *Server) handleGetAssignments(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleUnassignServer removes a server's group assignment via web interface (HTTP)
+func (s *Server) handleUnassignServer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload struct { ServerName string `json:"server_name"` }
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || strings.TrimSpace(payload.ServerName) == "" {
+		http.Error(w, "server_name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Update in-memory assignments
+	assignmentsMutex.Lock()
+	delete(serverGroupAssignments, payload.ServerName)
+	assignmentsMutex.Unlock()
+
+	// Load config JSON and set group_id=0 for this server, remove group_name
+	configPath := s.GetConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		http.Error(w, "failed to read config", http.StatusInternalServerError)
+		return
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		http.Error(w, "failed to parse config", http.StatusInternalServerError)
+		return
+	}
+	if servers, ok := cfg["mcpServers"].([]interface{}); ok {
+		for i, it := range servers {
+			if m, ok := it.(map[string]interface{}); ok {
+				if name, ok := m["name"].(string); ok && name == payload.ServerName {
+					m["group_id"] = 0
+					delete(m, "group_name")
+					servers[i] = m
+					break
+				}
+			}
+		}
+		cfg["mcpServers"] = servers
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		http.Error(w, "failed to serialize config", http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(configPath, out, 0600); err != nil {
+		http.Error(w, "failed to write config", http.StatusInternalServerError)
+		return
+	}
+
+	// Optionally reload internal config
+	_ = s.ReloadConfiguration()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Server '%s' unassigned from group", payload.ServerName),
+	})
 }

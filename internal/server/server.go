@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"encoding/json"
+	"os"
 
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
@@ -141,6 +143,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 	// Initialize groups from config
 	server.initGroupsFromConfig()
+
+	// Migrate legacy group_name -> group_id if present
+	server.migrateLegacyGroupNamesToIDs()
 
 	// Initialize server-group assignments from config
 	server.initServerGroupAssignments()
@@ -673,6 +678,12 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		return nil, err
 	}
 
+	// Build a lookup from config to enrich with group info (authoritative for assignments)
+	configByName := make(map[string]*config.ServerConfig, len(s.config.Servers))
+	for _, cfg := range s.config.Servers {
+		configByName[cfg.Name] = cfg
+	}
+
 	// Debug: Log server count discrepancy
 	configServerCount := len(s.config.Servers)
 	dbServerCount := len(servers)
@@ -710,6 +721,12 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			}
 		}
 
+		// Enrich with group assignment from config (if present)
+		var groupID int
+		if cfg, ok := configByName[server.Name]; ok && cfg != nil {
+			groupID = cfg.GroupID
+		}
+
 		result = append(result, map[string]interface{}{
 			"name":           server.Name,
 			"url":            server.URL,
@@ -726,6 +743,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"connecting":     connecting,
 			"tool_count":     toolCount,
 			"last_error":     lastError,
+			"group_id":       groupID,
 		})
 	}
 
@@ -1141,6 +1159,14 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 		}
 	})
 
+	mux.HandleFunc("/api/unassign-server", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleUnassignServer(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	mux.HandleFunc("/api/assignments", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.handleGetAssignments(w, r)
@@ -1234,10 +1260,9 @@ func (s *Server) SaveConfiguration() error {
 		return fmt.Errorf("configuration file path is not available")
 	}
 
-	s.logger.Debug("Saving configuration to file", zap.String("path", configPath))
+	s.logger.Debug("Saving configuration to file (merged)", zap.String("path", configPath))
 
 	// Ensure we have the latest server list from the storage manager
-	// Note: Storage layer now preserves all fields including Isolation, OAuth, WorkingDir
 	latestServers, err := s.storageManager.ListUpstreamServers()
 	if err != nil {
 		s.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
@@ -1245,13 +1270,216 @@ func (s *Server) SaveConfiguration() error {
 	}
 	s.config.Servers = latestServers
 
-	// Sync groups from in-memory storage to config
+	// Sync groups from in-memory storage to config (structure only)
 	s.syncGroupsToConfig()
 
-	// Sync server-group assignments to config
+	// Sync server-group assignments to config (fills GroupID on s.config.Servers)
 	s.syncServerGroupAssignments()
 
-	return config.SaveConfig(s.config, configPath)
+	// Load existing JSON to preserve unknown fields
+	existingBytes, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		// If file missing or unreadable, fall back to full save
+		s.logger.Warn("Could not read existing config, falling back to full save", zap.Error(readErr))
+		return config.SaveConfig(s.config, configPath)
+	}
+
+	var existing map[string]interface{}
+	if err := json.Unmarshal(existingBytes, &existing); err != nil {
+		s.logger.Warn("Existing config not JSON-decodable, falling back to full save", zap.Error(err))
+		return config.SaveConfig(s.config, configPath)
+	}
+
+	// --- Merge Groups ---
+	// Build lookup from existing groups by id or name to preserve extra fields
+	existingGroups := map[string]map[string]interface{}{} // key by name
+	if eg, ok := existing["groups"].([]interface{}); ok {
+		for _, gi := range eg {
+			if gm, ok := gi.(map[string]interface{}); ok {
+				if name, ok := gm["name"].(string); ok && name != "" {
+					existingGroups[name] = gm
+				}
+			}
+		}
+	}
+
+	mergedGroups := make([]map[string]interface{}, 0, len(s.config.Groups))
+	for _, g := range s.config.Groups {
+		mg := map[string]interface{}{
+			"id":      g.ID,
+			"name":    g.Name,
+			"color":   g.Color,
+			"enabled": g.Enabled,
+		}
+		if prev, ok := existingGroups[g.Name]; ok {
+			// Preserve description and color_emoji if present
+			if desc, ok := prev["description"].(string); ok && desc != "" {
+				mg["description"] = desc
+			}
+			if emoji, ok := prev["color_emoji"].(string); ok && emoji != "" {
+				mg["color_emoji"] = emoji
+			}
+		}
+		mergedGroups = append(mergedGroups, mg)
+	}
+	existing["groups"] = mergedGroups
+
+	// --- Merge Servers ---
+	// Create lookup of existing servers by name
+	existingServersByName := map[string]map[string]interface{}{}
+	existingOrder := []string{}
+	if es, ok := existing["mcpServers"].([]interface{}); ok {
+		for _, si := range es {
+			if sm, ok := si.(map[string]interface{}); ok {
+				if name, ok := sm["name"].(string); ok && name != "" {
+					existingServersByName[name] = sm
+					existingOrder = append(existingOrder, name)
+				}
+			}
+		}
+	}
+
+	// Lookups for latest server configs by name
+	latestByName := map[string]*config.ServerConfig{}
+	for _, sc := range s.config.Servers {
+		latestByName[sc.Name] = sc
+	}
+
+	// Build set of servers whose group assignment is being updated now
+	updatedServers := map[string]bool{}
+	assignmentsMutex.RLock()
+	for srvName := range serverGroupAssignments {
+		updatedServers[srvName] = true
+	}
+	assignmentsMutex.RUnlock()
+
+	// Build group name -> id lookup
+	groupNameToID := map[string]int{}
+	groupsMutex.RLock()
+	for name, g := range groups {
+		if g != nil {
+			groupNameToID[name] = g.ID
+		}
+	}
+	groupsMutex.RUnlock()
+
+	// Helper to compute final group fields for a given server name, starting from current values
+	computeGroupFields := func(name string, currentID int, currentName string) (int, string) {
+		if updatedServers[name] {
+			assignmentsMutex.RLock()
+			if gname, ok := serverGroupAssignments[name]; ok {
+				if gid, ok2 := groupNameToID[gname]; ok2 {
+					assignmentsMutex.RUnlock()
+					return gid, gname
+				}
+				assignmentsMutex.RUnlock()
+				return currentID, gname
+			}
+			assignmentsMutex.RUnlock()
+		}
+		return currentID, currentName
+	}
+
+	// Start from existing entries to preserve unknown fields and ordering
+	mergedServers := make([]map[string]interface{}, 0, max(len(existingOrder), len(latestByName)))
+	seen := map[string]bool{}
+	for _, name := range existingOrder {
+		existingEntry := existingServersByName[name]
+		// Start with a shallow copy of existing
+		m := map[string]interface{}{}
+		for k, v := range existingEntry {
+			m[k] = v
+		}
+		// Overlay known fields from latest if available
+		if sc, ok := latestByName[name]; ok {
+			m["name"] = sc.Name
+			m["description"] = sc.Description
+			m["url"] = sc.URL
+			m["protocol"] = sc.Protocol
+			m["command"] = sc.Command
+			m["args"] = sc.Args
+			m["working_dir"] = sc.WorkingDir
+			m["env"] = sc.Env
+			m["headers"] = sc.Headers
+			m["oauth"] = sc.OAuth
+			m["repository_url"] = sc.RepositoryURL
+			m["enabled"] = sc.Enabled
+			m["quarantined"] = sc.Quarantined
+			m["created"] = sc.Created
+			m["updated"] = sc.Updated
+			m["isolation"] = sc.Isolation
+		}
+		// Compute final group fields using current values as base
+		prevID := 0
+		if v, ok := m["group_id"].(float64); ok { prevID = int(v) } else if vi, ok := m["group_id"].(int); ok { prevID = vi }
+		finalID, _ := computeGroupFields(name, prevID, "")
+		// Safety: never downgrade a non-zero existing group_id to 0 during merge
+		if finalID == 0 && prevID > 0 {
+			finalID = prevID
+		}
+		m["group_id"] = finalID
+		// Remove legacy group_name
+		delete(m, "group_name")
+
+		mergedServers = append(mergedServers, m)
+		seen[name] = true
+	}
+
+	// Append any new servers not in existing
+	for name, sc := range latestByName {
+		if seen[name] { continue }
+		m := map[string]interface{}{
+			"name":           sc.Name,
+			"description":    sc.Description,
+			"url":            sc.URL,
+			"protocol":       sc.Protocol,
+			"command":        sc.Command,
+			"args":           sc.Args,
+			"working_dir":    sc.WorkingDir,
+			"env":            sc.Env,
+			"headers":        sc.Headers,
+			"oauth":          sc.OAuth,
+			"repository_url": sc.RepositoryURL,
+			"enabled":        sc.Enabled,
+			"quarantined":    sc.Quarantined,
+			"created":        sc.Created,
+			"updated":        sc.Updated,
+			"isolation":      sc.Isolation,
+		}
+		// Group fields for new server: compute from assignment (if any) else 0/""
+		finalID, _ := computeGroupFields(name, sc.GroupID, "")
+		m["group_id"] = finalID
+		// Remove legacy group_name
+		// (not set)
+		mergedServers = append(mergedServers, m)
+	}
+
+	existing["mcpServers"] = mergedServers
+
+	// Preserve all other top-level fields in existing as-is (they already are in 'existing')
+
+	// Write merged JSON back to file
+	out, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		s.logger.Error("Failed to marshal merged configuration", zap.Error(err))
+		return err
+	}
+	// Debug: log resulting group assignments
+	if ms, ok := existing["mcpServers"].([]map[string]interface{}); ok {
+		for _, e := range ms {
+			name, _ := e["name"].(string)
+			gid := 0
+			if v, ok := e["group_id"].(float64); ok { gid = int(v) } else if vi, ok := e["group_id"].(int); ok { gid = vi }
+			s.logger.Debug("Merged server group assignment", zap.String("server", name), zap.Int("group_id", gid))
+		}
+	}
+	if err := os.WriteFile(configPath, out, 0600); err != nil {
+		s.logger.Error("Failed to write merged configuration", zap.Error(err))
+		return err
+	}
+
+	s.logger.Info("Configuration saved with merge strategy", zap.Int("servers", len(mergedServers)), zap.Int("groups", len(mergedGroups)))
+	return nil
 }
 
 // syncGroupsToConfig syncs groups from in-memory storage to config
@@ -1379,15 +1607,69 @@ func (s *Server) initServerGroupAssignments() {
 	// Clear existing assignments
 	serverGroupAssignments = make(map[string]string)
 
+	// Detect if any server uses group_id (>0). If yes, we consider IDs authoritative and ignore legacy group_name fields.
+	idMode := false
+	for _, srv := range s.config.Servers {
+		if srv.GroupID > 0 {
+			idMode = true
+			break
+		}
+	}
+
 	// Load assignments from config
 	for _, server := range s.config.Servers {
+		// ID mode: use IDs only; group_id=0 means unassigned
+		if idMode {
+			if server.GroupID > 0 {
+				groupsMutex.RLock()
+				for name, g := range groups {
+					if g != nil && g.ID == server.GroupID {
+						serverGroupAssignments[server.Name] = name
+						break
+					}
+				}
+				groupsMutex.RUnlock()
+			}
+			continue
+		}
+
+		// Legacy mode (no IDs anywhere): fall back to GroupName
 		if server.GroupName != "" {
 			serverGroupAssignments[server.Name] = server.GroupName
 		}
 	}
 
 	s.logger.Info("Initialized server-group assignments from config",
-		zap.Int("assignments", len(serverGroupAssignments)))
+		zap.Int("assignments", len(serverGroupAssignments)),
+		zap.Bool("id_mode", idMode))
+}
+
+// migrateLegacyGroupNamesToIDs converts any server with only group_name set into group_id in-memory and saves the config
+func (s *Server) migrateLegacyGroupNamesToIDs() {
+	changed := false
+	// Build lookup of group name -> id
+	groupsMutex.RLock()
+	nameToID := make(map[string]int)
+	for name, g := range groups {
+		if g != nil && g.ID > 0 {
+			nameToID[name] = g.ID
+		}
+	}
+	groupsMutex.RUnlock()
+
+	for _, srv := range s.config.Servers {
+		if srv.GroupID == 0 && srv.GroupName != "" {
+			if id, ok := nameToID[srv.GroupName]; ok {
+				srv.GroupID = id
+				srv.GroupName = ""
+				changed = true
+			}
+		}
+	}
+	if changed {
+		_ = s.SaveConfiguration()
+		s.logger.Info("Migrated legacy group_name to group_id in config")
+	}
 }
 
 // getGroups returns a copy of all groups (thread-safe)
@@ -1441,14 +1723,16 @@ func (s *Server) ReloadConfiguration() error {
 	// Update internal config
 	s.config = newConfig
 
-	// Restore preserved server-group assignments after config reload
-	assignmentsMutex.Lock()
-	for serverName, groupName := range savedAssignments {
-		serverGroupAssignments[serverName] = groupName
-	}
-	assignmentsMutex.Unlock()
+	// Migrate legacy names to IDs after reload
+	s.migrateLegacyGroupNamesToIDs()
 
-	s.logger.Debug("Preserved server-group assignments during config reload",
+	// NOTE: Do not restore preserved assignments here. We want the file to be authoritative
+	// on reload (including clearing assignments where group_id == 0). The assignments map
+	// will be rebuilt from s.config by loadConfiguredServers -> initServerGroupAssignments.
+	//
+	// Previously we restored savedAssignments here, which could mask file changes.
+
+	s.logger.Debug("Preserved assignments snapshot (not restored)",
 		zap.Int("preserved_assignments", len(savedAssignments)))
 
 	// Reload configured servers (this is where the comprehensive sync happens)

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +20,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"hash/fnv"
+	"strconv"
 
 	"fyne.io/systray"
 	"github.com/fsnotify/fsnotify"
@@ -468,20 +471,19 @@ func (a *App) onReady() {
 	// Set callback but with protection against smaller counts
 	a.menuManager.SetServerCountCallback(a.updateServerCountDisplay)
 
-	// --- Set Server Groups Reference ---
-	// Allow MenuManager to access server groups for color display
-	a.menuManager.SetServerGroups(&a.serverGroups)
-
 	// --- Load Groups for Server Menus ---
 	a.logger.Info("TRAY INIT: Loading groups for server assignment menus")
 	a.loadGroupsForServerMenus()
+
+	// --- Set Server Groups Reference ---
+	// Allow MenuManager to access server groups for color display
+	a.menuManager.SetServerGroups(&a.serverGroups)
 
 	// --- Initialize Server Count Display ---
 	// Load initial server count from config
 	a.updateServerCountFromConfig()
 
 	// --- Other Menu Items ---
-	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
 	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
 	editConfigItem := systray.AddMenuItem("Edit config", "Edit the configuration file")
 	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
@@ -496,7 +498,6 @@ func (a *App) onReady() {
 	}
 
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
-	forceQuitItem := systray.AddMenuItem("🚨 Force Quit", "Force quit if application is hanging")
 
 	// --- Set Initial State & Start Sync ---
 	a.updateStatus()
@@ -513,8 +514,6 @@ func (a *App) onReady() {
 			select {
 			case <-a.startStopItem.ClickedCh:
 				a.handleStartStop()
-			case <-updateItem.ClickedCh:
-				go a.checkForUpdates()
 			case <-openConfigItem.ClickedCh:
 				a.openConfigDir()
 			case <-editConfigItem.ClickedCh:
@@ -560,9 +559,6 @@ func (a *App) onReady() {
 					}
 				}()
 				return
-			case <-forceQuitItem.ClickedCh:
-				a.logger.Warn("Force quit requested - exiting immediately")
-				os.Exit(0)
 			case <-a.ctx.Done():
 				return
 			}
@@ -1365,6 +1361,14 @@ func (a *App) openGroupManagementWeb() {
 
 // refreshMenusDelayed refreshes menus after a delay using the synchronization manager
 func (a *App) refreshMenusDelayed() {
+	// Reload groups from config when refreshing menus
+	if a.loadGroupsFromConfig() {
+		a.populateServerNamesFromConfig()
+		if a.menuManager != nil {
+			a.menuManager.SetServerGroups(&a.serverGroups)
+		}
+	}
+	
 	if a.syncManager != nil {
 		a.syncManager.SyncDelayed()
 	} else {
@@ -1374,6 +1378,14 @@ func (a *App) refreshMenusDelayed() {
 
 // refreshMenusImmediate refreshes menus immediately using the synchronization manager
 func (a *App) refreshMenusImmediate() {
+	// Reload groups from config when refreshing menus
+	if a.loadGroupsFromConfig() {
+		a.populateServerNamesFromConfig()
+		if a.menuManager != nil {
+			a.menuManager.SetServerGroups(&a.serverGroups)
+		}
+	}
+	
 	if err := a.syncManager.SyncNow(); err != nil {
 		a.logger.Error("Failed to refresh menus immediately", zap.Error(err))
 	}
@@ -1851,56 +1863,14 @@ func (a *App) refreshGroupsMenu() {
 	}
 	a.groupMenuItems = make(map[string]*systray.MenuItem)
 
-	// If no local groups exist, try to sync with config groups first, then API groups
+	// If no local groups exist, try to load from config
 	if len(a.serverGroups) == 0 {
-		a.logger.Debug("No local groups found, attempting to sync with config and API")
+		a.logger.Debug("No local groups found, attempting to load from config")
 		
-		// Check if server is running first
-		if !a.server.IsRunning() {
-			a.logger.Debug("Server not running yet, showing placeholder")
-			noGroupsItem := a.groupManagementMenu.AddSubMenuItem("⏳ Loading groups...", "Server is starting up")
-			noGroupsItem.Disable()
-			a.groupMenuItems["loading"] = noGroupsItem
-			return
-		}
-		
-		// Try to get groups from config first, then fall back to API
-		groupsLoaded := false
-		
-		// Load from config first
+		// Load from config
 		if a.loadGroupsFromConfig() {
 			a.logger.Debug("Successfully loaded groups from config", zap.Int("count", len(a.serverGroups)))
-			groupsLoaded = true
-		}
-		
-		// If no groups in config, fetch from API as fallback
-		if !groupsLoaded {
-			if apiGroups, err := a.fetchGroupsFromAPI(); err == nil && len(apiGroups) > 0 {
-				a.logger.Debug("Successfully fetched API groups, populating local groups", zap.Int("count", len(apiGroups)))
-				for _, apiGroup := range apiGroups {
-					if name, ok := apiGroup["name"].(string); ok {
-						color, _ := apiGroup["color"].(string)
-						if color == "" { color = "#007bff" }
-						
-						// Create local ServerGroup from API group
-						a.serverGroups[name] = &ServerGroup{
-							ID:          a.getNextGroupID(),
-							Name:        name,
-							Description: "Synced from API",
-							Color: color,
-							ColorEmoji: a.getColorEmojiForHex(color),
-							ServerNames: make([]string, 0),
-							Enabled: true,
-						}
-						a.logger.Debug("Added API group to local groups", zap.String("name", name), zap.String("color", color))
-					}
-				}
-				groupsLoaded = true
-			}
-		}
-		
-		// Update MenuManager with new groups if any were loaded
-		if groupsLoaded {
+			
 			// Populate server assignments from config
 			a.populateServerNamesFromConfig()
 			
@@ -1912,10 +1882,8 @@ func (a *App) refreshGroupsMenu() {
 					a.syncManager.SyncDelayed()
 				}
 			}
-		}
-		
-		if !groupsLoaded {
-			a.logger.Error("Failed to load groups from config or API")
+		} else {
+			a.logger.Error("Failed to load groups from config")
 		}
 	}
 
@@ -1938,28 +1906,7 @@ func (a *App) refreshGroupsMenu() {
 			groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(group.ServerNames))
 			groupItem := a.groupManagementMenu.AddSubMenuItem(groupTitle, group.Description)
 
-			// Add submenu options for this group
-			addServerItem := groupItem.AddSubMenuItem("➕ Add Server", "Add a server to this group")
-			editGroupItem := groupItem.AddSubMenuItem("✏️ Edit Group", "Edit group name and color")
-			deleteGroupItem := groupItem.AddSubMenuItem("🗑️ Delete Group", "Delete this group")
-
 			a.groupMenuItems[groupName] = groupItem
-
-			// Handle group-specific actions
-			go func(gName string, addServer, editGroup, deleteGroup *systray.MenuItem) {
-				for {
-					select {
-					case <-addServer.ClickedCh:
-						a.handleAddServerToGroup(gName)
-					case <-editGroup.ClickedCh:
-						a.handleEditGroup(gName)
-					case <-deleteGroup.ClickedCh:
-						a.handleDeleteGroup(gName)
-					case <-a.ctx.Done():
-						return
-					}
-				}
-			}(groupName, addServerItem, editGroupItem, deleteGroupItem)
 		}
 	}
 }
@@ -2458,46 +2405,18 @@ func (a *App) fetchGroupsFromAPI() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
-// loadGroupsForServerMenus loads groups from API for server assignment menus
+// loadGroupsForServerMenus loads groups from config for server assignment menus
 func (a *App) loadGroupsForServerMenus() {
 	a.logger.Info("loadGroupsForServerMenus called - START")
 	
-	// Check if server is running first
-	if !a.server.IsRunning() {
-		a.logger.Info("Server not running yet, scheduling delayed group load")
-		go func() {
-			time.Sleep(5 * time.Second)
-			a.loadGroupsForServerMenus()
-		}()
-		return
-	}
-	
-	// Fetch API groups and populate local groups
-	if apiGroups, err := a.fetchGroupsFromAPI(); err == nil && len(apiGroups) > 0 {
-		a.logger.Info("Successfully fetched API groups for server menus", zap.Int("count", len(apiGroups)))
-		for _, apiGroup := range apiGroups {
-			if name, ok := apiGroup["name"].(string); ok {
-				color, _ := apiGroup["color"].(string)
-				if color == "" { color = "#007bff" }
-				
-				// Create local ServerGroup from API group
-				a.serverGroups[name] = &ServerGroup{
-					ID:          a.getNextGroupID(),
-					Name:        name,
-					Description: "Available for server assignment",
-					Color:       color,
-					ColorEmoji: a.getColorEmojiForHex(color),
-					ServerNames: make([]string, 0),
-					Enabled: true,
-				}
-				a.logger.Info("Added API group for server assignment", zap.String("name", name), zap.String("color", color))
-			}
-		}
-
+	// Load groups from config to get correct colors and assignments
+	if a.loadGroupsFromConfig() {
+		a.logger.Info("Successfully loaded groups from config", zap.Int("group_count", len(a.serverGroups)))
+		
 		// Populate ServerNames from config assignments
 		a.populateServerNamesFromConfig()
 
-		// Update MenuManager with new groups
+		// Update MenuManager with groups (if menuManager is available)
 		if a.menuManager != nil {
 			a.menuManager.SetServerGroups(&a.serverGroups)
 			a.logger.Info("Updated MenuManager with groups", zap.Int("group_count", len(a.serverGroups)))
@@ -2510,9 +2429,11 @@ func (a *App) loadGroupsForServerMenus() {
 				a.syncManager.SyncDelayed()
 				a.logger.Info("Triggered delayed sync to refresh server menus with groups")
 			}
+		} else {
+			a.logger.Debug("MenuManager not available yet, groups will be set later")
 		}
 	} else {
-		a.logger.Error("Failed to fetch API groups for server menus", zap.Error(err))
+		a.logger.Error("Failed to load groups from config for server menus")
 	}
 }
 
@@ -2641,7 +2562,7 @@ func (a *App) loadGroupsFromConfig() bool {
 					description = fmt.Sprintf("Custom group: %s", name)
 				}
 				if color == "" {
-					color = "#007bff"
+					color = "#6c757d"
 				}
 				if colorEmoji == "" {
 					colorEmoji = a.getColorEmojiForHex(color)
@@ -2717,7 +2638,7 @@ func (a *App) syncWithAPIGroups() {
 		
 		color, ok := apiGroup["color"].(string)
 		if !ok {
-			color = "#007bff" // Default color
+			color = "#6c757d" // Default color
 		}
 
 		// Create tray group from API group
@@ -2744,7 +2665,6 @@ func (a *App) getColorEmoji(hexColor string) string {
 		"#ff9900": "🟠", // AWS Orange
 		"#28a745": "🟢", // Green
 		"#dc3545": "🔴", // Red
-		"#007bff": "🔵", // Blue
 		"#6f42c1": "🟣", // Purple
 		"#6610f2": "🟣", // Purple (variant)
 		"#fd7e14": "🟠", // Orange
@@ -2762,8 +2682,8 @@ func (a *App) getColorEmoji(hexColor string) string {
 		return emoji
 	}
 	
-	// Default to blue circle for unknown colors
-	return "🔵"
+	// Default to gray circle for unknown colors
+	return "⚫"
 }
 
 // fetchServerAssignments fetches server-to-group assignments
@@ -2968,6 +2888,10 @@ func (a *App) restoreServerStatesAfterStart() error {
 func (a *App) updateGroupManagementSubmenus() {
 	a.logger.Info("Updating Group Management submenus")
 
+	// ENSURE: Load groups from config to get correct colors before creating menus
+	a.loadGroupsFromConfig()
+	a.logger.Debug("Reloaded groups from config for Group Management", zap.Int("groups_count", len(a.serverGroups)))
+
 	// Clear existing group management menu items
 	if a.groupManagementMenu != nil {
 		// Remove all submenu items
@@ -3042,29 +2966,6 @@ func (a *App) updateGroupManagementSubmenus() {
 			noServersItem.Disable()
 		}
 
-		// Add group management actions
-		addServerItem := groupItem.AddSubMenuItem("➕ Add Server", fmt.Sprintf("Add a server to group '%s'", groupName))
-		editGroupItem := groupItem.AddSubMenuItem("✏️ Edit Group", fmt.Sprintf("Edit properties of group '%s'", groupName))
-		deleteGroupItem := groupItem.AddSubMenuItem("🗑️ Delete Group", fmt.Sprintf("Delete group '%s'", groupName))
-
-		// Handle group action clicks
-		go func(gName string, addItem, editItem, deleteItem *systray.MenuItem) {
-			for {
-				select {
-				case <-addItem.ClickedCh:
-					a.handleAddServerToGroup(gName)
-					// Refresh the Group Management submenus after change
-					a.updateGroupManagementSubmenus()
-				case <-editItem.ClickedCh:
-					a.handleEditGroup(gName)
-				case <-deleteItem.ClickedCh:
-					a.handleDeleteGroup(gName)
-					// Refresh the Group Management submenus after deletion
-					a.updateGroupManagementSubmenus()
-				}
-			}
-		}(groupName, addServerItem, editGroupItem, deleteGroupItem)
-
 		// Store the group menu item
 		a.groupMenuItems[groupName] = groupItem
 	}
@@ -3082,7 +2983,6 @@ func (a *App) getColorEmojiForHex(hex string) string {
 	case "#ff9900": return "🟠" // AWS Orange
 	case "#28a745": return "🟢" // Green
 	case "#dc3545": return "🔴" // Red
-	case "#007bff": return "🔵" // Blue
 	case "#6f42c1": return "🟣" // Purple
 	case "#6610f2": return "🟣" // Purple (variant)
 	case "#fd7e14": return "🟠" // Orange
@@ -3096,7 +2996,119 @@ func (a *App) getColorEmojiForHex(hex string) string {
 	case "#6c757d": return "⚫" // Gray (black)
 	case "#343a40": return "⚫" // Dark
 	default: 
-		a.logger.Debug("Using default blue for unknown color", zap.String("hex", hex))
-		return "🔵" // Blue
+		a.logger.Debug("Using default gray for unknown color", zap.String("hex", hex))
+		return nearestEmojiForHex(hex)
+	}
+}
+
+// nearestEmojiForHex maps any hex to the closest emoji by HSV distance
+func nearestEmojiForHex(hex string) string {
+	r, g, b := parseHexColor(hex)
+	h, s, v := rgbToHsv(r, g, b)
+	// Basic mapping buckets
+	switch {
+	case v < 0.2:
+		return "⚫"
+	case s < 0.2 && v > 0.9:
+		return "⚪"
+	}
+	// Hue based
+	deg := h * 360
+	switch {
+	case deg < 20 || deg >= 340:
+		return "🔴"
+	case deg < 50:
+		return "🟠"
+	case deg < 70:
+		return "🟡"
+	case deg < 170:
+		return "🟢"
+	case deg < 260:
+		return "🔵"
+	default:
+		return "🟣"
+	}
+}
+
+// generateColorForGroup creates a deterministic vibrant color from group name
+func (a *App) generateColorForGroup(name string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
+	seed := h.Sum32()
+	// Map to hue [0,360), use fixed saturation/value for visibility
+	hue := float64(seed%360)
+	sat := 0.75
+	val := 0.85
+	r, g, b := hsvToRgb(hue/360.0, sat, val)
+	return fmt.Sprintf("#%02x%02x%02x", int(math.Round(r*255)), int(math.Round(g*255)), int(math.Round(b*255)))
+}
+
+// parseHexColor supports #rgb, #rgba, #rrggbb, #rrggbbaa
+func parseHexColor(s string) (float64, float64, float64) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if strings.HasPrefix(s, "#") {
+		s = s[1:]
+	}
+	var r, g, b int64
+	if len(s) == 3 {
+		// #rgb
+		r, _ = strconv.ParseInt(strings.Repeat(string(s[0]), 2), 16, 64)
+		g, _ = strconv.ParseInt(strings.Repeat(string(s[1]), 2), 16, 64)
+		b, _ = strconv.ParseInt(strings.Repeat(string(s[2]), 2), 16, 64)
+	} else if len(s) >= 6 {
+		r, _ = strconv.ParseInt(s[0:2], 16, 64)
+		g, _ = strconv.ParseInt(s[2:4], 16, 64)
+		b, _ = strconv.ParseInt(s[4:6], 16, 64)
+	} else {
+		return 0.42, 0.42, 0.42
+	}
+	return float64(r) / 255.0, float64(g) / 255.0, float64(b) / 255.0
+}
+
+func rgbToHsv(r, g, b float64) (float64, float64, float64) {
+	max := math.Max(r, math.Max(g, b))
+	min := math.Min(r, math.Min(g, b))
+	d := max - min
+	var h float64
+	if d == 0 {
+		h = 0
+	} else if max == r {
+		h = math.Mod(((g-b)/d), 6)
+	} else if max == g {
+		h = ((b-r)/d + 2)
+	} else {
+		h = ((r-g)/d + 4)
+	}
+	h = h / 6
+	if h < 0 {
+		h += 1
+	}
+	var s float64
+	if max == 0 { s = 0 } else { s = d / max }
+	v := max
+	return h, s, v
+}
+
+func hsvToRgb(h, s, v float64) (float64, float64, float64) {
+	if s == 0 { return v, v, v }
+	h = h * 6
+	i := math.Floor(h)
+	f := h - i
+	p := v * (1 - s)
+	q := v * (1 - s*f)
+	t := v * (1 - s*(1-f))
+	switch int(i) % 6 {
+	case 0:
+		return v, t, p
+	case 1:
+		return q, v, p
+	case 2:
+		return p, v, t
+	case 3:
+		return p, q, v
+	case 4:
+		return t, p, v
+	default:
+		return v, p, q
 	}
 }
