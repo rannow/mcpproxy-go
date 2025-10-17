@@ -475,7 +475,10 @@ func (a *App) onReady() {
 	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar())
 
 	// Initialize chat system
-	storage := NewFileChatStorage(a.logger.Desugar())
+	storage, err := NewFileChatStorage(a.logger.Desugar(), "")
+	if err != nil {
+		a.logger.Warnf("Failed to initialize chat storage: %v", err)
+	}
 	a.chatSystem = NewChatSystem(a.logger.Desugar(), storage, a.server)
 
 	// --- Set Action Callback ---

@@ -38,8 +38,11 @@ var (
 	allowServerRemove bool
 	enablePrompts     bool
 
-	version   = "v0.1.0" // This will be injected by -ldflags during build
-	buildTime = "unknown" // This will be injected by -ldflags during build
+	// Build information (injected by -ldflags during build)
+	version   = "v0.1.0-dev"
+	buildTime = "unknown"
+	gitCommit = "unknown"
+	gitBranch = "unknown"
 )
 
 const (
@@ -58,9 +61,10 @@ func main() {
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
 
 	rootCmd := &cobra.Command{
-		Use:     "mcpproxy",
-		Short:   "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
-		Version: version,
+		Use:   "mcpproxy",
+		Short: "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
+		Version: fmt.Sprintf("%s\n  Build Time: %s\n  Git Commit: %s\n  Git Branch: %s",
+			version, buildTime, gitCommit, gitBranch),
 	}
 
 	// Add global flags

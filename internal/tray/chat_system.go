@@ -4,13 +4,11 @@ package tray
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
-	"mcpproxy-go/internal/config"
 )
 
 // ChatMessage represents a single chat message
@@ -58,6 +56,7 @@ type ChatSystem struct {
 		EnableServer(serverName string, enabled bool) error
 		GetAllServers() ([]map[string]interface{}, error)
 		ReloadConfiguration() error
+		GetConfigPath() string
 	}
 }
 
@@ -84,6 +83,7 @@ func NewChatSystem(logger *zap.Logger, storage ChatStorage, serverManager interf
 	EnableServer(serverName string, enabled bool) error
 	GetAllServers() ([]map[string]interface{}, error)
 	ReloadConfiguration() error
+	GetConfigPath() string
 }) *ChatSystem {
 	cs := &ChatSystem{
 		logger:        logger,
