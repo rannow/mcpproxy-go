@@ -1178,6 +1178,13 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
 	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
 
+	// Root dashboard handler
+	mux.HandleFunc("/", s.handleDashboard)
+
+	// Metrics web interface
+	mux.HandleFunc("/metrics", s.handleMetricsWeb)
+	mux.HandleFunc("/api/metrics/current", s.handleMetricsAPI)
+
 	// Group management web interface
 	mux.HandleFunc("/groups", s.handleGroupsWeb)
 	mux.HandleFunc("/assignments", s.handleAssignmentWeb)
