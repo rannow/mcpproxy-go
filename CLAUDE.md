@@ -10,7 +10,7 @@ MCPProxy is a Go-based desktop application that acts as a smart proxy for AI age
 
 ### Build
 ```bash
-# Build for current platform
+# Build for current platform (ALWAYS use 'mcpproxy' as binary name)
 go build -o mcpproxy ./cmd/mcpproxy
 
 # Cross-platform build script (builds for multiple architectures)
@@ -19,6 +19,10 @@ go build -o mcpproxy ./cmd/mcpproxy
 # Quick local build
 scripts/build.sh
 ```
+
+**Important**:
+- **Always use `mcpproxy` as the binary name** for consistency across all platforms and build configurations
+- Never use alternative names or variations
 
 ### Testing
 ```bash
@@ -50,11 +54,8 @@ golangci-lint run ./...
 
 ### Running the Application
 ```bash
-# Start server with system tray (default)
+# Start server with system tray (ALWAYS use tray in production/development)
 ./mcpproxy serve
-
-# Start without tray
-./mcpproxy serve --tray=false
 
 # Custom configuration
 ./mcpproxy serve --config=/path/to/config.json
@@ -64,7 +65,16 @@ golangci-lint run ./...
 
 # Debug specific server tools
 ./mcpproxy tools list --server=github-server --log-level=trace
+
+# ONLY for automated testing/CI: Start without tray
+./mcpproxy serve --tray=false
 ```
+
+**Important**:
+- **Always start with system tray enabled** (`./mcpproxy serve`) for normal development and production use
+- The tray provides essential UI for server management, status monitoring, and configuration
+- Only use `--tray=false` for automated testing, CI/CD pipelines, or headless environments
+- The application is designed to run with the tray interface as the primary user interaction method
 
 ## Architecture Overview
 
@@ -416,11 +426,14 @@ grep -E "(state.*transition|Connecting|Ready|Error)" ~/Library/Logs/mcpproxy/mai
 # Kill existing daemon
 pkill mcpproxy
 
-# Start with debug logging
-go build && ./mcpproxy --log-level=debug --tray=false
+# Start with debug logging (with tray for production debugging)
+go build && ./mcpproxy serve --log-level=debug
 
 # Start with trace-level logging (very verbose)
-./mcpproxy --log-level=trace --tray=false
+./mcpproxy serve --log-level=trace
+
+# For automated testing only: Debug without tray
+./mcpproxy serve --log-level=debug --tray=false
 
 # Debug specific operations
 ./mcpproxy tools list --server=github-server --log-level=trace
@@ -482,6 +495,96 @@ export HEADLESS=true
 - Config changes should update both storage and file system
 - File watcher triggers automatic config reloads
 - Validate configuration on load and provide sensible defaults
+
+### System Tray Development Guidelines
+
+**CRITICAL**: System tray modifications require extremely careful review due to historical issues with incorrect assumptions about functionality.
+
+#### Common Pitfalls to Avoid
+
+1. **Process Overlap Issues**
+   - **ALWAYS verify** no overlapping processes are running before making tray changes
+   - Check for duplicate daemon instances that could cause state conflicts
+   - Use `pkill mcpproxy` before testing tray modifications
+   - Verify only ONE mcpproxy process is running: `ps aux | grep mcpproxy`
+
+2. **State Management Anti-Patterns**
+   - **NEVER store state in multiple locations** (memory AND disk without synchronization)
+   - **ALWAYS use a single source of truth** for application state
+   - Tray UI should **READ from disk** (config.db, mcp_config.json), not maintain separate state
+   - Server status should come from `internal/server/` state manager, not duplicated in tray
+
+3. **Disk Persistence Requirements**
+   - **ALL state changes MUST be persisted to disk immediately**
+   - Server enable/disable → Update both `config.db` AND `mcp_config.json`
+   - Quarantine changes → Update `config.db` with quarantine status
+   - Configuration updates → Write to `mcp_config.json` AND update storage
+   - **NEVER rely on in-memory state** that isn't backed by persistent storage
+
+4. **State Synchronization Checklist**
+   - [ ] Does the change update `config.db` (BBolt database)?
+   - [ ] Does the change update `mcp_config.json` (configuration file)?
+   - [ ] Does the tray read from the authoritative source (not cached state)?
+   - [ ] Is there proper error handling for disk write failures?
+   - [ ] Does the file watcher properly reload changes?
+   - [ ] Are all processes reading the same source of truth?
+
+5. **Verification Steps for Tray Changes**
+   ```bash
+   # Before making changes
+   pkill mcpproxy  # Kill all instances
+
+   # After making changes
+   ./mcpproxy serve  # Start fresh instance
+
+   # Verify single process
+   ps aux | grep mcpproxy | grep -v grep  # Should show only ONE process
+
+   # Test state persistence
+   # 1. Make change in tray UI (e.g., disable server)
+   # 2. Verify change written to disk:
+   cat ~/.mcpproxy/mcp_config.json | grep -A5 "server-name"
+
+   # 3. Restart application
+   pkill mcpproxy
+   ./mcpproxy serve
+
+   # 4. Verify change persisted (server still disabled)
+   ```
+
+6. **Data Flow Architecture**
+   ```
+   Tray UI (read-only view)
+       ↓ user action
+   Event Handler (internal/tray/handlers.go)
+       ↓ validation
+   Server Manager (internal/server/server.go)
+       ↓ update
+   Storage Manager (internal/storage/)
+       ↓ persist
+   Disk (config.db + mcp_config.json)
+       ↓ reload via file watcher
+   All Components (synchronized state)
+   ```
+
+7. **Testing Tray Modifications**
+   - **Test with fresh start**: Always test after killing and restarting
+   - **Test state persistence**: Verify changes survive restart
+   - **Test concurrent access**: Ensure no race conditions with multiple UI elements
+   - **Test error cases**: What happens if disk write fails?
+   - **Test file watcher**: Does config reload trigger properly?
+
+8. **Code Review Checklist for Tray PRs**
+   - [ ] No duplicate state storage (memory vs disk)
+   - [ ] All state changes persist to disk
+   - [ ] Tray reads from authoritative source (storage/config)
+   - [ ] No assumptions about in-memory state
+   - [ ] Proper error handling for disk operations
+   - [ ] File watcher integration tested
+   - [ ] No overlapping process scenarios
+   - [ ] State synchronization verified across restart
+
+**Remember**: The tray is a **VIEW** of the application state, not a **STORE** of application state. All state must live in persistent storage and be synchronized across all components.
 
 ## Important Implementation Details
 

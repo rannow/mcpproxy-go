@@ -28,6 +28,7 @@ import (
 type Group struct {
 	ID    int    `json:"id"`
 	Name  string `json:"name"`
+	Icon  string `json:"icon_emoji,omitempty"`
 	Color string `json:"color"`
 }
 
@@ -60,6 +61,9 @@ type Server struct {
 
 	// Startup script manager
 	startupManager *startup.Manager
+
+	// MCP Inspector manager
+	inspectorManager *InspectorManager
 
 	// Server control
 	httpServer *http.Server
@@ -142,6 +146,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 	// Initialize startup script manager
 	server.startupManager = startup.NewManager(cfg.StartupScript, logger.Sugar())
+
+	// Initialize MCP Inspector manager
+	server.inspectorManager = NewInspectorManager(logger.Sugar())
 
 	// Create MCP proxy server
 	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, cacheManager, truncator, logger, server, cfg.DebugSearch, cfg)
@@ -609,6 +616,14 @@ func (s *Server) Shutdown() error {
         s.logger.Info("Stopping startup script")
         if err := s.startupManager.Stop(); err != nil {
             s.logger.Warn("Failed to stop startup script", zap.Error(err))
+        }
+    }
+
+    // Stop MCP Inspector if running
+    if s.inspectorManager != nil {
+        s.logger.Info("Stopping MCP Inspector")
+        if err := s.inspectorManager.Stop(); err != nil {
+            s.logger.Warn("Failed to stop MCP Inspector", zap.Error(err))
         }
     }
 
@@ -1185,6 +1200,14 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.HandleFunc("/metrics", s.handleMetricsWeb)
 	mux.HandleFunc("/api/metrics/current", s.handleMetricsAPI)
 
+	// Comprehensive resources web interface
+	mux.HandleFunc("/resources", s.handleResourcesWeb)
+	mux.HandleFunc("/api/resources/current", s.handleResourcesAPI)
+
+	// Server overview web interface
+	mux.HandleFunc("/servers", s.handleServersWeb)
+	mux.HandleFunc("/api/servers/status", s.handleServersStatusAPI)
+
 	// Group management web interface
 	mux.HandleFunc("/groups", s.handleGroupsWeb)
 	mux.HandleFunc("/assignments", s.handleAssignmentWeb)
@@ -1215,6 +1238,11 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+
+	// MCP Inspector endpoints
+	mux.HandleFunc("/api/inspector/start", s.handleInspectorStart)
+	mux.HandleFunc("/api/inspector/stop", s.handleInspectorStop)
+	mux.HandleFunc("/api/inspector/status", s.handleInspectorStatus)
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
@@ -1352,13 +1380,20 @@ func (s *Server) SaveConfiguration() error {
 			"color":   g.Color,
 			"enabled": g.Enabled,
 		}
+		// Add icon_emoji if present
+		if g.Icon != "" {
+			mg["icon_emoji"] = g.Icon
+		}
 		if prev, ok := existingGroups[g.Name]; ok {
-			// Preserve description and color_emoji if present
+			// Preserve description if present
 			if desc, ok := prev["description"].(string); ok && desc != "" {
 				mg["description"] = desc
 			}
-			if emoji, ok := prev["color_emoji"].(string); ok && emoji != "" {
-				mg["color_emoji"] = emoji
+			// Preserve color_emoji if present and icon not already set
+			if g.Icon == "" {
+				if emoji, ok := prev["color_emoji"].(string); ok && emoji != "" {
+					mg["color_emoji"] = emoji
+				}
 			}
 		}
 		mergedGroups = append(mergedGroups, mg)
@@ -1545,11 +1580,13 @@ func (s *Server) syncGroupsToConfig() {
 		configGroups = append(configGroups, config.GroupConfig{
 			ID:      group.ID,
 			Name:    group.Name,
+			Icon:    group.Icon,
 			Color:   group.Color,
 			Enabled: true, // Groups are enabled by default
 		})
 		s.logger.Debug("[GROUPS DEBUG] Converting group to config format",
 			zap.String("name", group.Name),
+			zap.String("icon", group.Icon),
 			zap.String("color", group.Color))
 	}
 
@@ -1614,12 +1651,14 @@ func (s *Server) initGroupsFromConfig() {
 			groups[configGroup.Name] = &Group{
 				ID:    configGroup.ID,
 				Name:  configGroup.Name,
+				Icon:  configGroup.Icon,
 				Color: configGroup.Color,
 			}
 			loadedCount++
 			s.logger.Debug("[GROUPS DEBUG] Loaded group into memory",
 				zap.Int("id", configGroup.ID),
 				zap.String("name", configGroup.Name),
+				zap.String("icon", configGroup.Icon),
 				zap.String("color", configGroup.Color))
 		}
 	}
