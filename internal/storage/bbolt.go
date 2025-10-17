@@ -23,6 +23,12 @@ type BoltDB struct {
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	dbPath := filepath.Join(dataDir, "config.db")
 
+	// Compact database on startup to reclaim space
+	if err := CompactDB(dbPath, logger); err != nil {
+		logger.Warnf("Failed to compact database on startup: %v", err)
+		// Continue anyway - compacting is not critical
+	}
+
 	// Try to open with timeout, if it fails, attempt recovery
 	db, err := bbolt.Open(dbPath, 0644, &bbolt.Options{
 		Timeout: 10 * time.Second,
@@ -406,4 +412,109 @@ func (b *BoltDB) ListOAuthTokens() ([]*OAuthTokenRecord, error) {
 	})
 
 	return records, err
+}
+
+// CompactDB compacts the database file to reclaim space from deleted entries
+// This should be called before opening the database normally
+func CompactDB(dbPath string, logger *zap.SugaredLogger) error {
+	// Check if database file exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		logger.Debug("Database file does not exist, skipping compacting")
+		return nil
+	}
+
+	// Get original file size
+	originalInfo, err := os.Stat(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat database file: %w", err)
+	}
+	originalSize := originalInfo.Size()
+
+	// Skip compacting if database is already small (< 10 MB)
+	if originalSize < 10*1024*1024 {
+		logger.Debugf("Database is small (%.2f MB), skipping compacting", float64(originalSize)/(1024*1024))
+		return nil
+	}
+
+	logger.Infof("Compacting database (%.2f MB)...", float64(originalSize)/(1024*1024))
+	startTime := time.Now()
+
+	// Open source database in read-only mode
+	src, err := bbolt.Open(dbPath, 0644, &bbolt.Options{
+		Timeout:  5 * time.Second,
+		ReadOnly: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to open source database: %w", err)
+	}
+	defer src.Close()
+
+	// Create temporary compact file
+	compactPath := dbPath + ".compact.tmp"
+	defer os.Remove(compactPath) // Clean up temp file
+
+	// Create destination database
+	dst, err := bbolt.Open(compactPath, 0644, &bbolt.Options{
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create compact database: %w", err)
+	}
+
+	// Copy all data from source to destination
+	copyErr := src.View(func(srcTx *bbolt.Tx) error {
+		return dst.Update(func(dstTx *bbolt.Tx) error {
+			return srcTx.ForEach(func(name []byte, srcBucket *bbolt.Bucket) error {
+				// Create bucket in destination
+				dstBucket, err := dstTx.CreateBucketIfNotExists(name)
+				if err != nil {
+					return fmt.Errorf("create bucket %s: %w", string(name), err)
+				}
+
+				// Copy all key-value pairs
+				return srcBucket.ForEach(func(k, v []byte) error {
+					return dstBucket.Put(k, v)
+				})
+			})
+		})
+	})
+
+	// Close destination database before replacing
+	if err := dst.Close(); err != nil {
+		logger.Warnf("Failed to close compact database: %v", err)
+	}
+
+	if copyErr != nil {
+		return fmt.Errorf("failed to copy data: %w", copyErr)
+	}
+
+	// Close source database before replacing
+	if err := src.Close(); err != nil {
+		logger.Warnf("Failed to close source database: %v", err)
+	}
+
+	// Get compacted file size
+	compactInfo, err := os.Stat(compactPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat compact file: %w", err)
+	}
+	compactSize := compactInfo.Size()
+
+	// Replace original with compacted version
+	if err := os.Rename(compactPath, dbPath); err != nil {
+		return fmt.Errorf("failed to replace database: %w", err)
+	}
+
+	elapsed := time.Since(startTime)
+	saved := originalSize - compactSize
+	savedPct := float64(saved) / float64(originalSize) * 100
+
+	logger.Infof("Database compacted successfully in %v: %.2f MB → %.2f MB (saved %.2f MB, %.1f%%)",
+		elapsed,
+		float64(originalSize)/(1024*1024),
+		float64(compactSize)/(1024*1024),
+		float64(saved)/(1024*1024),
+		savedPct)
+
+	return nil
 }
