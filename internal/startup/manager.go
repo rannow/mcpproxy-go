@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -73,10 +71,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		cmd.Dir = m.cfg.WorkingDir
 	}
 
-	// Ensure we can kill all children on Unix by creating a new process group
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	// Setup process group for proper cleanup (platform-specific)
+	setupProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -154,29 +150,8 @@ func (m *Manager) Status() map[string]interface{} {
 
 // killProcessTree attempts to kill the whole process tree for the command
 func (m *Manager) killProcessTree(c *exec.Cmd) error {
-	if c == nil || c.Process == nil {
-		return nil
-	}
-	// Windows: use taskkill to terminate tree
-	if runtime.GOOS == "windows" {
-		// Best-effort: taskkill /T /F /PID <pid>
-		_ = exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", c.Process.Pid)).Run()
-		return c.Process.Kill()
-	}
-	// Unix: kill process group
-	pgid, err := syscall.Getpgid(c.Process.Pid)
-	if err != nil {
-		// Fallback to direct kill
-		_ = c.Process.Kill()
-		return err
-	}
-	// Negative pgid sends to the group
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		// Fallback
-		_ = c.Process.Kill()
-		return err
-	}
-	return nil
+	// Use platform-specific implementation
+	return killProcessGroup(c)
 }
 
 // ValidateConfig performs basic checks
