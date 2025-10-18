@@ -89,6 +89,12 @@ type Config struct {
 
 	// Startup script configuration, executed when mcpproxy starts
 	StartupScript *StartupScriptConfig `json:"startup_script,omitempty" mapstructure:"startup-script"`
+
+	// Maximum number of concurrent server connections during startup
+	MaxConcurrentConnections int `json:"max_concurrent_connections" mapstructure:"max-concurrent-connections"`
+
+	// Lazy loading configuration - only connect to servers when their tools are called
+	EnableLazyLoading bool `json:"enable_lazy_loading" mapstructure:"enable-lazy-loading"`
 }
 
 // LogConfig represents logging configuration
@@ -149,9 +155,18 @@ type ServerConfig struct {
 	Quarantined   bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
 	Created       time.Time         `json:"created" mapstructure:"created"`
 	Updated       time.Time         `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation     *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
-	GroupID       int               `json:"group_id,omitempty" mapstructure:"group_id"`       // Assigned group ID (new format)
-	GroupName     string            `json:"group_name,omitempty" mapstructure:"group_name"`   // Assigned group name (legacy)
+	Isolation                 *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
+	GroupID                   int               `json:"group_id,omitempty" mapstructure:"group_id"`       // Assigned group ID (new format)
+	GroupName                 string            `json:"group_name,omitempty" mapstructure:"group_name"`   // Assigned group name (legacy)
+
+	// Connection history for prioritization
+	EverConnected             bool      `json:"ever_connected,omitempty" mapstructure:"ever_connected"`                         // Has this server ever successfully connected
+	LastSuccessfulConnection  time.Time `json:"last_successful_connection,omitempty" mapstructure:"last_successful_connection"` // Last successful connection time
+	ToolCount                 int       `json:"tool_count,omitempty" mapstructure:"tool_count"`                                 // Number of tools discovered from this server
+
+	// Lazy loading and connection behavior flags
+	StartOnBoot               bool      `json:"start_on_boot" mapstructure:"start_on_boot"`         // Connect to server on startup (default: false for lazy loading)
+	HealthCheck               bool      `json:"health_check" mapstructure:"health_check"`           // Perform regular health checks (default: false)
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -196,7 +211,52 @@ type GroupConfig struct {
 	Name        string `json:"name" mapstructure:"name"`
 	Description string `json:"description,omitempty" mapstructure:"description"`
 	Color       string `json:"color" mapstructure:"color"`
+	Icon        string `json:"icon_emoji,omitempty" mapstructure:"icon_emoji"` // Emoji icon for the group
 	Enabled     bool   `json:"enabled" mapstructure:"enabled"`
+}
+
+// AvailableGroupIcons returns a list of available emoji icons for groups
+var AvailableGroupIcons = []string{
+	"🌐", // Browser/Web
+	"🔧", // Tools/Configuration
+	"🧪", // Testing/Experimental
+	"🗄️", // Database/Storage
+	"☁️", // Cloud/Web Services
+	"🎯", // Target/Goals
+	"💼", // Business/Professional
+	"🔔", // Notifications/Alerts
+	"🏠", // Home/Default
+	"🖥️", // Computer/Services
+	"📊", // Analytics/Data
+	"🔒", // Security
+	"⚡", // Performance/Speed
+	"🎨", // Design/UI
+	"📱", // Mobile
+	"🌟", // Featured/Important
+	"🔍", // Search/Discovery
+	"💾", // Storage/Backup
+	"🚀", // Launch/Deployment
+	"📁", // Files/Documents
+	"🔗", // Integration/Links
+	"⚙️", // Settings/Configuration
+	"📝", // Documentation/Notes
+	"🎭", // Testing/QA
+	"🌈", // Diverse/Mixed
+	"🔐", // Authentication
+	"📡", // Network/Communication
+	"🎮", // Gaming/Interactive
+	"🏗️", // Building/Construction
+	"🔬", // Research/Science
+	"📈", // Growth/Metrics
+	"🌍", // Global/International
+	"🎪", // Entertainment
+	"🔊", // Audio/Sound
+	"📸", // Media/Images
+	"🎥", // Video/Streaming
+	"📚", // Libraries/Knowledge
+	"💡", // Ideas/Innovation
+	"🛠️", // Tools/Utilities
+	"🎁", // Packages/Resources
 }
 
 // RegistryEntry represents a registry in the configuration
@@ -468,6 +528,9 @@ func DefaultConfig() *Config {
 			Env:        map[string]string{},
 			Timeout:    Duration(0),
 		},
+
+		// Default concurrent connections: 20 servers at once
+		MaxConcurrentConnections: 20,
 	}
 }
 
@@ -487,6 +550,9 @@ func (c *Config) Validate() error {
 	}
 	if c.CallToolTimeout.Duration() <= 0 {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
+	}
+	if c.MaxConcurrentConnections <= 0 {
+		c.MaxConcurrentConnections = 20 // Default to 20 concurrent connections
 	}
 
 	// Ensure Environment config is not nil

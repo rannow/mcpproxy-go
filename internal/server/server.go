@@ -16,6 +16,7 @@ import (
 
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/events"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/storage"
@@ -58,6 +59,7 @@ type Server struct {
 	cacheManager    *cache.Manager
 	truncator       *truncate.Truncator
 	mcpProxy        *MCPProxyServer
+	eventBus        *events.EventBus // Event bus for state change notifications
 
 	// Startup script manager
 	startupManager *startup.Manager
@@ -125,6 +127,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Create a context that will be used for background operations
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Initialize event bus for state change notifications
+	eventBus := events.NewEventBus()
+
     server := &Server{
 		config:          cfg,
 		configPath:      configPath,
@@ -134,6 +139,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		upstreamManager: upstreamManager,
 		cacheManager:    cacheManager,
 		truncator:       truncator,
+		eventBus:        eventBus,
 		appCtx:          ctx,
 		appCancel:       cancel,
 		statusCh:        make(chan Status, 10), // Buffered channel for status updates
@@ -163,6 +169,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 	// Initialize server-group assignments from config
 	server.initServerGroupAssignments()
+
+	// Setup event bridge to connect StateManager to EventBus
+	server.setupEventBridge()
 
 	// Start background initialization immediately
 	go server.backgroundInitialization()
@@ -677,6 +686,23 @@ func (s *Server) IsRunning() bool {
 	return s.running
 }
 
+// GetEventBus returns the event bus for subscribing to events
+func (s *Server) GetEventBus() *events.EventBus {
+	return s.eventBus
+}
+
+// setupEventBridge connects StateManager callbacks to the EventBus
+// This should be called after upstream manager is initialized
+func (s *Server) setupEventBridge() {
+	s.logger.Info("Setting up event bridge for state change notifications")
+
+	// Pass the event bus to the upstream manager
+	// It will then publish events for all state changes
+	s.upstreamManager.SetEventBus(s.eventBus)
+
+	s.logger.Info("Event bridge ready - state changes will be published to event bus")
+}
+
 // GetListenAddress returns the address the server is listening on
 func (s *Server) GetListenAddress() string {
 	return s.config.Listen
@@ -896,6 +922,22 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 		// Don't return here; the primary state is updated. The file watcher will eventually sync.
 	}
 
+	// Publish config change event for tray to react
+	action := "disabled"
+	if enabled {
+		action = "enabled"
+	}
+	s.eventBus.Publish(events.Event{
+		Type:       events.EventConfigChange,
+		ServerName: serverName,
+		Data: events.ConfigChangeData{
+			Action: action,
+		},
+	})
+	s.logger.Debug("Published config change event",
+		zap.String("server", serverName),
+		zap.String("action", action))
+
 	// The file watcher in the tray will detect the change to the config file and
 	// trigger ReloadConfiguration(), which calls loadConfiguredServers().
 	// This completes the loop by updating the running state (upstreamManager) from the new config.
@@ -919,6 +961,22 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
 	}
+
+	// Publish config change event for tray to react
+	action := "unquarantined"
+	if quarantined {
+		action = "quarantined"
+	}
+	s.eventBus.Publish(events.Event{
+		Type:       events.EventConfigChange,
+		ServerName: serverName,
+		Data: events.ConfigChangeData{
+			Action: action,
+		},
+	})
+	s.logger.Debug("Published config change event",
+		zap.String("server", serverName),
+		zap.String("action", action))
 
 	s.logger.Info("Successfully persisted server quarantine state change",
 		zap.String("server", serverName),
@@ -1203,6 +1261,7 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	// Comprehensive resources web interface
 	mux.HandleFunc("/resources", s.handleResourcesWeb)
 	mux.HandleFunc("/api/resources/current", s.handleResourcesAPI)
+	mux.HandleFunc("/api/resources/history", s.handleResourcesHistoryAPI)
 
 	// Server overview web interface
 	mux.HandleFunc("/servers", s.handleServersWeb)

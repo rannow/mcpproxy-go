@@ -570,12 +570,27 @@ const configDialogTemplate = `<!DOCTYPE html>
                     <label for="quarantined">Quarantined</label>
                     <div class="help-text">Security quarantine status</div>
                 </div>
+
+                <div class="section-title">Connection Behavior</div>
+
+                <div class="checkbox-group">
+                    <input type="checkbox" id="start_on_boot" name="start_on_boot" {{if .Server.StartOnBoot}}checked{{end}}>
+                    <label for="start_on_boot">Start on Boot</label>
+                    <div class="help-text">Connect to this server on startup (overrides lazy loading)</div>
+                </div>
+
+                <div class="checkbox-group">
+                    <input type="checkbox" id="health_check" name="health_check" {{if .Server.HealthCheck}}checked{{end}}>
+                    <label for="health_check">Health Check</label>
+                    <div class="help-text">Periodically test the connection and reconnect if needed</div>
+                </div>
             </form>
         </div>
 
         <div class="dialog-footer">
             <button type="button" class="btn btn-secondary" onclick="cancel()">Cancel</button>
             <button type="button" class="btn btn-info" onclick="runDiagnostic()">🔍 Diagnostic</button>
+            <button type="button" class="btn btn-info" onclick="startInspector()" id="inspectorBtn">🔬 MCP Inspector</button>
             <button type="button" class="btn btn-primary" onclick="save()">Save</button>
         </div>
 
@@ -684,6 +699,8 @@ const configDialogTemplate = `<!DOCTYPE html>
                 protocol: formData.get('protocol'),
                 enabled: formData.get('enabled') === 'on',
                 quarantined: formData.get('quarantined') === 'on',
+                start_on_boot: formData.get('start_on_boot') === 'on',
+                health_check: formData.get('health_check') === 'on',
                 repository_url: formData.get('repository_url') || '',
                 created: (configData && configData.Server && configData.Server.created) ? configData.Server.created : new Date().toISOString(),
                 updated: new Date().toISOString()
@@ -1132,7 +1149,64 @@ const configDialogTemplate = `<!DOCTYPE html>
             loadConnectionStatus();
             loadTools();
             initializeChat();
+            checkInspectorStatus();
         });
+
+        // Inspector functionality
+        function startInspector() {
+            const inspectorBtn = document.getElementById('inspectorBtn');
+
+            // Show loading state
+            inspectorBtn.textContent = '🔄 Starting...';
+            inspectorBtn.disabled = true;
+
+            fetch('http://localhost:8080/api/inspector/start', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Open inspector in new window
+                    window.open(data.url, '_blank');
+                    inspectorBtn.textContent = '✅ Inspector Running';
+
+                    // Update button state after a delay
+                    setTimeout(() => {
+                        checkInspectorStatus();
+                    }, 2000);
+                } else {
+                    alert('Failed to start MCP Inspector: ' + (data.error || 'Unknown error'));
+                    inspectorBtn.textContent = '🔬 MCP Inspector';
+                    inspectorBtn.disabled = false;
+                }
+            })
+            .catch(error => {
+                alert('Error starting MCP Inspector: ' + error.message);
+                inspectorBtn.textContent = '🔬 MCP Inspector';
+                inspectorBtn.disabled = false;
+            });
+        }
+
+        function checkInspectorStatus() {
+            fetch('http://localhost:8080/api/inspector/status')
+            .then(response => response.json())
+            .then(data => {
+                const inspectorBtn = document.getElementById('inspectorBtn');
+                if (data.running) {
+                    inspectorBtn.textContent = '✅ Inspector Running';
+                    inspectorBtn.onclick = function() {
+                        window.open(data.url, '_blank');
+                    };
+                } else {
+                    inspectorBtn.textContent = '🔬 MCP Inspector';
+                    inspectorBtn.onclick = startInspector;
+                    inspectorBtn.disabled = false;
+                }
+            })
+            .catch(error => {
+                console.log('Could not check inspector status:', error);
+            });
+        }
     </script>
 </body>
 </html>`
