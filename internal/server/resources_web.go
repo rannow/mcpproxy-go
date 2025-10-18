@@ -9,18 +9,20 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // SystemResourcesData represents comprehensive system resources
 type SystemResourcesData struct {
-	Timestamp       time.Time              `json:"timestamp"`
-	Process         ProcessInfo            `json:"process"`
-	System          SystemInfo             `json:"system"`
-	Docker          DockerInfo             `json:"docker"`
-	Goroutines      int                    `json:"goroutines"`
-	Memory          runtime.MemStats       `json:"memory"`
-	UpstreamServers map[string]interface{} `json:"upstream_servers"`
+	Timestamp        time.Time              `json:"timestamp"`
+	Process          ProcessInfo            `json:"process"`
+	System           SystemInfo             `json:"system"`
+	Docker           DockerInfo             `json:"docker"`
+	Goroutines       int                    `json:"goroutines"`
+	Memory           runtime.MemStats       `json:"memory"`
+	UpstreamServers  map[string]interface{} `json:"upstream_servers"`
+	ConnectedServers int                    `json:"connected_servers"` // Number of connected upstream servers
 }
 
 type ProcessInfo struct {
@@ -54,6 +56,60 @@ type DockerContainer struct {
 	CPU     string   `json:"cpu"`
 	Memory  string   `json:"memory"`
 	Mounts  []string `json:"mounts"`
+}
+
+// ResourceHistory stores historical resource data in a ring buffer
+type ResourceHistory struct {
+	mu          sync.RWMutex
+	data        []SystemResourcesData
+	maxSize     int
+	currentIdx  int
+}
+
+// Global resource history (max 24 data points)
+var resourceHistory = &ResourceHistory{
+	data:    make([]SystemResourcesData, 0, 24),
+	maxSize: 24,
+}
+
+// Add adds a new resource data point to the history
+func (rh *ResourceHistory) Add(data SystemResourcesData) {
+	rh.mu.Lock()
+	defer rh.mu.Unlock()
+
+	if len(rh.data) < rh.maxSize {
+		// Still filling up the buffer
+		rh.data = append(rh.data, data)
+	} else {
+		// Buffer is full, overwrite oldest entry (ring buffer behavior)
+		rh.data[rh.currentIdx] = data
+		rh.currentIdx = (rh.currentIdx + 1) % rh.maxSize
+	}
+}
+
+// GetAll returns all historical data points in chronological order
+func (rh *ResourceHistory) GetAll() []SystemResourcesData {
+	rh.mu.RLock()
+	defer rh.mu.RUnlock()
+
+	if len(rh.data) == 0 {
+		return []SystemResourcesData{}
+	}
+
+	// If buffer not full yet, return in order
+	if len(rh.data) < rh.maxSize {
+		result := make([]SystemResourcesData, len(rh.data))
+		copy(result, rh.data)
+		return result
+	}
+
+	// Buffer is full, reorder from oldest to newest
+	result := make([]SystemResourcesData, rh.maxSize)
+	for i := 0; i < rh.maxSize; i++ {
+		idx := (rh.currentIdx + i) % rh.maxSize
+		result[i] = rh.data[idx]
+	}
+	return result
 }
 
 // getProcessInfo collects information about the mcpproxy process
@@ -245,6 +301,8 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MCPProxy - System Resources</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -432,6 +490,17 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+        .chart-container {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .chart-wrapper {
+            position: relative;
+            height: 300px;
+        }
     </style>
 </head>
 <body>
@@ -531,6 +600,39 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
                     </div>
                 </div>
 
+                <!-- Historical Charts -->
+                <div class="section">
+                    <h2 class="section-title">📈 Resource History (Last 24 Points)</h2>
+
+                    <div class="chart-container">
+                        <h3 style="margin-bottom: 15px; color: #333;">CPU & Memory Usage</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="cpuMemoryChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="chart-container">
+                        <h3 style="margin-bottom: 15px; color: #333;">Goroutines & Threads</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="goroutinesChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="chart-container">
+                        <h3 style="margin-bottom: 15px; color: #333;">File Descriptors</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="fdsChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="chart-container">
+                        <h3 style="margin-bottom: 15px; color: #333;">Connected Servers</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="connectedServersChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
                 <div style="text-align: center;">
                     <button class="refresh-btn" onclick="refreshResources()">🔄 Refresh Now</button>
                 </div>
@@ -541,6 +643,239 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <script>
+        // Chart instances
+        let cpuMemoryChart = null;
+        let goroutinesChart = null;
+        let fdsChart = null;
+        let connectedServersChart = null;
+
+        // Initialize charts
+        function initCharts() {
+            const commonOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    mode: 'index',
+                    intersect: false,
+                },
+                plugins: {
+                    legend: {
+                        position: 'top',
+                    }
+                },
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'minute',
+                            displayFormats: {
+                                minute: 'HH:mm'
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Time'
+                        }
+                    }
+                }
+            };
+
+            // CPU & Memory Chart
+            const cpuMemoryCtx = document.getElementById('cpuMemoryChart').getContext('2d');
+            cpuMemoryChart = new Chart(cpuMemoryCtx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'CPU %',
+                        data: [],
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        yAxisID: 'y',
+                        tension: 0.4
+                    }, {
+                        label: 'Memory MB',
+                        data: [],
+                        borderColor: '#764ba2',
+                        backgroundColor: 'rgba(118, 75, 162, 0.1)',
+                        yAxisID: 'y1',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'CPU %'
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'Memory (MB)'
+                            },
+                            grid: {
+                                drawOnChartArea: false,
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Goroutines & Threads Chart
+            const goroutinesCtx = document.getElementById('goroutinesChart').getContext('2d');
+            goroutinesChart = new Chart(goroutinesCtx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'Goroutines',
+                        data: [],
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        tension: 0.4
+                    }, {
+                        label: 'Threads',
+                        data: [],
+                        borderColor: '#f59e0b',
+                        backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Count'
+                            }
+                        }
+                    }
+                }
+            });
+
+            // File Descriptors Chart
+            const fdsCtx = document.getElementById('fdsChart').getContext('2d');
+            fdsChart = new Chart(fdsCtx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'File Descriptors',
+                        data: [],
+                        borderColor: '#ef4444',
+                        backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Count'
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Connected Servers Chart
+            const connectedServersCtx = document.getElementById('connectedServersChart').getContext('2d');
+            connectedServersChart = new Chart(connectedServersCtx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'Connected Servers',
+                        data: [],
+                        borderColor: '#8b5cf6',
+                        backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Server Count'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update charts with historical data
+        function updateCharts() {
+            fetch('/api/resources/history')
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.history || data.history.length === 0) {
+                        return;
+                    }
+
+                    const history = data.history;
+
+                    // Prepare data for charts
+                    const cpuData = [];
+                    const memoryData = [];
+                    const goroutinesData = [];
+                    const threadsData = [];
+                    const fdsData = [];
+                    const connectedServersData = [];
+
+                    history.forEach(point => {
+                        const timestamp = new Date(point.timestamp);
+
+                        cpuData.push({ x: timestamp, y: point.process.cpu_percent });
+                        memoryData.push({ x: timestamp, y: (point.process.rss_bytes / 1024 / 1024).toFixed(2) });
+                        goroutinesData.push({ x: timestamp, y: point.goroutines });
+                        threadsData.push({ x: timestamp, y: point.process.threads });
+                        fdsData.push({ x: timestamp, y: point.process.file_descriptors });
+                        connectedServersData.push({ x: timestamp, y: point.connected_servers || 0 });
+                    });
+
+                    // Update CPU & Memory Chart
+                    cpuMemoryChart.data.datasets[0].data = cpuData;
+                    cpuMemoryChart.data.datasets[1].data = memoryData;
+                    cpuMemoryChart.update('none'); // 'none' for no animation on update
+
+                    // Update Goroutines Chart
+                    goroutinesChart.data.datasets[0].data = goroutinesData;
+                    goroutinesChart.data.datasets[1].data = threadsData;
+                    goroutinesChart.update('none');
+
+                    // Update FDs Chart
+                    fdsChart.data.datasets[0].data = fdsData;
+                    fdsChart.update('none');
+
+                    // Update Connected Servers Chart
+                    connectedServersChart.data.datasets[0].data = connectedServersData;
+                    connectedServersChart.update('none');
+                })
+                .catch(error => {
+                    console.error('Error loading chart data:', error);
+                });
+        }
+
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
             const k = 1024;
@@ -622,11 +957,20 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
                 });
         }
 
+        // Initialize charts on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            initCharts();
+            updateCharts();
+        });
+
         // Initial load
         refreshResources();
 
         // Auto-refresh every 5 seconds
         setInterval(refreshResources, 5000);
+
+        // Auto-update charts every 5 seconds
+        setInterval(updateCharts, 5000);
     </script>
 </body>
 </html>`
@@ -642,22 +986,47 @@ func (s *Server) handleResourcesAPI(w http.ResponseWriter, r *http.Request) {
 
 	// Get upstream server stats
 	upstreamStats := make(map[string]interface{})
+	connectedCount := 0
 	if s.upstreamManager != nil {
 		servers := s.upstreamManager.ListServers()
 		upstreamStats["total"] = len(servers)
 		upstreamStats["servers"] = servers
+
+		// Count connected servers by checking client connection status
+		clients := s.upstreamManager.GetAllClients()
+		for _, client := range clients {
+			if client.IsConnected() {
+				connectedCount++
+			}
+		}
 	}
 
 	resources := SystemResourcesData{
-		Timestamp:       time.Now(),
-		Process:         getProcessInfo(),
-		System:          getSystemInfo(),
-		Docker:          getDockerInfo(),
-		Goroutines:      runtime.NumGoroutine(),
-		Memory:          memStats,
-		UpstreamServers: upstreamStats,
+		Timestamp:        time.Now(),
+		Process:          getProcessInfo(),
+		System:           getSystemInfo(),
+		Docker:           getDockerInfo(),
+		Goroutines:       runtime.NumGoroutine(),
+		Memory:           memStats,
+		UpstreamServers:  upstreamStats,
+		ConnectedServers: connectedCount,
 	}
+
+	// Add to history
+	resourceHistory.Add(resources)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resources)
+}
+
+// handleResourcesHistoryAPI returns historical resource data as JSON
+func (s *Server) handleResourcesHistoryAPI(w http.ResponseWriter, r *http.Request) {
+	history := resourceHistory.GetAll()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"history": history,
+		"count":   len(history),
+		"max_size": 24,
+	})
 }

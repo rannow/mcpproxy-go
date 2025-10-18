@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/events"
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
@@ -27,6 +29,7 @@ type Manager struct {
 	globalConfig    *config.Config
 	storage         *storage.BoltDB
 	notificationMgr *NotificationManager
+	eventBus        *events.EventBus // Event bus for publishing state changes
 
 	// tokenReconnect keeps last reconnect trigger time per server when detecting
 	// newly available OAuth tokens without explicit DB events (e.g., when CLI
@@ -62,6 +65,9 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storag
 		go manager.startOAuthEventMonitor()
 	}
 
+	// Start health check monitor for servers with health_check enabled
+	go manager.startHealthCheckMonitor()
+
 	return manager
 }
 
@@ -75,6 +81,14 @@ func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 // AddNotificationHandler adds a notification handler to receive state change notifications
 func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
 	m.notificationMgr.AddHandler(handler)
+}
+
+// SetEventBus sets the event bus for publishing state change events
+func (m *Manager) SetEventBus(eventBus *events.EventBus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.eventBus = eventBus
+	m.logger.Info("Event bus configured for upstream manager")
 }
 
 // AddServerConfig adds a server configuration without connecting
@@ -134,6 +148,24 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			}
 			// Then call notification callback
 			notifierCallback(oldState, newState, info)
+
+			// Publish event to event bus if available
+			m.mu.RLock()
+			eventBus := m.eventBus
+			m.mu.RUnlock()
+
+			if eventBus != nil {
+				eventBus.Publish(events.Event{
+					Type:       events.EventStateChange,
+					ServerName: serverConfig.Name,
+					Data: events.StateChangeData{
+						OldState: oldState,
+						NewState: newState,
+						Info:     info,
+					},
+					Timestamp: time.Now(),
+				})
+			}
 		})
 	}
 
@@ -329,24 +361,59 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 			return nil, fmt.Errorf("server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())
 		}
 
-		// Include last error if available with enhanced context
-		if lastError := targetClient.GetLastError(); lastError != nil {
-			// Enrich OAuth-related errors at source
-			lastErrStr := lastError.Error()
-			if strings.Contains(lastErrStr, "OAuth authentication failed") ||
-				strings.Contains(lastErrStr, "Dynamic Client Registration") ||
-				strings.Contains(lastErrStr, "authorization required") {
-				return nil, fmt.Errorf("server '%s' requires OAuth authentication but is not properly configured. OAuth setup failed: %s. Please configure OAuth credentials manually or use a Personal Access Token - check mcpproxy logs for detailed setup instructions", serverName, lastError.Error())
+		// Lazy loading: Try to connect the server if it has tools in DB
+		if m.globalConfig.EnableLazyLoading && targetClient.Config.ToolCount > 0 {
+			m.logger.Info("Lazy loading: Connecting to server on-demand",
+				zap.String("server", serverName),
+				zap.String("tool", actualToolName),
+				zap.Int("tool_count", targetClient.Config.ToolCount))
+
+			// Release read lock temporarily to allow Connect() to acquire write lock if needed
+			m.mu.RUnlock()
+
+			// Attempt to connect
+			err := targetClient.Connect(ctx)
+
+			// Reacquire read lock
+			m.mu.RLock()
+
+			if err != nil {
+				m.logger.Error("Lazy loading: Failed to connect server on-demand",
+					zap.String("server", serverName),
+					zap.Error(err))
+				return nil, fmt.Errorf("lazy loading failed for server '%s': connection attempt failed: %w", serverName, err)
 			}
 
-			if strings.Contains(lastErrStr, "OAuth metadata unavailable") {
-				return nil, fmt.Errorf("server '%s' does not provide valid OAuth configuration endpoints. This server may not support OAuth or requires manual authentication setup: %s", serverName, lastError.Error())
+			// Wait a moment for the connection to stabilize
+			if !targetClient.IsConnected() {
+				return nil, fmt.Errorf("lazy loading failed for server '%s': server did not become connected after connection attempt", serverName)
 			}
 
-			return nil, fmt.Errorf("server '%s' is not connected (state: %s) - connection failed with error: %s", serverName, state.String(), lastError.Error())
+			m.logger.Info("Lazy loading: Server connected successfully",
+				zap.String("server", serverName))
+
+			// Continue to tool execution below
+		} else {
+			// Not lazy loading or no tools in DB - return error as before
+			// Include last error if available with enhanced context
+			if lastError := targetClient.GetLastError(); lastError != nil {
+				// Enrich OAuth-related errors at source
+				lastErrStr := lastError.Error()
+				if strings.Contains(lastErrStr, "OAuth authentication failed") ||
+					strings.Contains(lastErrStr, "Dynamic Client Registration") ||
+					strings.Contains(lastErrStr, "authorization required") {
+					return nil, fmt.Errorf("server '%s' requires OAuth authentication but is not properly configured. OAuth setup failed: %s. Please configure OAuth credentials manually or use a Personal Access Token - check mcpproxy logs for detailed setup instructions", serverName, lastError.Error())
+				}
+
+				if strings.Contains(lastErrStr, "OAuth metadata unavailable") {
+					return nil, fmt.Errorf("server '%s' does not provide valid OAuth configuration endpoints. This server may not support OAuth or requires manual authentication setup: %s", serverName, lastError.Error())
+				}
+
+				return nil, fmt.Errorf("server '%s' is not connected (state: %s) - connection failed with error: %s", serverName, state.String(), lastError.Error())
+			}
+
+			return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 		}
-
-		return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 	}
 
 	// Call the tool on the upstream server with enhanced error handling
@@ -399,10 +466,15 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	}
 	m.mu.RUnlock()
 
-	m.logger.Debug("ConnectAll starting",
-		zap.Int("total_clients", len(clients)))
+	// Collect clients that need to connect, prioritizing fast protocols
+	type clientJob struct {
+		id       string
+		client   *managed.Client
+		priority int // Lower number = higher priority
+	}
 
-	var wg sync.WaitGroup
+	var jobs []clientJob
+
 	for id, client := range clients {
 		m.logger.Debug("Evaluating client for connection",
 			zap.String("id", id),
@@ -425,6 +497,16 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		// Lazy loading check: Skip servers that have tools in DB and don't have StartOnBoot flag
+		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && !client.Config.StartOnBoot {
+			m.logger.Debug("Skipping server due to lazy loading (tools in DB, start_on_boot=false)",
+				zap.String("id", id),
+				zap.String("name", client.Config.Name),
+				zap.Int("tool_count", client.Config.ToolCount),
+				zap.Bool("start_on_boot", client.Config.StartOnBoot))
+			continue
+		}
+
 		// Check connection eligibility with detailed logging
 		if client.IsConnected() {
 			m.logger.Debug("Client already connected, skipping",
@@ -440,16 +522,87 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
-		m.logger.Info("Attempting to connect client",
-			zap.String("id", id),
-			zap.String("name", client.Config.Name),
-			zap.String("url", client.Config.URL),
-			zap.String("command", client.Config.Command),
-			zap.String("protocol", client.Config.Protocol))
+		// Assign priority based on connection history:
+		// Priority 1 (highest): Servers that have connected before AND have tools
+		// Priority 2 (medium): Servers that have never connected before
+		// Priority 3 (lowest): Servers that last had an error
+		priority := 2 // Default: never connected before
 
+		if client.Config.EverConnected && client.Config.ToolCount > 0 {
+			// Highest priority: has connected before and has tools
+			priority = 1
+		} else {
+			// Check if last connection attempt had an error
+			connectionStatus := client.GetConnectionStatus()
+			if lastError, ok := connectionStatus["last_error"].(string); ok && lastError != "" {
+				// Lowest priority: last connection had an error
+				priority = 3
+			}
+		}
+
+		jobs = append(jobs, clientJob{
+			id:       id,
+			client:   client,
+			priority: priority,
+		})
+	}
+
+	if len(jobs) == 0 {
+		m.logger.Debug("No clients need connection")
+		return nil
+	}
+
+	// Sort jobs by priority (lower number = higher priority = connect first)
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].priority < jobs[j].priority
+	})
+
+	// Helper function to count jobs by priority
+	countByPriority := func(priority int) int {
+		count := 0
+		for _, job := range jobs {
+			if job.priority == priority {
+				count++
+			}
+		}
+		return count
+	}
+
+	// Get concurrency limit from config
+	maxConcurrent := m.globalConfig.MaxConcurrentConnections
+	if maxConcurrent <= 0 {
+		maxConcurrent = 20 // Fallback default
+	}
+
+	m.logger.Info("ConnectAll starting with controlled concurrency and priority-based ordering",
+		zap.Int("total_clients", len(jobs)),
+		zap.Int("max_concurrent", maxConcurrent),
+		zap.Int("priority_1_servers", countByPriority(1)),
+		zap.Int("priority_2_servers", countByPriority(2)),
+		zap.Int("priority_3_servers", countByPriority(3)))
+
+	// Create semaphore channel to limit concurrent connections
+	semaphore := make(chan struct{}, maxConcurrent)
+
+	var wg sync.WaitGroup
+
+	// Connect to all clients with concurrency control
+	for _, job := range jobs {
 		wg.Add(1)
+
+		// Acquire semaphore
+		semaphore <- struct{}{}
+
 		go func(id string, c *managed.Client) {
 			defer wg.Done()
+			defer func() { <-semaphore }() // Release semaphore
+
+			m.logger.Info("Attempting to connect client",
+				zap.String("id", id),
+				zap.String("name", c.Config.Name),
+				zap.String("url", c.Config.URL),
+				zap.String("command", c.Config.Command),
+				zap.String("protocol", c.Config.Protocol))
 
 			if err := c.Connect(ctx); err != nil {
 				m.logger.Error("Failed to connect to upstream server",
@@ -462,10 +615,13 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 					zap.String("id", id),
 					zap.String("name", c.Config.Name))
 			}
-		}(id, client)
+		}(job.id, job.client)
 	}
 
 	wg.Wait()
+	m.logger.Info("ConnectAll completed",
+		zap.Int("attempted", len(jobs)))
+
 	return nil
 }
 
@@ -900,4 +1056,71 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}()
 
 	return nil
+}
+
+// startHealthCheckMonitor monitors server health and attempts reconnection for servers with health_check enabled
+func (m *Manager) startHealthCheckMonitor() {
+	m.logger.Info("Starting health check monitor for servers with health_check enabled")
+
+	ticker := time.NewTicker(60 * time.Second) // Check every 60 seconds
+	defer ticker.Stop()
+
+	for range ticker.C {
+		m.performHealthChecks()
+	}
+}
+
+// performHealthChecks checks the health of all servers with HealthCheck flag enabled
+func (m *Manager) performHealthChecks() {
+	m.mu.RLock()
+	clients := make(map[string]*managed.Client)
+	for id, client := range m.clients {
+		// Only check servers with HealthCheck enabled
+		if client.Config.HealthCheck {
+			clients[id] = client
+		}
+	}
+	m.mu.RUnlock()
+
+	if len(clients) == 0 {
+		return
+	}
+
+	m.logger.Debug("Performing health checks", zap.Int("servers_with_health_check", len(clients)))
+
+	for id, client := range clients {
+		// Skip if not enabled
+		if !client.Config.Enabled {
+			continue
+		}
+
+		// Check connection status
+		if !client.IsConnected() {
+			state := client.GetState()
+			m.logger.Info("Health check: Server not connected, attempting reconnection",
+				zap.String("id", id),
+				zap.String("name", client.Config.Name),
+				zap.String("state", state.String()))
+
+			// Attempt to reconnect
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := client.Connect(ctx)
+			cancel()
+
+			if err != nil {
+				m.logger.Warn("Health check: Failed to reconnect server",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name),
+					zap.Error(err))
+			} else {
+				m.logger.Info("Health check: Successfully reconnected server",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name))
+			}
+		} else {
+			m.logger.Debug("Health check: Server is healthy",
+				zap.String("id", id),
+				zap.String("name", client.Config.Name))
+		}
+	}
 }

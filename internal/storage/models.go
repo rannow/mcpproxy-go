@@ -46,6 +46,15 @@ type UpstreamRecord struct {
 	Isolation     *config.IsolationConfig `json:"isolation,omitempty"` // Per-server isolation settings
 	GroupID       int                     `json:"group_id,omitempty"`
 	GroupName     string                  `json:"group_name,omitempty"`
+
+	// Connection history for prioritization
+	EverConnected            bool      `json:"ever_connected,omitempty"`
+	LastSuccessfulConnection time.Time `json:"last_successful_connection,omitempty"`
+	ToolCount                int       `json:"tool_count,omitempty"`
+
+	// Lazy loading and health check configuration
+	StartOnBoot              bool      `json:"start_on_boot,omitempty"`
+	HealthCheck              bool      `json:"health_check,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics
