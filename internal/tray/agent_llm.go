@@ -21,6 +21,8 @@ type LLMAgent struct {
 		GetAllServers() ([]map[string]interface{}, error)
 		ReloadConfiguration() error
 		GetConfigPath() string
+		GetLogDir() string
+		GetGitHubURL() string
 	}
 }
 
@@ -31,6 +33,8 @@ func NewLLMAgent(logger *zap.Logger, serverManager interface {
 	GetAllServers() ([]map[string]interface{}, error)
 	ReloadConfiguration() error
 	GetConfigPath() string
+	GetLogDir() string
+	GetGitHubURL() string
 }) *LLMAgent {
 	return &LLMAgent{
 		logger:        logger,
@@ -278,6 +282,42 @@ func (a *LLMAgent) buildPrompt(userMessage, serverName, conversationContext stri
 		}
 	}
 
+	// Add available resources information
+	resourcesInfo := "\n\n=== Available Resources ==="
+	if a.serverManager != nil {
+		logDir := a.serverManager.GetLogDir()
+		if logDir != "" {
+			resourcesInfo += fmt.Sprintf("\n📄 Server Log File: %s/server-%s.log", logDir, serverName)
+			resourcesInfo += "\n   You can request to read this log file to diagnose issues"
+		}
+
+		configPath := a.serverManager.GetConfigPath()
+		if configPath != "" {
+			resourcesInfo += fmt.Sprintf("\n⚙️ Configuration File: %s", configPath)
+			resourcesInfo += "\n   You can request to read this config file to understand server setup"
+		}
+
+		// Check if there's a repository URL
+		githubURL := ""
+		if servers, err := a.serverManager.GetAllServers(); err == nil {
+			for _, srv := range servers {
+				if name, ok := srv["name"].(string); ok && name == serverName {
+					if repoURL, ok := srv["repository_url"].(string); ok && repoURL != "" {
+						githubURL = repoURL
+					}
+					break
+				}
+			}
+		}
+		if githubURL == "" {
+			githubURL = a.serverManager.GetGitHubURL()
+		}
+		if githubURL != "" {
+			resourcesInfo += fmt.Sprintf("\n🔗 GitHub Repository: %s", githubURL)
+			resourcesInfo += "\n   You can request to fetch and analyze the README or documentation"
+		}
+	}
+
 	prompt := fmt.Sprintf(`You are an expert diagnostic agent for MCP (Model Context Protocol) servers.
 
 Your capabilities include:
@@ -291,7 +331,7 @@ Your capabilities include:
 8. General Troubleshooting - Solve any MCP server-related problems
 
 === Context ===
-Current Server: %s%s
+Current Server: %s%s%s
 
 User Question: %s%s
 
@@ -306,6 +346,22 @@ Please provide a clear, actionable response that:
 - References GitHub repository documentation when available
 - Recommends next steps or follow-up actions
 
+IMPORTANT: You have direct access to the following capabilities:
+- Read server logs: Access via /chat/read-log endpoint to view MCP communication and server activity
+- Read configuration: Access via /chat/read-config endpoint to analyze server setup
+- Fetch GitHub documentation: Access via /chat/read-github endpoint to retrieve repository documentation
+- Control MCP Inspector: Use /chat/inspector/start, /chat/inspector/stop, /chat/inspector/status endpoints
+  to launch the Inspector for interactive tool testing
+
+When diagnosing issues or providing assistance:
+1. Proactively suggest reading server logs to investigate MCP communication issues
+2. Analyze configuration to identify setup problems
+3. Fetch GitHub repository documentation to understand server features and requirements
+4. Recommend starting the Inspector for interactive tool testing and validation
+5. View MCP communication logs in server logs to diagnose protocol-level issues
+
+The user interface provides buttons to execute these actions based on your recommendations.
+
 If the server has errors:
 1. Explain what the error means
 2. Identify the root cause based on configuration and status
@@ -319,6 +375,7 @@ If testing tools:
 4. Help interpret actual results`,
 		serverName,
 		serverInfo,
+		resourcesInfo,
 		userMessage,
 		conversationContext)
 

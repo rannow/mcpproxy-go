@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -44,6 +47,7 @@ type ServerConfigDialog struct {
 		GetConfigPath() string
 		GetLogDir() string
 		GetGitHubURL() string
+		GetListenAddress() string
 	}
 }
 
@@ -1207,6 +1211,12 @@ func (d *ServerConfigDialog) Show(ctx context.Context, onSave func(*config.Serve
 	mux.HandleFunc("/chat/session", d.handleChatSession)
 	mux.HandleFunc("/chat/new", d.handleChatNew)
 	mux.HandleFunc("/chat/message", d.handleChatMessage)
+	mux.HandleFunc("/chat/read-log", d.handleChatReadLog)
+	mux.HandleFunc("/chat/read-config", d.handleChatReadConfig)
+	mux.HandleFunc("/chat/read-github", d.handleChatReadGitHub)
+	mux.HandleFunc("/chat/inspector/start", d.handleChatInspectorStart)
+	mux.HandleFunc("/chat/inspector/stop", d.handleChatInspectorStop)
+	mux.HandleFunc("/chat/inspector/status", d.handleChatInspectorStatus)
 
 	d.httpServer = &http.Server{
 		Handler:      mux,
@@ -1556,4 +1566,360 @@ func (d *ServerConfigDialog) handleChatMessage(w http.ResponseWriter, r *http.Re
 		"success":  true,
 		"response": response,
 	})
+}
+
+// handleChatReadLog handles requests to read server log files
+func (d *ServerConfigDialog) handleChatReadLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.serverManager == nil {
+		http.Error(w, "Server manager not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var request struct {
+		ServerName string `json:"serverName"`
+		Lines      int    `json:"lines"` // Number of lines to read from end of file
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		d.logger.Error("Failed to decode read-log request", zap.Error(err))
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	if request.Lines <= 0 {
+		request.Lines = 100 // Default to last 100 lines
+	}
+	if request.Lines > 1000 {
+		request.Lines = 1000 // Max 1000 lines
+	}
+
+	// Get log directory
+	logDir := d.serverManager.GetLogDir()
+	if logDir == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Log directory not available",
+		})
+		return
+	}
+
+	// Construct log file path
+	logPath := fmt.Sprintf("%s/server-%s.log", logDir, request.ServerName)
+
+	// Read log file
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		d.logger.Error("Failed to read log file",
+			zap.String("path", logPath),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to read log file: %v", err),
+		})
+		return
+	}
+
+	// Get last N lines
+	lines := strings.Split(string(content), "\n")
+	if len(lines) > request.Lines {
+		lines = lines[len(lines)-request.Lines:]
+	}
+	logContent := strings.Join(lines, "\n")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"content": logContent,
+		"path":    logPath,
+		"lines":   len(lines),
+	})
+}
+
+// handleChatReadConfig handles requests to read configuration file
+func (d *ServerConfigDialog) handleChatReadConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.serverManager == nil {
+		http.Error(w, "Server manager not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get config path
+	configPath := d.serverManager.GetConfigPath()
+	if configPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Config path not available",
+		})
+		return
+	}
+
+	// Read config file
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		d.logger.Error("Failed to read config file",
+			zap.String("path", configPath),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to read config file: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"content": string(content),
+		"path":    configPath,
+	})
+}
+
+// handleChatReadGitHub handles requests to fetch content from GitHub
+func (d *ServerConfigDialog) handleChatReadGitHub(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		URL string `json:"url"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		d.logger.Error("Failed to decode read-github request", zap.Error(err))
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	if request.URL == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "URL is required",
+		})
+		return
+	}
+
+	// Fetch content from GitHub URL
+	resp, err := http.Get(request.URL)
+	if err != nil {
+		d.logger.Error("Failed to fetch GitHub content",
+			zap.String("url", request.URL),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to fetch content: %v", err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("HTTP error: %d %s", resp.StatusCode, resp.Status),
+		})
+		return
+	}
+
+	// Read response body
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		d.logger.Error("Failed to read GitHub response body",
+			zap.String("url", request.URL),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to read response: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"content": string(content),
+		"url":     request.URL,
+	})
+}
+
+// handleChatInspectorStart starts the MCP Inspector
+func (d *ServerConfigDialog) handleChatInspectorStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.serverManager == nil {
+		http.Error(w, "Server manager not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get server address
+	listenAddr := d.serverManager.GetListenAddress()
+	if listenAddr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Server listen address not available",
+		})
+		return
+	}
+
+	// Make request to main server's Inspector start endpoint
+	url := fmt.Sprintf("http://%s/api/inspector/start", listenAddr)
+	resp, err := http.Post(url, "application/json", nil)
+	if err != nil {
+		d.logger.Error("Failed to start Inspector",
+			zap.String("url", url),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to start Inspector: %v", err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		d.logger.Error("Failed to decode Inspector start response", zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to decode response: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleChatInspectorStop stops the MCP Inspector
+func (d *ServerConfigDialog) handleChatInspectorStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.serverManager == nil {
+		http.Error(w, "Server manager not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get server address
+	listenAddr := d.serverManager.GetListenAddress()
+	if listenAddr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Server listen address not available",
+		})
+		return
+	}
+
+	// Make request to main server's Inspector stop endpoint
+	url := fmt.Sprintf("http://%s/api/inspector/stop", listenAddr)
+	resp, err := http.Post(url, "application/json", nil)
+	if err != nil {
+		d.logger.Error("Failed to stop Inspector",
+			zap.String("url", url),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to stop Inspector: %v", err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		d.logger.Error("Failed to decode Inspector stop response", zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to decode response: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleChatInspectorStatus gets the MCP Inspector status
+func (d *ServerConfigDialog) handleChatInspectorStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.serverManager == nil {
+		http.Error(w, "Server manager not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get server address
+	listenAddr := d.serverManager.GetListenAddress()
+	if listenAddr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Server listen address not available",
+		})
+		return
+	}
+
+	// Make request to main server's Inspector status endpoint
+	url := fmt.Sprintf("http://%s/api/inspector/status", listenAddr)
+	resp, err := http.Get(url)
+	if err != nil {
+		d.logger.Error("Failed to get Inspector status",
+			zap.String("url", url),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to get Inspector status: %v", err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		d.logger.Error("Failed to decode Inspector status response", zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to decode response: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
