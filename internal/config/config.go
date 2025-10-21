@@ -95,6 +95,9 @@ type Config struct {
 
 	// Lazy loading configuration - only connect to servers when their tools are called
 	EnableLazyLoading bool `json:"enable_lazy_loading" mapstructure:"enable-lazy-loading"`
+
+	// Tool cache TTL in seconds (default: 300 = 5 minutes)
+	ToolCacheTTL int `json:"tool_cache_ttl" mapstructure:"tool-cache-ttl"`
 }
 
 // LogConfig represents logging configuration

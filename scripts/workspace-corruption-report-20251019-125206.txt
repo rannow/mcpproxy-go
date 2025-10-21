@@ -1,0 +1,10 @@
+═══════════════════════════════════════════════════════════════
+  WORKSPACE ONEDRIVE CORRUPTION SCAN REPORT
+═══════════════════════════════════════════════════════════════
+
+Scan Date: So 19 Okt 2025 12:52:06 CEST
+Workspace Root: /Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server
+Scanner Version: 1.0
+
+═══════════════════════════════════════════════════════════════
+

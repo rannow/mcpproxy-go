@@ -3,7 +3,6 @@ package upstream
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -457,7 +456,15 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	return result, nil
 }
 
-// ConnectAll connects to all configured servers that should retry
+// clientJob represents a client connection job for parallel processing
+type clientJob struct {
+	id     string
+	client *managed.Client
+}
+
+// ConnectAll connects to all configured servers using two-phase strategy:
+// Phase 1: Initial connection attempts for all servers
+// Phase 2: Retry failed servers (up to 5 retries max)
 func (m *Manager) ConnectAll(ctx context.Context) error {
 	m.mu.RLock()
 	clients := make(map[string]*managed.Client)
@@ -466,12 +473,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	}
 	m.mu.RUnlock()
 
-	// Collect clients that need to connect, prioritizing fast protocols
-	type clientJob struct {
-		id       string
-		client   *managed.Client
-		priority int // Lower number = higher priority
-	}
+	// Collect clients that need to connect
 
 	var jobs []clientJob
 
@@ -497,17 +499,20 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
-		// Lazy loading check: Skip servers that have tools in DB and don't have StartOnBoot flag
-		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && !client.Config.StartOnBoot {
-			m.logger.Debug("Skipping server due to lazy loading (tools in DB, start_on_boot=false)",
+		// Lazy loading check: Set servers to Sleeping if they have tools in DB and don't have StartOnBoot flag
+		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && !client.Config.StartOnBoot && client.Config.EverConnected {
+			m.logger.Debug("Setting server to Sleeping state (lazy loading enabled, tools in DB)",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name),
 				zap.Int("tool_count", client.Config.ToolCount),
 				zap.Bool("start_on_boot", client.Config.StartOnBoot))
+
+			// Set state to Sleeping instead of Disconnected
+			client.StateManager.SetSleeping()
 			continue
 		}
 
-		// Check connection eligibility with detailed logging
+		// Check connection eligibility
 		if client.IsConnected() {
 			m.logger.Debug("Client already connected, skipping",
 				zap.String("id", id),
@@ -522,28 +527,9 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
-		// Assign priority based on connection history:
-		// Priority 1 (highest): Servers that have connected before AND have tools
-		// Priority 2 (medium): Servers that have never connected before
-		// Priority 3 (lowest): Servers that last had an error
-		priority := 2 // Default: never connected before
-
-		if client.Config.EverConnected && client.Config.ToolCount > 0 {
-			// Highest priority: has connected before and has tools
-			priority = 1
-		} else {
-			// Check if last connection attempt had an error
-			connectionStatus := client.GetConnectionStatus()
-			if lastError, ok := connectionStatus["last_error"].(string); ok && lastError != "" {
-				// Lowest priority: last connection had an error
-				priority = 3
-			}
-		}
-
 		jobs = append(jobs, clientJob{
-			id:       id,
-			client:   client,
-			priority: priority,
+			id:     id,
+			client: client,
 		})
 	}
 
@@ -552,77 +538,171 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		return nil
 	}
 
-	// Sort jobs by priority (lower number = higher priority = connect first)
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].priority < jobs[j].priority
-	})
-
-	// Helper function to count jobs by priority
-	countByPriority := func(priority int) int {
-		count := 0
-		for _, job := range jobs {
-			if job.priority == priority {
-				count++
-			}
-		}
-		return count
-	}
-
 	// Get concurrency limit from config
 	maxConcurrent := m.globalConfig.MaxConcurrentConnections
 	if maxConcurrent <= 0 {
 		maxConcurrent = 20 // Fallback default
 	}
 
-	m.logger.Info("ConnectAll starting with controlled concurrency and priority-based ordering",
+	m.logger.Info("🚀 Phase 1: Initial connection attempts",
 		zap.Int("total_clients", len(jobs)),
-		zap.Int("max_concurrent", maxConcurrent),
-		zap.Int("priority_1_servers", countByPriority(1)),
-		zap.Int("priority_2_servers", countByPriority(2)),
-		zap.Int("priority_3_servers", countByPriority(3)))
+		zap.Int("max_concurrent", maxConcurrent))
 
-	// Create semaphore channel to limit concurrent connections
+	// PHASE 1: Initial connection attempts (with short timeout)
+	failedJobs := m.connectPhase(ctx, jobs, maxConcurrent, 30*time.Second, "initial")
+
+	// PHASE 2: Retry failed servers (if any)
+	if len(failedJobs) > 0 {
+		m.logger.Info("🔄 Phase 2: Retrying failed servers",
+			zap.Int("failed_count", len(failedJobs)),
+			zap.Int("max_retries", 5))
+
+		m.retryFailedServers(ctx, failedJobs, maxConcurrent)
+	}
+
+	m.logger.Info("✅ ConnectAll completed",
+		zap.Int("total_attempted", len(jobs)),
+		zap.Int("initial_failures", len(failedJobs)))
+
+	return nil
+}
+
+// connectPhase performs a single phase of connection attempts
+func (m *Manager) connectPhase(ctx context.Context, jobs []clientJob, maxConcurrent int, timeout time.Duration, phase string) []clientJob {
 	semaphore := make(chan struct{}, maxConcurrent)
-
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failedJobs []clientJob
 
-	// Connect to all clients with concurrency control
 	for _, job := range jobs {
 		wg.Add(1)
+		semaphore <- struct{}{} // Acquire
 
-		// Acquire semaphore
-		semaphore <- struct{}{}
-
-		go func(id string, c *managed.Client) {
+		go func(j clientJob) {
 			defer wg.Done()
-			defer func() { <-semaphore }() // Release semaphore
+			defer func() { <-semaphore }() // Release
 
-			m.logger.Info("Attempting to connect client",
-				zap.String("id", id),
-				zap.String("name", c.Config.Name),
-				zap.String("url", c.Config.URL),
-				zap.String("command", c.Config.Command),
-				zap.String("protocol", c.Config.Protocol))
+			// Create timeout context for this connection attempt
+			connCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
 
-			if err := c.Connect(ctx); err != nil {
-				m.logger.Error("Failed to connect to upstream server",
-					zap.String("id", id),
-					zap.String("name", c.Config.Name),
-					zap.String("state", c.GetState().String()),
+			m.logger.Info("Connecting server",
+				zap.String("phase", phase),
+				zap.String("id", j.id),
+				zap.String("name", j.client.Config.Name),
+				zap.Duration("timeout", timeout))
+
+			if err := j.client.Connect(connCtx); err != nil {
+				m.logger.Warn("Connection failed",
+					zap.String("phase", phase),
+					zap.String("id", j.id),
+					zap.String("name", j.client.Config.Name),
 					zap.Error(err))
+
+				// Add to failed jobs for retry
+				mu.Lock()
+				failedJobs = append(failedJobs, j)
+				mu.Unlock()
 			} else {
-				m.logger.Info("Successfully initiated connection to upstream server",
-					zap.String("id", id),
-					zap.String("name", c.Config.Name))
+				m.logger.Info("✅ Connection successful",
+					zap.String("phase", phase),
+					zap.String("id", j.id),
+					zap.String("name", j.client.Config.Name))
 			}
-		}(job.id, job.client)
+		}(job)
 	}
 
 	wg.Wait()
-	m.logger.Info("ConnectAll completed",
-		zap.Int("attempted", len(jobs)))
+	return failedJobs
+}
 
-	return nil
+// retryFailedServers performs up to 5 retries for failed servers
+func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob, maxConcurrent int) {
+	const maxRetries = 5
+
+	for retry := 1; retry <= maxRetries; retry++ {
+		if len(failedJobs) == 0 {
+			m.logger.Info("No more failed servers to retry")
+			break
+		}
+
+		m.logger.Info("Retry attempt",
+			zap.Int("retry", retry),
+			zap.Int("max_retries", maxRetries),
+			zap.Int("servers_to_retry", len(failedJobs)))
+
+		// Exponential backoff delay before retry
+		backoffDelay := time.Duration(1<<uint(retry-1)) * time.Second
+		if backoffDelay > 30*time.Second {
+			backoffDelay = 30 * time.Second
+		}
+
+		m.logger.Info("Waiting before retry",
+			zap.Duration("backoff", backoffDelay),
+			zap.Int("retry", retry))
+		time.Sleep(backoffDelay)
+
+		// Retry failed servers
+		failedJobs = m.connectPhase(ctx, failedJobs, maxConcurrent, 30*time.Second, fmt.Sprintf("retry-%d", retry))
+
+		// Check if we're on the last retry
+		if retry == maxRetries && len(failedJobs) > 0 {
+			m.logger.Warn("⚠️ Max retries reached, disabling/quarantining persistent failures",
+				zap.Int("failed_servers", len(failedJobs)))
+
+			for _, job := range failedJobs {
+				m.handlePersistentFailure(job.id, job.client)
+			}
+		}
+	}
+}
+
+// handlePersistentFailure disables or quarantines a server after max retries
+func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
+	m.logger.Error("🚫 Server persistently failing after max retries",
+		zap.String("id", id),
+		zap.String("name", client.Config.Name),
+		zap.String("final_state", client.GetState().String()))
+
+	// Update config to disabled
+	client.Config.Enabled = false
+
+	// Persist to storage
+	if m.storage != nil {
+		if err := m.storage.SaveUpstream(&storage.UpstreamRecord{
+			ID:                       client.Config.Name,
+			Name:                     client.Config.Name,
+			URL:                      client.Config.URL,
+			Protocol:                 client.Config.Protocol,
+			Command:                  client.Config.Command,
+			Args:                     client.Config.Args,
+			WorkingDir:               client.Config.WorkingDir,
+			Env:                      client.Config.Env,
+			Headers:                  client.Config.Headers,
+			OAuth:                    client.Config.OAuth,
+			RepositoryURL:            client.Config.RepositoryURL,
+			Enabled:                  false, // DISABLED
+			Quarantined:              client.Config.Quarantined,
+			Created:                  client.Config.Created,
+			Updated:                  time.Now(),
+			Isolation:                client.Config.Isolation,
+			GroupID:                  client.Config.GroupID,
+			GroupName:                client.Config.GroupName,
+			EverConnected:            client.Config.EverConnected,
+			LastSuccessfulConnection: client.Config.LastSuccessfulConnection,
+			ToolCount:                client.Config.ToolCount,
+		}); err != nil {
+			m.logger.Error("Failed to persist disabled server state",
+				zap.String("server", client.Config.Name),
+				zap.Error(err))
+		}
+	}
+
+	// Disconnect client
+	_ = client.Disconnect()
+
+	m.logger.Warn("Server has been disabled due to persistent connection failures. Enable manually after fixing the issue.",
+		zap.String("name", client.Config.Name))
 }
 
 // DisconnectAll disconnects from all servers

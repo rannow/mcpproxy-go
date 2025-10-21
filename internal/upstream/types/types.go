@@ -20,6 +20,8 @@ const (
 	StateDiscovering
 	// StateReady indicates the upstream is connected and ready for requests
 	StateReady
+	// StateSleeping indicates the upstream has tools in DB and is waiting for lazy loading
+	StateSleeping
 	// StateError indicates the upstream encountered an error
 	StateError
 )
@@ -37,6 +39,8 @@ func (s ConnectionState) String() string {
 		return "Discovering"
 	case StateReady:
 		return "Ready"
+	case StateSleeping:
+		return "Sleeping"
 	case StateError:
 		return "Error"
 	default:
@@ -55,6 +59,8 @@ type ConnectionInfo struct {
 	LastOAuthAttempt time.Time       `json:"last_oauth_attempt,omitempty"`
 	OAuthRetryCount  int             `json:"oauth_retry_count"`
 	IsOAuthError     bool            `json:"is_oauth_error"`
+	FirstAttemptTime time.Time       `json:"first_attempt_time,omitempty"` // When first connection attempt was made
+	ConnectedAt      time.Time       `json:"connected_at,omitempty"`       // When connection was successfully established
 }
 
 // StateManager manages the state transitions for an upstream connection
@@ -69,6 +75,8 @@ type StateManager struct {
 	lastOAuthAttempt time.Time
 	oauthRetryCount  int
 	isOAuthError     bool
+	firstAttemptTime time.Time // Time of first connection attempt
+	connectedAt      time.Time // Time when connection was established
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
@@ -117,6 +125,8 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		FirstAttemptTime: sm.firstAttemptTime,
+		ConnectedAt:      sm.connectedAt,
 	}
 }
 
@@ -134,8 +144,14 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 
 	sm.currentState = newState
 
-	// Clear error on successful transitions
+	// Record first connection attempt
+	if newState == StateConnecting && sm.firstAttemptTime.IsZero() {
+		sm.firstAttemptTime = time.Now()
+	}
+
+	// Record successful connection time
 	if newState == StateReady {
+		sm.connectedAt = time.Now()
 		sm.lastError = nil
 		sm.retryCount = 0
 	}
@@ -150,6 +166,8 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		FirstAttemptTime: sm.firstAttemptTime,
+		ConnectedAt:      sm.connectedAt,
 	}
 
 	callback := sm.onStateChange
@@ -182,6 +200,8 @@ func (sm *StateManager) SetError(err error) {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		FirstAttemptTime: sm.firstAttemptTime,
+		ConnectedAt:      sm.connectedAt,
 	}
 
 	callback := sm.onStateChange
@@ -189,6 +209,36 @@ func (sm *StateManager) SetError(err error) {
 	// Call the callback outside the lock to avoid deadlocks
 	if callback != nil {
 		go callback(oldState, StateError, &info)
+	}
+}
+
+// SetSleeping transitions to sleeping state (for lazy loading)
+func (sm *StateManager) SetSleeping() {
+	sm.mu.Lock()
+	oldState := sm.currentState
+	sm.currentState = StateSleeping
+	sm.lastError = nil
+
+	info := ConnectionInfo{
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
+		FirstAttemptTime: sm.firstAttemptTime,
+		ConnectedAt:      sm.connectedAt,
+	}
+
+	callback := sm.onStateChange
+	sm.mu.Unlock()
+
+	// Call the callback outside the lock to avoid deadlocks
+	if callback != nil {
+		callback(oldState, StateSleeping, &info)
 	}
 }
 
@@ -291,6 +341,8 @@ func (sm *StateManager) Reset() {
 	sm.lastOAuthAttempt = time.Time{}
 	sm.oauthRetryCount = 0
 	sm.isOAuthError = false
+	sm.firstAttemptTime = time.Time{}
+	sm.connectedAt = time.Time{}
 
 	info := ConnectionInfo{
 		State:            sm.currentState,
@@ -302,6 +354,8 @@ func (sm *StateManager) Reset() {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		FirstAttemptTime: sm.firstAttemptTime,
+		ConnectedAt:      sm.connectedAt,
 	}
 
 	callback := sm.onStateChange
@@ -334,6 +388,8 @@ func (sm *StateManager) SetOAuthError(err error) {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		FirstAttemptTime: sm.firstAttemptTime,
+		ConnectedAt:      sm.connectedAt,
 	}
 
 	callback := sm.onStateChange

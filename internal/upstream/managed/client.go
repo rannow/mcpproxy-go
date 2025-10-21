@@ -35,6 +35,9 @@ type Client struct {
 	listToolsMu         sync.Mutex
 	listToolsInProgress bool
 
+	// Tool caching
+	toolCache *ToolCache
+
 	// Background monitoring
 	stopMonitoring chan struct{}
 	monitoringWG   sync.WaitGroup
@@ -52,6 +55,12 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}
 
+	// Determine cache TTL from config or use default
+	cacheTTL := 5 * time.Minute
+	if globalConfig != nil && globalConfig.ToolCacheTTL > 0 {
+		cacheTTL = time.Duration(globalConfig.ToolCacheTTL) * time.Second
+	}
+
 	// Create managed client
 	mc := &Client{
 		id:             id,
@@ -62,6 +71,7 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		logConfig:      logConfig,
 		globalConfig:   globalConfig,
 		storage:        storage,
+		toolCache:      NewToolCache(cacheTTL),
 		stopMonitoring: make(chan struct{}),
 	}
 
@@ -116,6 +126,41 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// Update state manager with server info
 	if serverInfo := mc.coreClient.GetServerInfo(); serverInfo != nil {
 		mc.StateManager.SetServerInfo(serverInfo.ServerInfo.Name, serverInfo.ServerInfo.Version)
+	}
+
+	// Update connection history for prioritization
+	mc.Config.EverConnected = true
+	mc.Config.LastSuccessfulConnection = time.Now()
+
+	// Persist connection history to storage
+	if mc.storage != nil {
+		if err := mc.storage.SaveUpstream(&storage.UpstreamRecord{
+			ID:                       mc.Config.Name,
+			Name:                     mc.Config.Name,
+			URL:                      mc.Config.URL,
+			Protocol:                 mc.Config.Protocol,
+			Command:                  mc.Config.Command,
+			Args:                     mc.Config.Args,
+			WorkingDir:               mc.Config.WorkingDir,
+			Env:                      mc.Config.Env,
+			Headers:                  mc.Config.Headers,
+			OAuth:                    mc.Config.OAuth,
+			RepositoryURL:            mc.Config.RepositoryURL,
+			Enabled:                  mc.Config.Enabled,
+			Quarantined:              mc.Config.Quarantined,
+			Created:                  mc.Config.Created,
+			Updated:                  time.Now(),
+			Isolation:                mc.Config.Isolation,
+			GroupID:                  mc.Config.GroupID,
+			GroupName:                mc.Config.GroupName,
+			EverConnected:            mc.Config.EverConnected,
+			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
+			ToolCount:                mc.Config.ToolCount,
+		}); err != nil {
+			mc.logger.Warn("Failed to persist connection history to storage",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+		}
 	}
 
 	mc.logger.Info("Successfully established managed connection",
@@ -208,6 +253,14 @@ func (mc *Client) GetConnectionStatus() map[string]interface{} {
 		status["last_retry_time"] = info.LastRetryTime
 	}
 
+	if !info.FirstAttemptTime.IsZero() {
+		status["first_attempt_time"] = info.FirstAttemptTime
+	}
+
+	if !info.ConnectedAt.IsZero() {
+		status["connected_at"] = info.ConnectedAt
+	}
+
 	return status
 }
 
@@ -280,6 +333,40 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			mc.StateManager.SetError(err)
 		}
 		return nil, fmt.Errorf("ListTools failed: %w", err)
+	}
+
+	// Update tool count for prioritization
+	mc.Config.ToolCount = len(tools)
+
+	// Persist tool count to storage
+	if mc.storage != nil {
+		if err := mc.storage.SaveUpstream(&storage.UpstreamRecord{
+			ID:                       mc.Config.Name,
+			Name:                     mc.Config.Name,
+			URL:                      mc.Config.URL,
+			Protocol:                 mc.Config.Protocol,
+			Command:                  mc.Config.Command,
+			Args:                     mc.Config.Args,
+			WorkingDir:               mc.Config.WorkingDir,
+			Env:                      mc.Config.Env,
+			Headers:                  mc.Config.Headers,
+			OAuth:                    mc.Config.OAuth,
+			RepositoryURL:            mc.Config.RepositoryURL,
+			Enabled:                  mc.Config.Enabled,
+			Quarantined:              mc.Config.Quarantined,
+			Created:                  mc.Config.Created,
+			Updated:                  time.Now(),
+			Isolation:                mc.Config.Isolation,
+			GroupID:                  mc.Config.GroupID,
+			GroupName:                mc.Config.GroupName,
+			EverConnected:            mc.Config.EverConnected,
+			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
+			ToolCount:                mc.Config.ToolCount,
+		}); err != nil {
+			mc.logger.Warn("Failed to persist tool count to storage",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+		}
 	}
 
 	return tools, nil
@@ -478,8 +565,8 @@ func (mc *Client) tryReconnect() {
 		mc.reconnectMu.Unlock()
 	}()
 
-	// Create a timeout context for the reconnection attempt - increased for OAuth flows
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Create a timeout context for the reconnection attempt - reduced to prevent blocking
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	mc.logger.Info("Starting reconnection attempt",

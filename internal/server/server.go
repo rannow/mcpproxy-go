@@ -2,14 +2,15 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
-	"encoding/json"
-	"os"
 
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
@@ -19,18 +20,19 @@ import (
 	"mcpproxy-go/internal/events"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/startup"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
-    "mcpproxy-go/internal/startup"
 )
 
 // Group represents a server group
 type Group struct {
-	ID    int    `json:"id"`
-	Name  string `json:"name"`
-	Icon  string `json:"icon_emoji,omitempty"`
-	Color string `json:"color"`
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Icon        string `json:"icon_emoji,omitempty"`
+	Color       string `json:"color"`
 }
 
 // Global groups storage
@@ -394,11 +396,17 @@ func (s *Server) loadConfiguredServers() error {
 		storedServers = []*config.ServerConfig{} // Continue with empty list
 	}
 
+	// Create a stable copy of the servers list to avoid race conditions during config reload
+	s.mu.RLock()
+	serversCopy := make([]*config.ServerConfig, len(s.config.Servers))
+	copy(serversCopy, s.config.Servers)
+	s.mu.RUnlock()
+
 	// Create maps for efficient lookups
 	configuredServers := make(map[string]*config.ServerConfig)
 	storedServerMap := make(map[string]*config.ServerConfig)
 
-	for _, serverCfg := range s.config.Servers {
+	for _, serverCfg := range serversCopy {
 		configuredServers[serverCfg.Name] = serverCfg
 	}
 
@@ -406,8 +414,28 @@ func (s *Server) loadConfiguredServers() error {
 		storedServerMap[storedServer.Name] = storedServer
 	}
 
-	// Sync config to storage and upstream manager
-	for _, serverCfg := range s.config.Servers {
+	// Sync config to storage and upstream manager (with parallel startup)
+	s.mu.RLock()
+	maxConcurrent := s.config.MaxConcurrentConnections
+	s.mu.RUnlock()
+
+	if maxConcurrent <= 0 {
+		maxConcurrent = 20 // Default to 20 concurrent connections
+	}
+
+	s.logger.Info("Starting server sync",
+		zap.Int("total_servers", len(serversCopy)),
+		zap.Int("max_concurrent", maxConcurrent))
+
+	// Create semaphore for concurrency control
+	semaphore := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	errorCount := 0
+
+	for i := range serversCopy {
+		serverCfg := serversCopy[i] // Use the stable copy to avoid race conditions
+
 		// Check if server state has changed
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
 		hasChanged := !existsInStorage ||
@@ -425,29 +453,48 @@ func (s *Server) loadConfiguredServers() error {
 				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined))
 		}
 
-		// Always sync config to storage (ensures consistency)
+		// Always sync config to storage (ensures consistency) - sequential for DB writes
 		if err := s.storageManager.SaveUpstreamServer(serverCfg); err != nil {
 			s.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
 			continue
 		}
 
-		// Sync to upstream manager based on enabled status
+		// Sync to upstream manager based on enabled status - parallel
 		if serverCfg.Enabled {
-			// Add server to upstream manager regardless of quarantine status
-			// Quarantined servers are kept connected for inspection but blocked for execution
-			if err := s.upstreamManager.AddServer(serverCfg.Name, serverCfg); err != nil {
-				s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", serverCfg.Name))
-			}
+			wg.Add(1)
+			go func(cfg *config.ServerConfig) {
+				defer wg.Done()
 
-			if serverCfg.Quarantined {
-				s.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))
-			}
+				// Acquire semaphore
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }() // Release
+
+				// Add server to upstream manager regardless of quarantine status
+				// Quarantined servers are kept connected for inspection but blocked for execution
+				if err := s.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
+					mu.Lock()
+					errorCount++
+					mu.Unlock()
+					s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
+				}
+
+				if cfg.Quarantined {
+					s.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", cfg.Name))
+				}
+			}(serverCfg)
 		} else {
 			// Remove from upstream manager only if disabled (not quarantined)
 			s.upstreamManager.RemoveServer(serverCfg.Name)
 			s.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
 		}
 	}
+
+	// Wait for all parallel operations to complete
+	wg.Wait()
+
+	s.logger.Info("Server sync completed",
+		zap.Int("total_servers", len(s.config.Servers)),
+		zap.Int("errors", errorCount))
 
 	// Remove servers that are no longer in config (comprehensive cleanup)
 	serversToRemove := []string{}
@@ -511,7 +558,7 @@ func (s *Server) loadConfiguredServers() error {
 
 // Start starts the MCP proxy server
 func (s *Server) Start(ctx context.Context) error {
-	s.logger.Info("Starting MCP proxy server")
+	s.logger.Info("Starting MCP proxy server - HTTP server will start immediately")
 
 	// Handle graceful shutdown when context is cancelled (for full application shutdown only)
 	go func() {
@@ -541,19 +588,29 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = s.logger.Sync()
 	}()
 
-    // Start startup script (best-effort) before serving
-    if s.startupManager != nil {
-        if err := s.startupManager.Start(ctx); err != nil {
-            s.logger.Warn("Failed to start startup script", zap.Error(err))
-        } else {
-            s.logger.Info("Startup script initialization completed")
-        }
-    }
+	// Run background initialization tasks AFTER HTTP server starts
+	go func() {
+		s.logger.Info("Starting background initialization tasks")
+
+		// Clean up any orphaned Docker containers from previous runs
+		s.cleanupOrphanedDockerContainers(ctx)
+
+		// Start startup script (best-effort) in background
+		if s.startupManager != nil {
+			if err := s.startupManager.Start(ctx); err != nil {
+				s.logger.Warn("Failed to start startup script", zap.Error(err))
+			} else {
+				s.logger.Info("Startup script initialization completed")
+			}
+		}
+
+		s.logger.Info("Background initialization tasks completed")
+	}()
 
     // Determine transport mode based on listen address
 	if s.config.Listen != "" && s.config.Listen != ":0" {
-		// Start the MCP server in HTTP mode (Streamable HTTP)
-		s.logger.Info("Starting MCP server",
+		// Start the MCP server in HTTP mode (Streamable HTTP) IMMEDIATELY
+		s.logger.Info("Starting MCP HTTP server IMMEDIATELY (before upstream connections)",
 			zap.String("transport", "streamable-http"),
 			zap.String("listen", s.config.Listen))
 
@@ -564,6 +621,7 @@ func (s *Server) Start(ctx context.Context) error {
 		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServer())
 
 		// Create custom HTTP server for handling multiple routes
+		s.logger.Info("About to call startCustomHTTPServer")
 		if err := s.startCustomHTTPServer(streamableServer); err != nil {
 			return fmt.Errorf("MCP Streamable HTTP server error: %w", err)
 		}
@@ -764,6 +822,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		// Get connection status and tool count from upstream manager
 		var connected bool
 		var connecting bool
+		var sleeping bool
+		var connectionState string
 		var lastError string
 		var toolCount int
 
@@ -775,6 +835,10 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				}
 				if c, ok := connectionStatus["connecting"].(bool); ok {
 					connecting = c
+				}
+				if state, ok := connectionStatus["state"].(string); ok {
+					connectionState = state
+					sleeping = (state == "Sleeping")
 				}
 				if e, ok := connectionStatus["last_error"].(string); ok {
 					lastError = e
@@ -793,22 +857,24 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		result = append(result, map[string]interface{}{
-			"name":           server.Name,
-			"url":            server.URL,
-			"command":        server.Command,
-			"args":           server.Args,
-			"working_dir":    server.WorkingDir,
-			"env":            server.Env,
-			"protocol":       server.Protocol,
-			"repository_url": server.RepositoryURL,
-			"enabled":        server.Enabled,
-			"quarantined":    server.Quarantined,
-			"created":        server.Created,
-			"connected":      connected,
-			"connecting":     connecting,
-			"tool_count":     toolCount,
-			"last_error":     lastError,
-			"group_id":       groupID,
+			"name":            server.Name,
+			"url":             server.URL,
+			"command":         server.Command,
+			"args":            server.Args,
+			"working_dir":     server.WorkingDir,
+			"env":             server.Env,
+			"protocol":        server.Protocol,
+			"repository_url":  server.RepositoryURL,
+			"enabled":         server.Enabled,
+			"quarantined":     server.Quarantined,
+			"created":         server.Created,
+			"connected":       connected,
+			"connecting":      connecting,
+			"sleeping":        sleeping,
+			"connection_state": connectionState,
+			"tool_count":      toolCount,
+			"last_error":      lastError,
+			"group_id":        groupID,
 		})
 	}
 
@@ -1266,6 +1332,13 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	// Server overview web interface
 	mux.HandleFunc("/servers", s.handleServersWeb)
 	mux.HandleFunc("/api/servers/status", s.handleServersStatusAPI)
+	mux.HandleFunc("/api/servers", s.handleServersAPI)
+	mux.HandleFunc("/api/servers/", s.handleServerToolsAPI)
+
+	// Server diagnostic chat interface
+	mux.HandleFunc("/server/chat", s.handleServerChat)
+	mux.HandleFunc("/api/chat/sessions", s.handleChatSession)
+	mux.HandleFunc("/api/chat/sessions/", s.handleChatMessage)
 
 	// Group management web interface
 	mux.HandleFunc("/groups", s.handleGroupsWeb)
@@ -1302,6 +1375,9 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.HandleFunc("/api/inspector/start", s.handleInspectorStart)
 	mux.HandleFunc("/api/inspector/stop", s.handleInspectorStop)
 	mux.HandleFunc("/api/inspector/status", s.handleInspectorStatus)
+
+	// File/path opening endpoint
+	mux.HandleFunc("/api/open-path", s.handleOpenPath)
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
@@ -1439,22 +1515,50 @@ func (s *Server) SaveConfiguration() error {
 			"color":   g.Color,
 			"enabled": g.Enabled,
 		}
-		// Add icon_emoji if present
+
+		// Add description from config if present
+		if g.Description != "" {
+			mg["description"] = g.Description
+		}
+
+		// Add icon_emoji if present in config
 		if g.Icon != "" {
 			mg["icon_emoji"] = g.Icon
+			s.logger.Debug("[ICON PRESERVE] Using icon from config",
+				zap.String("group", g.Name),
+				zap.String("icon", g.Icon))
 		}
+
+		// Preserve fields from previous config if current config doesn't have them
 		if prev, ok := existingGroups[g.Name]; ok {
-			// Preserve description if present
-			if desc, ok := prev["description"].(string); ok && desc != "" {
-				mg["description"] = desc
-			}
-			// Preserve color_emoji if present and icon not already set
-			if g.Icon == "" {
-				if emoji, ok := prev["color_emoji"].(string); ok && emoji != "" {
-					mg["color_emoji"] = emoji
+			// Preserve description if not set in config but exists in prev
+			if g.Description == "" {
+				if desc, ok := prev["description"].(string); ok && desc != "" {
+					mg["description"] = desc
+					s.logger.Debug("[ICON PRESERVE] Preserved description from previous config",
+						zap.String("group", g.Name),
+						zap.String("description", desc))
 				}
 			}
+
+			// CRITICAL FIX: Preserve icon_emoji if not set in config but exists in prev
+			if g.Icon == "" {
+				if iconEmoji, ok := prev["icon_emoji"].(string); ok && iconEmoji != "" {
+					mg["icon_emoji"] = iconEmoji
+					s.logger.Warn("[ICON PRESERVE] Restored icon_emoji from previous config!",
+						zap.String("group", g.Name),
+						zap.String("icon_emoji", iconEmoji))
+				} else {
+					s.logger.Warn("[ICON PRESERVE] No icon found in config or previous data!",
+						zap.String("group", g.Name))
+				}
+			}
+		} else if g.Icon == "" {
+			// No previous config and no icon in current config
+			s.logger.Warn("[ICON PRESERVE] New group without icon",
+				zap.String("group", g.Name))
 		}
+
 		mergedGroups = append(mergedGroups, mg)
 	}
 	existing["groups"] = mergedGroups
@@ -1630,6 +1734,8 @@ func (s *Server) syncGroupsToConfig() {
 		s.logger.Debug("[GROUPS DEBUG] In-memory group found",
 			zap.String("name", name),
 			zap.String("group_name", group.Name),
+			zap.Int("id", group.ID),
+			zap.String("icon", group.Icon),
 			zap.String("color", group.Color))
 	}
 
@@ -1637,14 +1743,16 @@ func (s *Server) syncGroupsToConfig() {
 	configGroups := make([]config.GroupConfig, 0, len(groups))
 	for _, group := range groups {
 		configGroups = append(configGroups, config.GroupConfig{
-			ID:      group.ID,
-			Name:    group.Name,
-			Icon:    group.Icon,
-			Color:   group.Color,
-			Enabled: true, // Groups are enabled by default
+			ID:          group.ID,
+			Name:        group.Name,
+			Description: group.Description,
+			Icon:        group.Icon,
+			Color:       group.Color,
+			Enabled:     true, // Groups are enabled by default
 		})
 		s.logger.Debug("[GROUPS DEBUG] Converting group to config format",
 			zap.String("name", group.Name),
+			zap.String("description", group.Description),
 			zap.String("icon", group.Icon),
 			zap.String("color", group.Color))
 	}
@@ -1708,15 +1816,17 @@ func (s *Server) initGroupsFromConfig() {
 	for _, configGroup := range s.config.Groups {
 		if configGroup.Enabled {
 			groups[configGroup.Name] = &Group{
-				ID:    configGroup.ID,
-				Name:  configGroup.Name,
-				Icon:  configGroup.Icon,
-				Color: configGroup.Color,
+				ID:          configGroup.ID,
+				Name:        configGroup.Name,
+				Description: configGroup.Description,
+				Icon:        configGroup.Icon,
+				Color:       configGroup.Color,
 			}
 			loadedCount++
 			s.logger.Debug("[GROUPS DEBUG] Loaded group into memory",
 				zap.Int("id", configGroup.ID),
 				zap.String("name", configGroup.Name),
+				zap.String("description", configGroup.Description),
 				zap.String("icon", configGroup.Icon),
 				zap.String("color", configGroup.Color))
 		}
@@ -1853,14 +1963,20 @@ func (s *Server) ReloadConfiguration() error {
 	assignmentsMutex.RUnlock()
 
 	// Load configuration from file
-	configPath := config.GetConfigPath(s.config.DataDir)
+	s.mu.RLock()
+	dataDir := s.config.DataDir
+	s.mu.RUnlock()
+
+	configPath := config.GetConfigPath(dataDir)
 	newConfig, err := config.LoadFromFile(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 
-	// Update internal config
+	// Update internal config with write lock to prevent race conditions
+	s.mu.Lock()
 	s.config = newConfig
+	s.mu.Unlock()
 
 	// Migrate legacy names to IDs after reload
 	s.migrateLegacyGroupNamesToIDs()
@@ -2056,4 +2172,144 @@ func (s *Server) UpdateStartupScript(cfg *config.StartupScriptConfig) error {
         return err
     }
     return nil
+}
+
+// cleanupOrphanedDockerContainers finds and removes Docker containers left over from previous crashes
+func (s *Server) cleanupOrphanedDockerContainers(ctx context.Context) {
+	s.logger.Info("Checking for orphaned Docker containers from previous runs...")
+
+	// Search for containers with mcpproxy.server label
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", "label=mcpproxy.server", "--format", "{{.ID}}\t{{.Names}}\t{{.Label \"mcpproxy.server\"}}")
+	output, err := listCmd.Output()
+	if err != nil {
+		s.logger.Warn("Failed to list Docker containers for orphan cleanup", zap.Error(err))
+		return
+	}
+
+	orphanedContainers := strings.TrimSpace(string(output))
+	if orphanedContainers == "" {
+		s.logger.Debug("No orphaned Docker containers found")
+		return
+	}
+
+	// Parse container list
+	lines := strings.Split(orphanedContainers, "\n")
+	s.logger.Info("Found orphaned Docker containers from previous runs",
+		zap.Int("count", len(lines)))
+
+	// Kill each orphaned container
+	cleanedCount := 0
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+
+		containerID := parts[0]
+		containerName := parts[1]
+		serverName := parts[2]
+
+		s.logger.Info("Cleaning up orphaned Docker container",
+			zap.String("container_id", containerID),
+			zap.String("container_name", containerName),
+			zap.String("server", serverName))
+
+		// Try graceful stop first
+		stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+		if err := stopCmd.Run(); err != nil {
+			// Force kill if stop fails
+			s.logger.Debug("Graceful stop failed, force killing container",
+				zap.String("container_id", containerID),
+				zap.Error(err))
+			killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+			if err := killCmd.Run(); err != nil {
+				s.logger.Warn("Failed to kill orphaned container",
+					zap.String("container_id", containerID),
+					zap.Error(err))
+				continue
+			}
+		}
+
+		cleanedCount++
+		s.logger.Info("Successfully cleaned up orphaned container",
+			zap.String("container_id", containerID),
+			zap.String("server", serverName))
+	}
+
+	if cleanedCount > 0 {
+		s.logger.Info("Orphaned Docker container cleanup completed",
+			zap.Int("cleaned", cleanedCount),
+			zap.Int("total_found", len(lines)))
+	}
+}
+
+// handleServersAPI returns a JSON list of all servers for the chat page sidebar
+func (s *Server) handleServersAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	servers, err := s.GetAllServers()
+	if err != nil {
+		s.logger.Error("Failed to get all servers for API", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to get servers: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(servers); err != nil {
+		s.logger.Error("Failed to encode servers JSON", zap.Error(err))
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+// handleServerToolsAPI returns a JSON list of tools for a specific server
+func (s *Server) handleServerToolsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract server name from URL path: /api/servers/{name}/tools
+	path := r.URL.Path
+	prefix := "/api/servers/"
+	if !strings.HasPrefix(path, prefix) {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+
+	// Remove prefix and extract server name
+	remainder := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(remainder, "/")
+	if len(parts) < 2 || parts[1] != "tools" {
+		http.Error(w, "Invalid URL path, expected /api/servers/{name}/tools", http.StatusBadRequest)
+		return
+	}
+
+	serverName := parts[0]
+	if serverName == "" {
+		http.Error(w, "Server name is required", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Debug("Getting tools for server", zap.String("server", serverName))
+
+	tools, err := s.GetServerTools(serverName)
+	if err != nil {
+		s.logger.Error("Failed to get server tools for API",
+			zap.String("server", serverName),
+			zap.Error(err))
+		http.Error(w, fmt.Sprintf("Failed to get tools: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(tools); err != nil {
+		s.logger.Error("Failed to encode tools JSON", zap.Error(err))
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
 }

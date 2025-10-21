@@ -100,3 +100,4 @@ __pycache__
 *.pyc
 .next
 .github
+.version-patch

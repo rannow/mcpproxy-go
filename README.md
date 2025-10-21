@@ -117,6 +117,7 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 | `listen` | Address the proxy listens on | `:8080` |
 | `data_dir` | Folder for config, DB & logs | `~/.mcpproxy` |
 | `enable_tray` | Show native system-tray UI | `true` |
+| `enable_lazy_loading` | Connect to servers only when tools are called (see [Lazy Loading](#-lazy-loading--connection-management)) | `false` |
 | `top_k` | Tools returned by `retrieve_tools` | `5` |
 | `tools_limit` | Max tools returned to client | `15` |
 | `tool_response_limit` | Auto-truncate responses above N chars (`0` disables) | `20000` |
@@ -261,6 +262,94 @@ docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
 
 # View container logs for a specific server
 docker logs <container-id>
+```
+
+---
+
+## ⚡ Lazy Loading & Connection Management
+
+MCPProxy provides **intelligent lazy loading** to minimize resource usage and startup time by connecting to servers only when needed:
+
+### ✨ **Key Features**
+- **On-Demand Connections**: Servers connect only when their tools are first called
+- **Faster Startup**: Skip connecting to all servers during initialization
+- **Resource Efficiency**: Reduce memory and CPU usage for unused servers
+- **Smart Prioritization**: Servers with previous connections start faster
+- **Per-Server Control**: Configure individual servers to start on boot if needed
+
+### 🔧 **Global Lazy Loading Configuration**
+
+Add to your `mcp_config.json`:
+
+```jsonc
+{
+  "enable_lazy_loading": true,  // Enable lazy loading globally (default: false)
+  "max_concurrent_connections": 10,  // Max parallel connections during startup (default: 5)
+
+  "mcpServers": [
+    {
+      "name": "frequently-used-server",
+      "command": "npx",
+      "args": ["@server/package"],
+      "start_on_boot": true,  // Override: connect immediately on startup
+      "enabled": true
+    },
+    {
+      "name": "rarely-used-server",
+      "command": "python",
+      "args": ["-m", "my_server"],
+      // No start_on_boot: will connect only when tools are called
+      "enabled": true
+    }
+  ]
+}
+```
+
+### 📋 **Configuration Options**
+
+| Field | Scope | Description | Default |
+|-------|-------|-------------|---------|
+| `enable_lazy_loading` | Global | Enable lazy loading for all servers | `false` |
+| `max_concurrent_connections` | Global | Max parallel server connections during startup | `5` |
+| `start_on_boot` | Per-Server | Force server to connect on startup (overrides lazy loading) | `false` |
+| `health_check` | Per-Server | Enable periodic health checks for this server | `false` |
+
+### 🎯 **How It Works**
+
+1. **Startup**: MCPProxy loads configuration and indexes tools from database
+2. **Tool Discovery**: When `retrieve_tools` is called, it returns tools from the index
+3. **First Call**: When a tool from a disconnected server is called, MCPProxy:
+   - Connects to the server
+   - Executes the tool
+   - Keeps the connection active for subsequent calls
+4. **Smart Prioritization**: Servers that have connected before (`ever_connected: true`) start faster
+
+### 🚀 **Performance Benefits**
+
+| Scenario | Without Lazy Loading | With Lazy Loading |
+|----------|---------------------|-------------------|
+| Startup Time (100 servers) | ~30-60 seconds | ~2-5 seconds |
+| Memory Usage | All servers loaded | Only active servers |
+| Connection Failures | Block startup | Deferred to first use |
+
+### 💡 **Best Practices**
+
+- **Enable for large deployments**: If you have >20 servers, enable lazy loading
+- **Critical servers**: Set `start_on_boot: true` for frequently used servers
+- **Health checks**: Only enable `health_check` for production-critical servers
+- **Database persistence**: Servers remember connection history for smart prioritization
+
+### 🐛 **Debugging Lazy Loading**
+
+```bash
+# Check which servers are connected
+mcpproxy serve --log-level=debug | grep "State transition"
+
+# Monitor connection events
+mcpproxy serve --log-level=debug | grep -E "(Connecting|Ready|Error)"
+
+# View server connection history
+sqlite3 ~/.mcpproxy/config.db "SELECT name, ever_connected, last_successful_connection FROM upstream_servers"
 ```
 
 ---

@@ -56,6 +56,10 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             align-items: center;
             margin-bottom: 15px;
         }
+        .group-icon {
+            font-size: 32px;
+            margin-right: 15px;
+        }
         .group-color {
             width: 20px;
             height: 20px;
@@ -173,6 +177,45 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
         .color-option.selected {
             border-color: #333;
         }
+        .icon-picker {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .icon-option {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .icon-option:hover {
+            background-color: #f0f0f0;
+        }
+        .icon-option.selected {
+            border-color: #007bff;
+            background-color: #e6f3ff;
+        }
+        .unused-icons {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .unused-icons h3 {
+            margin-bottom: 15px;
+            color: #333;
+        }
         .modal-actions {
             display: flex;
             gap: 10px;
@@ -188,6 +231,13 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
         <div class="group-grid" id="groupGrid">
             <!-- Groups will be loaded here -->
         </div>
+
+        <div class="unused-icons">
+            <h3>📦 Available Icons</h3>
+            <div class="icon-picker" id="unusedIconsList">
+                <!-- Unused icons will be shown here -->
+            </div>
+        </div>
     </div>
 
     <!-- Create/Edit Group Modal -->
@@ -198,6 +248,12 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                 <div class="form-group">
                     <label for="groupName">Group Name:</label>
                     <input type="text" id="groupName" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>Icon:</label>
+                    <div class="icon-picker" id="iconPicker">
+                        <!-- Icon options will be generated -->
+                    </div>
                 </div>
                 <div class="form-group">
                     <label>Color:</label>
@@ -227,13 +283,22 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             { name: 'Cyan', code: '#17a2b8' }
         ];
 
+        const icons = [
+            "🌐", "🔧", "🧪", "🗄️", "☁️", "🎯", "💼", "🔔", "🏠", "🖥️",
+            "📊", "🔒", "⚡", "🎨", "📱", "🌟", "🔍", "💾", "🚀", "📁",
+            "🔗", "⚙️", "📝", "🎭", "🌈", "🔐", "📡", "🎮", "🏗️", "🔬",
+            "📈", "🌍", "🎪", "🔊", "📸", "🎥", "📚", "💡", "🛠️", "🎁"
+        ];
+
         let groups = [];
         let editingGroup = null;
         let selectedColor = colors[0];
+        let selectedIcon = icons[0];
 
         // Initialize page
         document.addEventListener('DOMContentLoaded', function() {
             loadGroups();
+            initIconPicker();
             initColorPicker();
         });
 
@@ -267,8 +332,10 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             groups.forEach(group => {
                 const card = document.createElement('div');
                 card.className = 'group-card';
+                const icon = group.icon_emoji || '📁';
                 card.innerHTML = ` + "`" + `
                     <div class="group-header">
+                        <div class="group-icon">${icon}</div>
                         <div class="group-color" style="background-color: ${group.color}"></div>
                         <div class="group-name">${group.name}</div>
                     </div>
@@ -279,26 +346,80 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                 ` + "`" + `;
                 grid.appendChild(card);
             });
+
+            // Update unused icons list
+            renderUnusedIcons();
+        }
+
+        // Initialize icon picker
+        function initIconPicker() {
+            const picker = document.getElementById('iconPicker');
+            picker.innerHTML = '';
+
+            icons.forEach((icon, index) => {
+                const option = document.createElement('div');
+                option.className = 'icon-option';
+                option.textContent = icon;
+                option.title = icon;
+                option.onclick = () => selectIcon(icon, option);
+
+                if (index === 0) {
+                    option.classList.add('selected');
+                }
+
+                picker.appendChild(option);
+            });
         }
 
         // Initialize color picker
         function initColorPicker() {
             const picker = document.getElementById('colorPicker');
             picker.innerHTML = '';
-            
+
             colors.forEach((color, index) => {
                 const option = document.createElement('div');
                 option.className = 'color-option';
                 option.style.backgroundColor = color.code;
                 option.title = color.name;
                 option.onclick = () => selectColor(color, option);
-                
+
                 if (index === 0) {
                     option.classList.add('selected');
                 }
-                
+
                 picker.appendChild(option);
             });
+        }
+
+        // Render unused icons
+        function renderUnusedIcons() {
+            const usedIcons = new Set(groups.map(g => g.icon_emoji).filter(Boolean));
+            const unusedIcons = icons.filter(icon => !usedIcons.has(icon));
+
+            const container = document.getElementById('unusedIconsList');
+            container.innerHTML = '';
+
+            if (unusedIcons.length === 0) {
+                container.innerHTML = '<div style="color: #666; font-style: italic;">All icons are in use</div>';
+                return;
+            }
+
+            unusedIcons.forEach(icon => {
+                const option = document.createElement('div');
+                option.className = 'icon-option';
+                option.textContent = icon;
+                option.title = icon + ' (available)';
+                option.style.cursor = 'default';
+                option.style.opacity = '0.6';
+                container.appendChild(option);
+            });
+        }
+
+        // Select icon
+        function selectIcon(icon, element) {
+            document.querySelectorAll('#iconPicker .icon-option').forEach(el => el.classList.remove('selected'));
+            element.classList.add('selected');
+            selectedIcon = icon;
         }
 
         // Select color
@@ -313,8 +434,19 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             editingGroup = null;
             document.getElementById('modalTitle').textContent = 'Create New Group';
             document.getElementById('groupName').value = '';
+            selectedIcon = icons[0];
             selectedColor = colors[0];
-            document.querySelector('.color-option').classList.add('selected');
+
+            // Reset icon selection
+            document.querySelectorAll('#iconPicker .icon-option').forEach((el, i) => {
+                el.classList.toggle('selected', i === 0);
+            });
+
+            // Reset color selection
+            document.querySelectorAll('.color-option').forEach((el, i) => {
+                el.classList.toggle('selected', i === 0);
+            });
+
             document.getElementById('groupModal').style.display = 'block';
         }
 
@@ -326,7 +458,20 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             editingGroup = group;
             document.getElementById('modalTitle').textContent = 'Edit Group';
             document.getElementById('groupName').value = group.name;
-            
+
+            // Select the group's icon
+            const iconIndex = icons.indexOf(group.icon_emoji);
+            if (iconIndex >= 0) {
+                selectedIcon = icons[iconIndex];
+                document.querySelectorAll('#iconPicker .icon-option').forEach((el, i) => {
+                    el.classList.toggle('selected', i === iconIndex);
+                });
+            } else {
+                // Default to first icon if not found
+                selectedIcon = icons[0];
+                document.querySelector('#iconPicker .icon-option').classList.add('selected');
+            }
+
             // Select the group's color
             const colorIndex = colors.findIndex(c => c.code === group.color);
             if (colorIndex >= 0) {
@@ -335,7 +480,7 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                     el.classList.toggle('selected', i === colorIndex);
                 });
             }
-            
+
             document.getElementById('groupModal').style.display = 'block';
         }
 
@@ -368,12 +513,13 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
         // Handle form submission
         document.getElementById('groupForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            
+
             const name = document.getElementById('groupName').value.trim();
             if (!name) return;
 
             const groupData = {
                 name: name,
+                icon_emoji: selectedIcon,
                 color: selectedColor.code
             };
 
@@ -481,8 +627,13 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		color = "#007bff" // Default color
 	}
 
+	icon, _ := groupData["icon_emoji"].(string)
+	if strings.TrimSpace(icon) == "" {
+		icon = "📁" // Default icon
+	}
+
 	allGroups := s.getGroups()
-	
+
 	// Check if group already exists
 	if _, exists := allGroups[name]; exists {
 		response := map[string]interface{}{
@@ -494,13 +645,18 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create new group
+	// Generate next available ID for new group
+	nextID := s.getNextGroupID()
+
+	// Create new group with ID
 	s.setGroup(name, &Group{
+		ID:    nextID,
 		Name:  name,
 		Color: color,
+		Icon:  icon,
 	})
 
-	s.logger.Info("Creating group", zap.String("name", name), zap.String("color", color))
+	s.logger.Info("Creating group", zap.String("name", name), zap.String("color", color), zap.String("icon", icon))
 
 	// Save configuration to persist groups
 	if err := s.SaveConfiguration(); err != nil {
@@ -539,22 +695,35 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 		color = "#007bff" // Default color
 	}
 
+	icon, _ := groupData["icon_emoji"].(string)
+	if strings.TrimSpace(icon) == "" {
+		icon = "📁" // Default icon
+	}
+
 	// Update group with proper mutex handling to avoid deadlock
 	var updateResult struct {
-		success bool
-		errorMsg string
+		success      bool
+		errorMsg     string
+		preservedID  int
 	}
 
 	func() {
 		groupsMutex.Lock()
 		defer groupsMutex.Unlock()
 
-		// Check if old group exists
-		_, exists := groups[oldName]
+		// Check if old group exists and preserve its ID
+		oldGroup, exists := groups[oldName]
 		if !exists {
 			updateResult.success = false
 			updateResult.errorMsg = fmt.Sprintf("Group '%s' not found", oldName)
 			return
+		}
+
+		// Preserve the ID and Description from the old group
+		preservedID := oldGroup.ID
+		preservedDescription := oldGroup.Description
+		if description, ok := groupData["description"].(string); ok && strings.TrimSpace(description) != "" {
+			preservedDescription = description
 		}
 
 		// If name changed, check if new name already exists
@@ -568,12 +737,16 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 			delete(groups, oldName)
 		}
 
-		// Update/create group
+		// Update/create group with preserved ID and description
 		groups[newName] = &Group{
-			Name:  newName,
-			Color: color,
+			ID:          preservedID,
+			Name:        newName,
+			Description: preservedDescription,
+			Color:       color,
+			Icon:        icon,
 		}
 		updateResult.success = true
+		updateResult.preservedID = preservedID
 	}()
 
 	// Handle error cases
@@ -587,7 +760,12 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("Updating group", zap.String("old_name", oldName), zap.String("new_name", newName), zap.String("color", color))
+	s.logger.Info("Updating group",
+		zap.String("old_name", oldName),
+		zap.String("new_name", newName),
+		zap.Int("id", updateResult.preservedID),
+		zap.String("color", color),
+		zap.String("icon", icon))
 
 	// Save configuration to persist groups (mutex is now released)
 	if err := s.SaveConfiguration(); err != nil {
@@ -601,6 +779,20 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// getNextGroupID returns the next available group ID (thread-safe)
+func (s *Server) getNextGroupID() int {
+	groupsMutex.RLock()
+	defer groupsMutex.RUnlock()
+
+	maxID := 0
+	for _, group := range groups {
+		if group.ID > maxID {
+			maxID = group.ID
+		}
+	}
+	return maxID + 1
 }
 
 // handleDeleteGroup deletes a group

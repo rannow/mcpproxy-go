@@ -35,12 +35,7 @@ type ChatSession struct {
 type AgentType string
 
 const (
-	AgentTypeCoordinator  AgentType = "coordinator"
-	AgentTypeLogAnalyzer  AgentType = "log_analyzer"
-	AgentTypeDocAnalyzer  AgentType = "doc_analyzer"
-	AgentTypeConfigUpdate AgentType = "config_update"
-	AgentTypeInstaller    AgentType = "installer"
-	AgentTypeTester       AgentType = "tester"
+	AgentTypeLLM AgentType = "llm"
 )
 
 // ChatSystem manages the multi-agent chat interface
@@ -98,14 +93,9 @@ func NewChatSystem(logger *zap.Logger, storage ChatStorage, serverManager interf
 	return cs
 }
 
-// initializeAgents creates and registers all diagnostic agents
+// initializeAgents creates and registers the LLM-powered agent
 func (cs *ChatSystem) initializeAgents() {
-	cs.agents[AgentTypeCoordinator] = NewCoordinatorAgent(cs.logger, cs.serverManager)
-	cs.agents[AgentTypeLogAnalyzer] = NewLogAnalyzerAgent(cs.logger)
-	cs.agents[AgentTypeDocAnalyzer] = NewDocAnalyzerAgent(cs.logger)
-	cs.agents[AgentTypeConfigUpdate] = NewConfigUpdateAgent(cs.logger, cs.serverManager)
-	cs.agents[AgentTypeInstaller] = NewInstallerAgent(cs.logger)
-	cs.agents[AgentTypeTester] = NewTesterAgent(cs.logger, cs.serverManager)
+	cs.agents[AgentTypeLLM] = NewLLMAgent(cs.logger, cs.serverManager)
 }
 
 // CreateSession creates a new chat session for a server
@@ -122,12 +112,12 @@ func (cs *ChatSystem) CreateSession(serverName string) (*ChatSession, error) {
 		Status:     "active",
 	}
 
-	// Add welcome message from coordinator
+	// Add welcome message from LLM agent
 	welcomeMsg := ChatMessage{
 		ID:        generateMessageID(),
 		Role:      "assistant",
-		Content:   fmt.Sprintf("Hello! I'm your diagnostic coordinator for the MCP server '%s'. I can help you with configuration, installation, testing, and troubleshooting. How can I assist you today?", serverName),
-		AgentType: string(AgentTypeCoordinator),
+		Content:   fmt.Sprintf("Hello! I'm your AI-powered diagnostic agent for the MCP server '%s'. I can help you with configuration, installation, testing, log analysis, documentation, and troubleshooting. How can I assist you today?", serverName),
+		AgentType: string(AgentTypeLLM),
 		Timestamp: time.Now(),
 	}
 
@@ -219,8 +209,8 @@ func (cs *ChatSystem) selectAgent(message ChatMessage, session *ChatSession) Dia
 		}
 	}
 
-	// Default to coordinator
-	return cs.agents[AgentTypeCoordinator]
+	// Default to LLM agent
+	return cs.agents[AgentTypeLLM]
 }
 
 // GetSession retrieves a chat session
