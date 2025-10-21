@@ -52,6 +52,8 @@ type ChatSystem struct {
 		GetAllServers() ([]map[string]interface{}, error)
 		ReloadConfiguration() error
 		GetConfigPath() string
+		GetLogDir() string
+		GetGitHubURL() string
 	}
 }
 
@@ -79,6 +81,8 @@ func NewChatSystem(logger *zap.Logger, storage ChatStorage, serverManager interf
 	GetAllServers() ([]map[string]interface{}, error)
 	ReloadConfiguration() error
 	GetConfigPath() string
+	GetLogDir() string
+	GetGitHubURL() string
 }) *ChatSystem {
 	cs := &ChatSystem{
 		logger:        logger,
