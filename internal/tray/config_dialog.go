@@ -38,9 +38,12 @@ type ServerConfigDialog struct {
 	// Chat system
 	chatSystem *ChatSystem
 
-	// Server manager for tools fetching
+	// Server manager for tools fetching and system info
 	serverManager interface {
 		GetServerTools(serverName string) ([]map[string]interface{}, error)
+		GetConfigPath() string
+		GetLogDir() string
+		GetGitHubURL() string
 	}
 }
 
@@ -50,6 +53,9 @@ type ConfigDialogData struct {
 	ServerName  string               `json:"serverName"`
 	DialogTitle string               `json:"dialogTitle"`
 	Port        int                  `json:"port"`
+	LogFile     string               `json:"logFile"`
+	ConfigFile  string               `json:"configFile"`
+	GitHubURL   string               `json:"githubURL"`
 }
 
 // ConfigDialogResult contains the result from the dialog
@@ -589,9 +595,33 @@ const configDialogTemplate = `<!DOCTYPE html>
 
         <div class="dialog-footer">
             <button type="button" class="btn btn-secondary" onclick="cancel()">Cancel</button>
-            <button type="button" class="btn btn-info" onclick="runDiagnostic()">🔍 Diagnostic</button>
             <button type="button" class="btn btn-info" onclick="startInspector()" id="inspectorBtn">🔬 MCP Inspector</button>
             <button type="button" class="btn btn-primary" onclick="save()">Save</button>
+        </div>
+
+        <!-- Quick Actions Section -->
+        <div class="section" style="margin-top: 20px;">
+            <h3>⚡ Quick Actions</h3>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+                {{if .LogFile}}
+                <div class="quick-action-item">
+                    <span style="font-weight: 500;">📄 Log File:</span>
+                    <a href="#" onclick="openPath('{{.LogFile}}'); return false;" style="color: #667eea; text-decoration: none; margin-left: 8px;">{{.LogFile}}</a>
+                </div>
+                {{end}}
+                {{if .ConfigFile}}
+                <div class="quick-action-item">
+                    <span style="font-weight: 500;">⚙️ Configuration:</span>
+                    <a href="#" onclick="openPath('{{.ConfigFile}}'); return false;" style="color: #667eea; text-decoration: none; margin-left: 8px;">{{.ConfigFile}}</a>
+                </div>
+                {{end}}
+                {{if .GitHubURL}}
+                <div class="quick-action-item">
+                    <span style="font-weight: 500;">🔗 Repository:</span>
+                    <a href="{{.GitHubURL}}" target="_blank" style="color: #667eea; text-decoration: none; margin-left: 8px;">{{.GitHubURL}}</a>
+                </div>
+                {{end}}
+            </div>
         </div>
 
         <!-- Connection Status Section -->
@@ -607,37 +637,6 @@ const configDialogTemplate = `<!DOCTYPE html>
         <div class="section" style="margin-top: 20px;">
             <h3>🛠️ Available Tools</h3>
             <div id="toolsList" class="tools-list"></div>
-        </div>
-
-        <!-- Diagnostic Section -->
-        <div class="section" style="margin-top: 20px;">
-            <h3>🔍 Diagnostic Report</h3>
-            <div id="diagnosticReport" class="diagnostic-report"></div>
-        </div>
-
-        <!-- Chat Interface Section -->
-        <div class="section" style="margin-top: 20px;">
-            <h3>💬 Diagnostic Chat Assistant</h3>
-            <div id="chatInterface" class="chat-interface">
-                <div id="chatMessages" class="chat-messages"></div>
-                <div class="chat-input-section">
-                    <div class="chat-input-container">
-                        <input type="text" id="chatInput" placeholder="Ask the diagnostic agent for help..." class="chat-input">
-                        <button type="button" id="chatSend" class="btn-chat-send">Send</button>
-                    </div>
-                    <div class="chat-agent-selector">
-                        <label for="agentSelector">Agent:</label>
-                        <select id="agentSelector" class="agent-selector">
-                            <option value="coordinator">🎯 Coordinator (General help)</option>
-                            <option value="log_analyzer">📊 Log Analyzer</option>
-                            <option value="doc_analyzer">📖 Documentation Analyzer</option>
-                            <option value="config_updater">⚙️ Config Updater</option>
-                            <option value="installer">📦 Installer</option>
-                            <option value="tester">🧪 Tester</option>
-                        </select>
-                    </div>
-                </div>
-            </div>
         </div>
     </div>
 
@@ -803,95 +802,47 @@ const configDialogTemplate = `<!DOCTYPE html>
             });
         }
 
-        function runDiagnostic() {
-            const diagnosticBtn = document.querySelector('.btn-info');
-            const diagnosticReport = document.getElementById('diagnosticReport');
-            
-            // Show loading state
-            diagnosticBtn.textContent = '🔄 Running...';
-            diagnosticBtn.disabled = true;
-            
-            diagnosticReport.textContent = 'Running diagnostic analysis...';
-            
-            fetch('/diagnostic', { method: 'POST' })
+        function openPath(path) {
+            // Open file/folder path in system default application
+            fetch('http://localhost:8080/api/open-path', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({path: path})
+            })
             .then(response => response.json())
-            .then(report => {
-                // Format diagnostic report
-                let reportText = '🔍 MCP Server Diagnostic Report for: ' + report.server_name + '\n';
-                reportText += 'Generated: ' + new Date(report.timestamp).toLocaleString() + '\n\n';
-                
-                // Configuration Analysis
-                reportText += '📋 Configuration Analysis:\n';
-                if (report.config_analysis.valid) {
-                    reportText += '  ✅ Configuration is valid\n';
-                } else {
-                    reportText += '  ❌ Configuration has issues:\n';
-                    if (report.config_analysis.missing_fields) {
-                        report.config_analysis.missing_fields.forEach(function(field) {
-                            reportText += '    - Missing field: ' + field + '\n';
-                        });
-                    }
+            .then(data => {
+                if (!data.success) {
+                    alert('Failed to open path: ' + (data.error || 'Unknown error'));
                 }
-                
-                if (report.config_analysis.suggestions && report.config_analysis.suggestions.length > 0) {
-                    reportText += '  💡 Suggestions:\n';
-                    report.config_analysis.suggestions.forEach(function(suggestion) {
-                        reportText += '    - ' + suggestion + '\n';
-                    });
-                }
-                
-                // Log Analysis
-                reportText += '\n📊 Log Analysis:\n';
-                reportText += '  - Error count: ' + report.log_analysis.error_count + '\n';
-                reportText += '  - Connection attempts: ' + report.log_analysis.connection_attempts + '\n';
-                
-                if (report.log_analysis.last_error) {
-                    reportText += '  - Last error: ' + report.log_analysis.last_error + '\n';
-                }
-                
-                if (report.log_analysis.common_errors && report.log_analysis.common_errors.length > 0) {
-                    reportText += '  - Common errors:\n';
-                    report.log_analysis.common_errors.forEach(function(error) {
-                        reportText += '    - ' + error + '\n';
-                    });
-                }
-                
-                // Recommendations
-                if (report.recommendations && report.recommendations.length > 0) {
-                    reportText += '\n💡 Recommendations:\n';
-                    report.recommendations.forEach(function(rec, i) {
-                        reportText += '  ' + (i + 1) + '. ' + rec + '\n';
-                    });
-                }
-                
-                diagnosticReport.textContent = reportText;
             })
-            .catch(function(error) {
-                diagnosticReport.textContent = 'Error running diagnostic: ' + error.message;
-            })
-            .finally(function() {
-                diagnosticBtn.textContent = '🔍 Diagnostic';
-                diagnosticBtn.disabled = false;
+            .catch(error => {
+                alert('Error opening path: ' + error.message);
             });
-            
-            // Also load tools if server is connected
-            loadTools();
         }
 
         function loadConnectionStatus() {
             const statusIndicator = document.getElementById('statusIndicator');
             const statusText = document.getElementById('statusText');
-            
+
             // Check if server is connected by trying to load tools
             fetch(window.location.origin + '/tools')
             .then(function(response) { return response.json(); })
             .then(function(data) {
-                if (data.tools && data.tools.length > 0) {
+                if (data.status === 'connected' && data.tools && data.tools.length > 0) {
                     statusIndicator.textContent = '🟢';
                     statusText.textContent = 'Connected (' + data.tools.length + ' tools available)';
-                } else if (data.error) {
+                } else if (data.status === 'disconnected') {
+                    statusIndicator.textContent = '🟡';
+                    statusText.textContent = data.message || 'Server not connected';
+                } else if (data.status === 'error') {
                     statusIndicator.textContent = '🔴';
-                    statusText.textContent = 'Disconnected - ' + data.error;
+                    statusText.textContent = data.message || 'Error';
+                } else if (data.connected === false) {
+                    // Fallback for old format
+                    statusIndicator.textContent = '🟡';
+                    statusText.textContent = data.message || 'Server not connected';
                 } else {
                     statusIndicator.textContent = '🟡';
                     statusText.textContent = 'Connected (no tools available)';
@@ -905,7 +856,7 @@ const configDialogTemplate = `<!DOCTYPE html>
 
         function loadTools() {
             const toolsList = document.getElementById('toolsList');
-            
+
             fetch(window.location.origin + '/tools')
             .then(function(response) { return response.json(); })
             .then(function(data) {
@@ -917,16 +868,29 @@ const configDialogTemplate = `<!DOCTYPE html>
                         toolsHtml += '<div class="tool-description">' + (tool.description || 'No description available') + '</div>';
                         toolsHtml += '</div>';
                     });
-                    
+
                     toolsList.innerHTML = toolsHtml;
-                } else if (data.error) {
-                    toolsList.innerHTML = '<p>Error loading tools: ' + data.error + '</p>';
+                } else if (data.status === 'disconnected') {
+                    toolsList.innerHTML = '<div style="padding: 15px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; color: #856404;">' +
+                        '<strong>ℹ️ Server Not Connected</strong><br>' +
+                        (data.message || 'Server is not connected. Enable the server to view available tools.') +
+                        '</div>';
+                } else if (data.status === 'error') {
+                    toolsList.innerHTML = '<div style="padding: 15px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px; color: #721c24;">' +
+                        '<strong>❌ Error</strong><br>' +
+                        (data.message || 'Failed to load tools') +
+                        '</div>';
                 } else {
-                    toolsList.innerHTML = '<p>No tools available</p>';
+                    toolsList.innerHTML = '<div style="padding: 15px; background: #d1ecf1; border: 1px solid #bee5eb; border-radius: 4px; color: #0c5460;">' +
+                        'No tools available for this server' +
+                        '</div>';
                 }
             })
             .catch(function(error) {
-                toolsList.innerHTML = '<p>Failed to load tools: ' + error.message + '</p>';
+                toolsList.innerHTML = '<div style="padding: 15px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px; color: #721c24;">' +
+                    '<strong>❌ Connection Error</strong><br>' +
+                    error.message +
+                    '</div>';
             });
         }
 
@@ -1148,7 +1112,6 @@ const configDialogTemplate = `<!DOCTYPE html>
         window.addEventListener('load', function() {
             loadConnectionStatus();
             loadTools();
-            initializeChat();
             checkInspectorStatus();
         });
 
@@ -1307,11 +1270,28 @@ func (d *ServerConfigDialog) handleDialog(w http.ResponseWriter, r *http.Request
 		d.server.Env = make(map[string]string)
 	}
 
+	// Get system paths from server manager
+	var logFile, configFile, githubURL string
+	if d.serverManager != nil {
+		logDir := d.serverManager.GetLogDir()
+		if logDir != "" {
+			logFile = fmt.Sprintf("%s/server-%s.log", logDir, d.serverName)
+		}
+		configFile = d.serverManager.GetConfigPath()
+		githubURL = d.server.RepositoryURL
+		if githubURL == "" {
+			githubURL = d.serverManager.GetGitHubURL()
+		}
+	}
+
 	data := ConfigDialogData{
 		Server:      d.server,
 		ServerName:  d.serverName,
 		DialogTitle: fmt.Sprintf("Configure Server: %s", d.serverName),
 		Port:        d.dialogPort,
+		LogFile:     logFile,
+		ConfigFile:  configFile,
+		GitHubURL:   githubURL,
 	}
 
 	d.logger.Debug("Serving dialog", 
@@ -1420,29 +1400,41 @@ func (d *ServerConfigDialog) handleTools(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+
 	if d.serverManager == nil {
-		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"tools": []interface{}{},
-			"error": "Server manager not available",
+			"tools":     []interface{}{},
+			"status":    "error",
+			"message":   "Server manager not available",
+			"connected": false,
 		})
 		return
 	}
 
 	tools, err := d.serverManager.GetServerTools(d.serverName)
 	if err != nil {
-		d.logger.Error("Failed to fetch tools", zap.Error(err))
-		w.Header().Set("Content-Type", "application/json")
+		// Server not connected or error fetching tools
+		// This is expected for disabled/disconnected servers, so use Debug level
+		d.logger.Debug("Server not connected or tools unavailable",
+			zap.String("server", d.serverName),
+			zap.Error(err))
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"tools": []interface{}{},
-			"error": err.Error(),
+			"tools":     []interface{}{},
+			"status":    "disconnected",
+			"message":   "Server is not connected. Enable the server to view available tools.",
+			"connected": false,
 		})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	// Successfully got tools
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"tools": tools,
+		"tools":     tools,
+		"status":    "connected",
+		"message":   "",
+		"connected": true,
 	})
 }
 

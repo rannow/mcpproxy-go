@@ -56,6 +56,21 @@ type TrayInterface interface {
 
 // createTray is implemented in build-tagged files
 
+// init sets default build information for dev builds
+func init() {
+	// If buildTime wasn't set via ldflags (dev build), use current time
+	if buildTime == "unknown" {
+		buildTime = time.Now().UTC().Format("2006.01.02 15:04")
+		// Don't append timestamp to version - it's already shown in Build Time field
+	}
+
+	// If git info wasn't set via ldflags, try to get it at runtime
+	if gitCommit == "unknown" {
+		// Git info will remain "unknown" for dev builds without git
+		// This is acceptable as it clearly indicates a non-release build
+	}
+}
+
 func main() {
 	// Set up registries initialization callback to avoid circular imports
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
@@ -395,9 +410,19 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	// Shutdown function that can be called from tray
 	shutdownFunc := func() {
-		logger.Info("Shutdown requested")
+		logger.Info("Shutdown requested - initiating graceful shutdown")
+
+		// CRITICAL: Call server shutdown to cleanup Docker containers and resources
+		// This must happen BEFORE canceling the context to ensure proper cleanup
+		logger.Info("Calling srv.Shutdown() to cleanup resources and Docker containers")
+		if err := srv.Shutdown(); err != nil {
+			logger.Error("Error during server shutdown", zap.Error(err))
+		} else {
+			logger.Info("Server shutdown completed successfully")
+		}
+
+		// Cancel context after cleanup
 		cancel()
-		// Don't wait here - let the main thread handle the delay
 	}
 
 	go func() {

@@ -1,18 +1,38 @@
 #!/bin/bash
 set -e
 
+# Version file to track patch number
+VERSION_FILE=".version-patch"
+
 # Get git information
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_TIME=$(date -u "+%Y.%m.%d %H:%M")
 
-# Generate version based on git tag or build timestamp
+# Generate version based on git tag or auto-increment patch version
 if GIT_TAG=$(git describe --tags --exact-match 2>/dev/null); then
     # Use exact git tag if available
     VERSION=${1:-$GIT_TAG}
 else
-    # Generate version from timestamp if no tag
-    VERSION=${1:-"v0.1.0-$(date -u +%Y%m%d-%H%M%S)"}
+    # Auto-increment patch version
+    MAJOR=1
+    MINOR=1
+
+    # Read current patch version or initialize to 0
+    if [ -f "$VERSION_FILE" ]; then
+        PATCH=$(cat "$VERSION_FILE")
+    else
+        PATCH=0
+    fi
+
+    # Increment patch version
+    PATCH=$((PATCH + 1))
+
+    # Save new patch version
+    echo "$PATCH" > "$VERSION_FILE"
+
+    # Generate version with date
+    VERSION="v${MAJOR}.${MINOR}.${PATCH}-${BUILD_TIME}"
 fi
 
 echo "Building mcpproxy"
@@ -21,7 +41,7 @@ echo "  Commit:     $GIT_COMMIT"
 echo "  Branch:     $GIT_BRANCH"
 echo "  Build Time: $BUILD_TIME"
 
-LDFLAGS="-X main.version=$VERSION -X main.buildTime=$BUILD_TIME -X main.gitCommit=$GIT_COMMIT -X main.gitBranch=$GIT_BRANCH -s -w"
+LDFLAGS="-X 'main.version=$VERSION' -X 'main.buildTime=$BUILD_TIME' -X 'main.gitCommit=$GIT_COMMIT' -X 'main.gitBranch=$GIT_BRANCH' -s -w"
 
 # Build for current platform (with CGO for tray support if needed)
 echo "Building for current platform..."

@@ -125,6 +125,25 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             text-transform: uppercase;
             font-size: 0.85em;
             letter-spacing: 1px;
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+        }
+        th:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        th.sortable::after {
+            content: ' ⇅';
+            opacity: 0.3;
+            font-size: 0.9em;
+        }
+        th.sort-asc::after {
+            content: ' ▲';
+            opacity: 1;
+        }
+        th.sort-desc::after {
+            content: ' ▼';
+            opacity: 1;
         }
         td {
             padding: 16px 12px;
@@ -228,7 +247,11 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             <div id="content" style="display: none;">
                 <div class="summary">
                     <div class="summary-card">
-                        <div class="summary-label">Total Servers</div>
+                        <div class="summary-label">Total in Config</div>
+                        <div class="summary-value" id="config-total-servers">0</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Displayed</div>
                         <div class="summary-value" id="total-servers">0</div>
                     </div>
                     <div class="summary-card">
@@ -249,14 +272,15 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                     <table>
                         <thead>
                             <tr>
-                                <th>Server</th>
-                                <th>Status</th>
-                                <th>Protocol</th>
-                                <th>Retry Count</th>
-                                <th>Last Attempt</th>
-                                <th>Time to Connect</th>
-                                <th>Tools</th>
+                                <th class="sortable" data-sort="name">Server</th>
+                                <th class="sortable" data-sort="status">Status</th>
+                                <th class="sortable" data-sort="protocol">Protocol</th>
+                                <th class="sortable" data-sort="retry_count">Retry Count</th>
+                                <th class="sortable" data-sort="last_retry">Last Attempt</th>
+                                <th class="sortable" data-sort="time_to_connect">Time to Connect</th>
+                                <th class="sortable" data-sort="tool_count">Tools</th>
                                 <th>Error</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="servers-table"></tbody>
@@ -278,6 +302,31 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <script>
+        let currentServers = [];
+        let currentSort = loadSortPreference();
+
+        // Load sort preference from localStorage
+        function loadSortPreference() {
+            try {
+                const saved = localStorage.getItem('serversSortPreference');
+                if (saved) {
+                    return JSON.parse(saved);
+                }
+            } catch (e) {
+                console.error('Error loading sort preference:', e);
+            }
+            return { column: null, direction: 'asc' };
+        }
+
+        // Save sort preference to localStorage
+        function saveSortPreference() {
+            try {
+                localStorage.setItem('serversSortPreference', JSON.stringify(currentSort));
+            } catch (e) {
+                console.error('Error saving sort preference:', e);
+            }
+        }
+
         function getStatusClass(status) {
             const statusLower = status.toLowerCase();
             if (statusLower === 'ready') return 'status-ready';
@@ -288,14 +337,125 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
 
         function formatTimeSince(timeStr) {
             if (!timeStr) return '-';
+
             const date = new Date(timeStr);
+
+            // Check if date is invalid or too old (before year 2000)
+            if (isNaN(date.getTime()) || date.getFullYear() < 2000) {
+                return '-';
+            }
+
             const now = new Date();
             const diff = Math.floor((now - date) / 1000); // seconds
+
+            // If negative (future) or too large (> 1 year), show '-'
+            if (diff < 0 || diff > 31536000) {
+                return '-';
+            }
 
             if (diff < 60) return diff + 's ago';
             if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
             if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
             return Math.floor(diff / 86400) + 'd ago';
+        }
+
+        function sortServers(column) {
+            // Toggle direction if clicking same column
+            if (currentSort.column === column) {
+                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.column = column;
+                currentSort.direction = 'asc';
+            }
+
+            // Save preference
+            saveSortPreference();
+
+            // Sort the servers array
+            currentServers.sort((a, b) => {
+                let valA, valB;
+
+                switch(column) {
+                    case 'name':
+                        valA = (a.name || '').toLowerCase();
+                        valB = (b.name || '').toLowerCase();
+                        break;
+                    case 'status':
+                        valA = (a.status || '').toLowerCase();
+                        valB = (b.status || '').toLowerCase();
+                        break;
+                    case 'protocol':
+                        valA = (a.protocol || '').toLowerCase();
+                        valB = (b.protocol || '').toLowerCase();
+                        break;
+                    case 'retry_count':
+                        valA = a.retry_count || 0;
+                        valB = b.retry_count || 0;
+                        break;
+                    case 'last_retry':
+                        valA = a.last_retry_time ? new Date(a.last_retry_time).getTime() : 0;
+                        valB = b.last_retry_time ? new Date(b.last_retry_time).getTime() : 0;
+                        break;
+                    case 'time_to_connect':
+                        valA = a.time_to_connection || '';
+                        valB = b.time_to_connection || '';
+                        break;
+                    case 'tool_count':
+                        valA = a.tool_count || 0;
+                        valB = b.tool_count || 0;
+                        break;
+                    default:
+                        return 0;
+                }
+
+                if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
+                if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            // Update UI
+            updateTableWithCurrentData();
+            updateSortIndicators();
+        }
+
+        function updateSortIndicators() {
+            // Remove all sort classes
+            document.querySelectorAll('th.sortable').forEach(th => {
+                th.classList.remove('sort-asc', 'sort-desc');
+            });
+
+            // Add current sort class
+            if (currentSort.column) {
+                const th = document.querySelector('th[data-sort="' + currentSort.column + '"]');
+                if (th) {
+                    th.classList.add('sort-' + currentSort.direction);
+                }
+            }
+        }
+
+        function updateTableWithCurrentData() {
+            const tbody = document.getElementById('servers-table');
+            tbody.innerHTML = '';
+
+            currentServers.forEach(server => {
+                const row = document.createElement('tr');
+                const timeSince = formatTimeSince(server.last_retry_time);
+                const errorText = server.last_error || '-';
+                const toolCount = server.tool_count || 0;
+
+                row.innerHTML =
+                    '<td><span class="server-name">' + server.name + '</span><br><small>' + (server.url || server.command || '-') + '</small></td>' +
+                    '<td><span class="status-badge ' + getStatusClass(server.status) + '">' + server.status + '</span></td>' +
+                    '<td>' + (server.protocol || '-') + '</td>' +
+                    '<td>' + (server.retry_count || 0) + '</td>' +
+                    '<td>' + timeSince + '</td>' +
+                    '<td>' + (server.time_to_connection || '-') + '</td>' +
+                    '<td><strong>' + toolCount + '</strong></td>' +
+                    '<td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="' + errorText + '">' + errorText + '</td>' +
+                    '<td><a href="/server/chat?server=' + encodeURIComponent(server.name) + '" style="display: inline-block; padding: 6px 12px; background: #667eea; color: white; text-decoration: none; border-radius: 4px; font-size: 0.85em;">🤖 Chat</a></td>';
+
+                tbody.appendChild(row);
+            });
         }
 
         function refreshServers() {
@@ -310,34 +470,63 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                     }
 
                     // Update summary
+                    document.getElementById('config-total-servers').textContent = data.summary.config_total || 0;
                     document.getElementById('total-servers').textContent = data.summary.total;
                     document.getElementById('connected-servers').textContent = data.summary.connected;
                     document.getElementById('connecting-servers').textContent = data.summary.connecting;
                     document.getElementById('error-servers').textContent = data.summary.errors;
 
-                    // Update table
-                    const tbody = document.getElementById('servers-table');
-                    tbody.innerHTML = '';
+                    // Store servers and update table
+                    currentServers = data.servers;
 
-                    data.servers.forEach(server => {
-                        const row = document.createElement('tr');
+                    // Apply current sort if any
+                    if (currentSort.column) {
+                        // Apply sort without triggering save (already loaded from localStorage)
+                        currentServers.sort((a, b) => {
+                            let valA, valB;
 
-                        const timeSince = formatTimeSince(server.last_retry_time);
-                        const errorText = server.last_error || '-';
-                        const toolCount = server.tool_count || 0;
+                            switch(currentSort.column) {
+                                case 'name':
+                                    valA = (a.name || '').toLowerCase();
+                                    valB = (b.name || '').toLowerCase();
+                                    break;
+                                case 'status':
+                                    valA = (a.status || '').toLowerCase();
+                                    valB = (b.status || '').toLowerCase();
+                                    break;
+                                case 'protocol':
+                                    valA = (a.protocol || '').toLowerCase();
+                                    valB = (b.protocol || '').toLowerCase();
+                                    break;
+                                case 'retry_count':
+                                    valA = a.retry_count || 0;
+                                    valB = b.retry_count || 0;
+                                    break;
+                                case 'last_retry':
+                                    valA = a.last_retry_time ? new Date(a.last_retry_time).getTime() : 0;
+                                    valB = b.last_retry_time ? new Date(b.last_retry_time).getTime() : 0;
+                                    break;
+                                case 'time_to_connect':
+                                    valA = a.time_to_connection || '';
+                                    valB = b.time_to_connection || '';
+                                    break;
+                                case 'tool_count':
+                                    valA = a.tool_count || 0;
+                                    valB = b.tool_count || 0;
+                                    break;
+                                default:
+                                    return 0;
+                            }
 
-                        row.innerHTML =
-                            '<td><span class="server-name">' + server.name + '</span><br><small>' + (server.url || server.command || '-') + '</small></td>' +
-                            '<td><span class="status-badge ' + getStatusClass(server.status) + '">' + server.status + '</span></td>' +
-                            '<td><span class="protocol-badge">' + server.protocol + '</span></td>' +
-                            '<td>' + server.retry_count + '</td>' +
-                            '<td>' + timeSince + '</td>' +
-                            '<td>' + server.time_to_connection + '</td>' +
-                            '<td>' + toolCount + '</td>' +
-                            '<td><div class="error-message" title="' + errorText + '">' + errorText + '</div></td>';
-
-                        tbody.appendChild(row);
-                    });
+                            if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
+                            if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
+                            return 0;
+                        });
+                        updateTableWithCurrentData();
+                        updateSortIndicators();
+                    } else {
+                        updateTableWithCurrentData();
+                    }
 
                     // Show content, hide loading
                     document.getElementById('loading').style.display = 'none';
@@ -355,6 +544,14 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
 
         // Initial load
         refreshServers();
+
+        // Add click handlers to sortable headers (add once after initial load)
+        document.querySelectorAll('th.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                const sortColumn = th.getAttribute('data-sort');
+                sortServers(sortColumn);
+            });
+        });
 
         // Auto-refresh every 5 seconds
         setInterval(refreshServers, 5000);
@@ -375,22 +572,23 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Get total from config (source of truth)
+	configTotal := len(s.config.Servers)
+
 	var activeServers []ServerStatusData
 	summary := struct {
-		Total      int `json:"total"`
-		Connected  int `json:"connected"`
-		Connecting int `json:"connecting"`
-		Errors     int `json:"errors"`
-	}{}
+		Total       int `json:"total"`
+		ConfigTotal int `json:"config_total"` // Total servers in configuration
+		Connected   int `json:"connected"`
+		Connecting  int `json:"connecting"`
+		Errors      int `json:"errors"`
+	}{
+		ConfigTotal: configTotal, // Set total from config (source of truth)
+	}
 
 	startTime := time.Now()
 
 	for _, server := range allServers {
-		// Skip disabled and quarantined servers
-		if !server.Enabled || server.Quarantined {
-			continue
-		}
-
 		serverData := ServerStatusData{
 			Name:             server.Name,
 			Protocol:         server.Protocol,
@@ -405,8 +603,16 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 			ToolCount:        0,
 		}
 
+		// Show special status for disabled and quarantined servers
+		if !server.Enabled {
+			serverData.Status = "Disabled"
+		} else if server.Quarantined {
+			serverData.Status = "Quarantined"
+		}
+
 		// Get connection status from upstream manager
-		if s.upstreamManager != nil {
+		// Only update status for enabled, non-quarantined servers
+		if s.upstreamManager != nil && server.Enabled && !server.Quarantined {
 			if client, exists := s.upstreamManager.GetClient(server.Name); exists {
 				connectionStatus := client.GetConnectionStatus()
 
@@ -436,11 +642,16 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 					}
 				}
 				if lastRetryTime, ok := connectionStatus["last_retry_time"].(time.Time); ok {
-					serverData.LastRetryTime = lastRetryTime
-					if !lastRetryTime.IsZero() {
-						timeSince := time.Since(lastRetryTime)
-						serverData.TimeSinceLastTry = formatDuration(timeSince)
+					// Only show LastRetryTime for servers that are not Ready
+					// Ready servers should show "-" for Last Attempt
+					if serverData.Status != "Ready" {
+						serverData.LastRetryTime = lastRetryTime
+						if !lastRetryTime.IsZero() {
+							timeSince := time.Since(lastRetryTime)
+							serverData.TimeSinceLastTry = formatDuration(timeSince)
+						}
 					}
+					// For Ready servers, LastRetryTime stays zero (will display as "-")
 				}
 
 				// Calculate time to connection if we have both timing values

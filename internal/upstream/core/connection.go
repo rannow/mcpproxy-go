@@ -266,7 +266,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	}
 
 	if willUseDocker {
-		c.logger.Debug("Docker command detected, setting up container ID tracking",
+		c.logger.Debug("Docker command detected, setting up container ID tracking and labels",
 			zap.String("server", c.config.Name),
 			zap.String("command", c.config.Command),
 			zap.Strings("original_args", args))
@@ -287,6 +287,10 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				zap.String("server", c.config.Name),
 				zap.Error(err))
 		}
+
+		// Add mcpproxy tracking label for persistent container identification
+		// This survives mcpproxy crashes and enables cleanup via docker ps --filter
+		args = c.addDockerTrackingLabel(args)
 	}
 
 	// Determine final command and args based on isolation settings
@@ -2043,4 +2047,29 @@ func (c *Client) isDeferOAuthForTray() bool {
 	c.logger.Debug("Deferring OAuth during automatic connection attempt",
 		zap.String("server", c.config.Name))
 	return true
+}
+
+// addDockerTrackingLabel adds a label to Docker args for persistent container tracking
+// This enables reliable cleanup even after mcpproxy crashes
+func (c *Client) addDockerTrackingLabel(args []string) []string {
+	// Verify this is a docker run command
+	if len(args) < 1 || args[0] != "run" {
+		return args
+	}
+
+	// Create tracking label with server name
+	trackingLabel := fmt.Sprintf("--label=mcpproxy.server=%s", c.config.Name)
+
+	// Insert label after "run" command but before other flags/image
+	// Result: ["run", "--label=mcpproxy.server=aws-mcp-server", "-i", "--rm", "image"]
+	newArgs := make([]string, 0, len(args)+1)
+	newArgs = append(newArgs, args[0]) // "run"
+	newArgs = append(newArgs, trackingLabel)
+	newArgs = append(newArgs, args[1:]...)
+
+	c.logger.Debug("Added Docker tracking label",
+		zap.String("server", c.config.Name),
+		zap.String("label", trackingLabel))
+
+	return newArgs
 }

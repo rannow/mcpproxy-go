@@ -1,0 +1,23 @@
+═══════════════════════════════════════════════════════════════
+  FAST WORKSPACE ONEDRIVE CORRUPTION SCAN REPORT
+═══════════════════════════════════════════════════════════════
+
+Scan Date: So 19 Okt 2025 13:00:21 CEST
+Workspace Root: /Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server
+Scanner Version: 1.0 (Fast)
+
+Note: This scanner skips slow performance tests and focuses on
+      actual file corruption detection.
+
+═══════════════════════════════════════════════════════════════
+
+
+───────────────────────────────────────────────────────────────
+PROJECT: aws-mcp-server
+───────────────────────────────────────────────────────────────
+
+/Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server/aws-mcp-server/venv/lib/python3.12/site-packages/pip-24.3.1.dist-info/REQUESTED
+/Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server/aws-mcp-server/venv/lib/python3.12/site-packages/pip/_internal/utils/__init__.py
+/Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server/aws-mcp-server/venv/lib/python3.12/site-packages/pip/_internal/operations/__init__.py
+/Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server/aws-mcp-server/venv/lib/python3.12/site-packages/pip/_internal/operations/build/__init__.py
+/Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server/aws-mcp-server/venv/lib/python3.12/site-packages/pip/_internal/resolution/legacy/__init__.py

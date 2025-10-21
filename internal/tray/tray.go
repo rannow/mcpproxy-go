@@ -29,6 +29,8 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
+	"mcpproxy-go/internal/events"
+
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/server"
 	// "mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
@@ -48,8 +50,8 @@ var iconData []byte
 type ServerGroup struct {
 	ID          int      `json:"id"`
 	Name        string   `json:"name"`
-	Color       string   `json:"color"`       // Color emoji or hex code
-	ColorEmoji  string   `json:"color_emoji"` // Color emoji for display
+	Icon        string   `json:"icon_emoji"`  // Icon emoji for display
+	Color       string   `json:"color"`       // Color hex code
 	Description string   `json:"description"`
 	ServerNames []string `json:"server_names"`
 	Enabled     bool     `json:"enabled"`
@@ -118,6 +120,9 @@ type ServerInterface interface {
 	StopStartupScript() error
 	RestartStartupScript(ctx context.Context) error
 	GetStartupScriptStatus() map[string]interface{}
+
+	// Event bus for event-driven synchronization
+	GetEventBus() *events.EventBus
 }
 
 // App represents the system tray application
@@ -136,6 +141,7 @@ type App struct {
 	// Status-based server menus
 	connectedServersMenu    *systray.MenuItem
 	disconnectedServersMenu *systray.MenuItem
+	sleepingServersMenu     *systray.MenuItem
 	stoppedServersMenu      *systray.MenuItem
 	disabledServersMenu     *systray.MenuItem
 	quarantineMenu          *systray.MenuItem
@@ -144,9 +150,10 @@ type App struct {
 	// upstreamServersMenu *systray.MenuItem - REMOVED
 
 	// Managers for proper synchronization
-	stateManager *ServerStateManager
-	menuManager  *MenuManager
-	syncManager  *SynchronizationManager
+	stateManager    *ServerStateManager
+	menuManager     *MenuManager
+	syncManager     *SynchronizationManager
+	eventManager    *EventManager // Event-based synchronization
 	diagnosticAgent *DiagnosticAgent
 
 	// Chat system for multi-agent diagnostics
@@ -185,6 +192,7 @@ type App struct {
 
 	// Group management fields
 	groupManagementMenu *systray.MenuItem            // Group management menu
+	resourceMonitorMenu *systray.MenuItem            // Resource monitor menu
 	serverGroups        map[string]*ServerGroup      // Custom server groups
 	groupMenuItems      map[string]*systray.MenuItem // Group menu items
 }
@@ -460,6 +468,7 @@ func (a *App) onReady() {
 	// --- Status-Based Server Menus ---
 	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "")
 	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "")
+	a.sleepingServersMenu = systray.AddMenuItem("💤 Sleeping Servers", "Servers with lazy loading enabled")
 	a.stoppedServersMenu = systray.AddMenuItem("⏹️ Stopped Servers", "")
 	a.disabledServersMenu = systray.AddMenuItem("⏸️ Disabled Servers", "")
 	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "")
@@ -467,12 +476,24 @@ func (a *App) onReady() {
 
 	// --- Group Management Menu ---
 	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "")
+
+	// --- Resource Monitor Menu ---
+	a.resourceMonitorMenu = systray.AddMenuItem("📊 Resource Monitor", "View system resources and metrics")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.stoppedServersMenu, a.disabledServersMenu, a.quarantineMenu, nil, a.logger)
+	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.stoppedServersMenu, a.disabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
 	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar())
+
+	// Initialize event-based synchronization
+	if eventBus := a.server.GetEventBus(); eventBus != nil {
+		a.logger.Info("Event-based synchronization enabled")
+		a.eventManager = NewEventManager(eventBus, a.syncManager, a.menuManager, a.logger)
+		a.logger.Info("EventManager initialized successfully")
+	} else {
+		a.logger.Warn("Server does not provide EventBus, event-based sync not available")
+	}
 
 	// Initialize chat system
 	storage, err := NewFileChatStorage(a.logger.Desugar(), "")
@@ -613,6 +634,8 @@ func (a *App) onReady() {
                 }
 			case <-a.groupManagementMenu.ClickedCh:
 				a.openGroupManagementWeb()
+		case <-a.resourceMonitorMenu.ClickedCh:
+			a.openResourceMonitor()
 			case <-a.connectedServersMenu.ClickedCh:
 				a.handleServerMenuClick("connected")
 			case <-a.disconnectedServersMenu.ClickedCh:
@@ -1397,6 +1420,12 @@ func (a *App) openGroupManagementWeb() {
 	a.openFile(url, "group management web interface")
 }
 
+// openResourceMonitor opens the web interface for resource monitoring
+func (a *App) openResourceMonitor() {
+	url := "http://localhost:8080/"
+	a.openFile(url, "dashboard web interface")
+}
+
 // refreshMenusDelayed refreshes menus after a delay using the synchronization manager
 func (a *App) refreshMenusDelayed() {
 	// Reload groups from config when refreshing menus
@@ -1768,8 +1797,7 @@ func (a *App) saveGroupsToConfig() error {
 				"name":        group.Name,
 				"description": group.Description,
 				"color":       group.Color,
-				"color_emoji": group.ColorEmoji,
-				"enabled":     group.Enabled,
+					"enabled":     group.Enabled,
 			})
 		}
 	}
@@ -1841,8 +1869,7 @@ func (a *App) handleManageGroups() {
 	for name, group := range a.serverGroups {
 		a.logger.Info("Existing group",
 			zap.String("name", name),
-			zap.String("color", group.ColorEmoji),
-			zap.Int("servers", len(group.ServerNames)),
+						zap.Int("servers", len(group.ServerNames)),
 			zap.Bool("enabled", group.Enabled))
 	}
 }
@@ -1944,7 +1971,8 @@ func (a *App) refreshGroupsMenu() {
 	// Add each group to the menu
 	for groupName, group := range a.serverGroups {
 		if group.Enabled {
-			groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(group.ServerNames))
+			icon := group.Icon
+			groupTitle := fmt.Sprintf("%s %s (%d servers)", icon, groupName, len(group.ServerNames))
 			groupItem := a.groupManagementMenu.AddSubMenuItem(groupTitle, group.Description)
 
 			a.groupMenuItems[groupName] = groupItem
@@ -2025,8 +2053,9 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 	}
 
 	// Create edit interface
+	icon := group.Icon
 	editTitle := a.groupManagementMenu.AddSubMenuItem(
-		fmt.Sprintf("✏️ Editing: %s %s", group.ColorEmoji, groupName),
+		fmt.Sprintf("✏️ Editing: %s %s", icon, groupName),
 		"Edit group properties")
 	editTitle.Disable()
 
@@ -2060,7 +2089,7 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 	// Color editing
 	colorSection := a.groupManagementMenu.AddSubMenuItem("🎨 Change Color", "Change the group color")
 	currentColorItem := colorSection.AddSubMenuItem(
-		fmt.Sprintf("Current: %s %s", group.ColorEmoji, getColorName(group.ColorEmoji)),
+		fmt.Sprintf("Current: %s %s", group.Icon, getColorName(group.Icon)),
 		"Current group color")
 	currentColorItem.Disable()
 
@@ -2068,7 +2097,7 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 
 	// Show all available colors except current one
 	for _, colorOption := range GroupColors {
-		if colorOption.Emoji != group.ColorEmoji {
+		if colorOption.Emoji != group.Icon {
 			colorItem := colorSection.AddSubMenuItem(
 				fmt.Sprintf("%s %s", colorOption.Emoji, colorOption.Name),
 				fmt.Sprintf("Change color to %s", colorOption.Name))
@@ -2132,7 +2161,7 @@ func (a *App) handleRenameGroup(oldName, newName string) {
 
 	// Update group name
 	group.Name = newName
-	group.Description = fmt.Sprintf("Custom group for organizing servers - %s", getColorName(group.ColorEmoji))
+	group.Description = fmt.Sprintf("Custom group for organizing servers - %s", getColorName(group.Icon))
 
 	// Move group in map
 	a.serverGroups[newName] = group
@@ -2168,7 +2197,6 @@ func (a *App) handleChangeGroupColor(groupName string, newColor struct{ Emoji, N
 
 	// Update group color
 	group.Color = newColor.Code
-	group.ColorEmoji = newColor.Emoji
 	group.Description = fmt.Sprintf("Custom group for organizing servers - %s", newColor.Name)
 
 	// Save groups to configuration file
@@ -2656,7 +2684,6 @@ func (a *App) loadGroupsFromConfig() bool {
 
 				description, _ := group["description"].(string)
 				color, _ := group["color"].(string)
-				colorEmoji, _ := group["color_emoji"].(string)
 				enabled, _ := group["enabled"].(bool)
 				
 				// Set defaults
@@ -2666,16 +2693,12 @@ func (a *App) loadGroupsFromConfig() bool {
 				if color == "" {
 					color = "#6c757d"
 				}
-				if colorEmoji == "" {
-					colorEmoji = a.getColorEmojiForHex(color)
-				}
 				
 				a.serverGroups[name] = &ServerGroup{
 					ID:          int(id),
 					Name:        name,
 					Description: description,
 					Color:       color,
-					ColorEmoji:  colorEmoji,
 					ServerNames: make([]string, 0),
 					Enabled:     enabled,
 				}
@@ -2749,7 +2772,6 @@ func (a *App) syncWithAPIGroups() {
 			Name:        name,
 			Description: fmt.Sprintf("Synced from API: %s", name),
 			Color:       color,
-			ColorEmoji:  a.getColorEmoji(color),
 			ServerNames: make([]string, 0),
 			Enabled:     true,
 		}
@@ -2758,34 +2780,6 @@ func (a *App) syncWithAPIGroups() {
 	}
 
 	a.logger.Info("Synchronized with API groups", zap.Int("count", len(apiGroups)))
-}
-
-// getColorEmoji returns an emoji for a given hex color
-func (a *App) getColorEmoji(hexColor string) string {
-	// Map common hex colors to emojis
-	colorMap := map[string]string{
-		"#ff9900": "🟠", // AWS Orange
-		"#28a745": "🟢", // Green
-		"#dc3545": "🔴", // Red
-		"#6f42c1": "🟣", // Purple
-		"#6610f2": "🟣", // Purple (variant)
-		"#fd7e14": "🟠", // Orange
-		"#20c997": "🟢", // Teal (green)
-		"#e83e8c": "🩷", // Pink
-		"#ffc107": "🟡", // Yellow
-		"#6c757d": "⚫", // Gray (black)
-		"#343a40": "⚫", // Dark
-	}
-
-	// Convert to lowercase for comparison
-	hexColor = strings.ToLower(hexColor)
-	
-	if emoji, exists := colorMap[hexColor]; exists {
-		return emoji
-	}
-	
-	// Default to gray circle for unknown colors
-	return "⚫"
 }
 
 // fetchServerAssignments fetches server-to-group assignments
@@ -3035,7 +3029,8 @@ func (a *App) updateGroupManagementSubmenus() {
 		}
 
 		// Create group submenu title with server count
-		groupTitle := fmt.Sprintf("%s %s (%d servers)", group.ColorEmoji, groupName, len(assignedServers))
+		icon := group.Icon
+		groupTitle := fmt.Sprintf("%s %s (%d servers)", icon, groupName, len(assignedServers))
 		groupItem := a.groupManagementMenu.AddSubMenuItem(groupTitle, "")
 
 		// Add assigned servers as submenus under each group
@@ -3075,61 +3070,6 @@ func (a *App) updateGroupManagementSubmenus() {
 	a.logger.Info("Group Management submenus updated",
 		zap.Int("groups_count", len(a.serverGroups)),
 		zap.Int("assignments_count", len(assignments)))
-}
-
-// getColorEmojiForHex returns emoji for hex color
-func (a *App) getColorEmojiForHex(hex string) string {
-	a.logger.Debug("Converting hex color to emoji", zap.String("input_hex", hex))
-	
-	switch strings.ToLower(hex) {
-	case "#ff9900": return "🟠" // AWS Orange
-	case "#28a745": return "🟢" // Green
-	case "#dc3545": return "🔴" // Red
-	case "#6f42c1": return "🟣" // Purple
-	case "#6610f2": return "🟣" // Purple (variant)
-	case "#fd7e14": return "🟠" // Orange
-	case "#20c997": return "🟢" // Teal (green)
-	case "#e83e8c": 
-		a.logger.Debug("Matched pink color", zap.String("hex", hex))
-		return "🩷" // Pink
-	case "#ffc107": 
-		a.logger.Debug("Matched yellow color", zap.String("hex", hex))
-		return "🟡" // Yellow
-	case "#6c757d": return "⚫" // Gray (black)
-	case "#343a40": return "⚫" // Dark
-	default: 
-		a.logger.Debug("Using default gray for unknown color", zap.String("hex", hex))
-		return nearestEmojiForHex(hex)
-	}
-}
-
-// nearestEmojiForHex maps any hex to the closest emoji by HSV distance
-func nearestEmojiForHex(hex string) string {
-	r, g, b := parseHexColor(hex)
-	h, s, v := rgbToHsv(r, g, b)
-	// Basic mapping buckets
-	switch {
-	case v < 0.2:
-		return "⚫"
-	case s < 0.2 && v > 0.9:
-		return "⚪"
-	}
-	// Hue based
-	deg := h * 360
-	switch {
-	case deg < 20 || deg >= 340:
-		return "🔴"
-	case deg < 50:
-		return "🟠"
-	case deg < 70:
-		return "🟡"
-	case deg < 170:
-		return "🟢"
-	case deg < 260:
-		return "🔵"
-	default:
-		return "🟣"
-	}
 }
 
 // generateColorForGroup creates a deterministic vibrant color from group name

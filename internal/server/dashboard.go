@@ -124,9 +124,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
             </div>
 
             <div class="card">
-                <h3>🔧 Configure Servers</h3>
-                <p>Add, edit, and configure MCP server connections</p>
-                <a href="/configure-servers" class="card-button">Configure Servers</a>
+                <h3>🔧 Server Overview</h3>
+                <p>Monitor server connections, status, and performance metrics</p>
+                <a href="/servers" class="card-button">View Servers</a>
+            </div>
+
+            <div class="card" style="border-left-color: #6f42c1;">
+                <h3 style="color: #6f42c1;">🤖 AI Diagnostic Agent</h3>
+                <p>Chat with AI to diagnose and troubleshoot server issues</p>
+                <a href="/servers" class="card-button" style="background: #6f42c1;">Access Chat</a>
             </div>
 
             <div class="card">
@@ -139,6 +145,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
                 <h3>📈 Resource Metrics</h3>
                 <p>Monitor system performance and resource usage in real-time</p>
                 <a href="/metrics" class="card-button">View Metrics</a>
+            </div>
+
+            <div class="card metrics-card">
+                <h3>💻 Resource Monitor</h3>
+                <p>Advanced resource monitoring and system diagnostics</p>
+                <a href="/resources" class="card-button">Open Monitor</a>
             </div>
         </div>
 

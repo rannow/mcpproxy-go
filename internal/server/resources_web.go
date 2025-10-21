@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,6 +24,7 @@ type SystemResourcesData struct {
 	Memory           runtime.MemStats       `json:"memory"`
 	UpstreamServers  map[string]interface{} `json:"upstream_servers"`
 	ConnectedServers int                    `json:"connected_servers"` // Number of connected upstream servers
+	ProcessTree      []ProcessTreeNode      `json:"process_tree"`      // Process tree of mcpproxy and its children
 }
 
 type ProcessInfo struct {
@@ -56,6 +58,16 @@ type DockerContainer struct {
 	CPU     string   `json:"cpu"`
 	Memory  string   `json:"memory"`
 	Mounts  []string `json:"mounts"`
+}
+
+type ProcessTreeNode struct {
+	PID      int                `json:"pid"`
+	PPID     int                `json:"ppid"`
+	Command  string             `json:"command"`
+	CPU      string             `json:"cpu"`
+	Memory   string             `json:"memory"`
+	Runtime  string             `json:"runtime"`
+	Children []ProcessTreeNode  `json:"children"`
 }
 
 // ResourceHistory stores historical resource data in a ring buffer
@@ -233,20 +245,68 @@ func getDockerInfo() DockerInfo {
 		Containers: []DockerContainer{},
 	}
 
-	// Check if Docker is available
-	cmd := exec.Command("docker", "info")
+	// Check if Docker is available with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "info")
 	if err := cmd.Run(); err != nil {
-		return info // Docker not available
+		return info // Docker not available or timeout
 	}
 
-	// Get MCP containers
-	cmd = exec.Command("docker", "ps", "-a", "--filter", "name=mcp", "--format", "{{.ID}}|{{.Names}}|{{.Status}}")
+	// Get all mcpproxy-managed containers (by label) AND containers with "mcp" in name
+	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// First: Get containers with mcpproxy.server label
+	cmd = exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", "label=mcpproxy.server", "--format", "{{.ID}}|{{.Names}}|{{.Status}}|{{.Label \"mcpproxy.server\"}}")
 	output, err := cmd.Output()
+
+	containerMap := make(map[string]bool) // Track unique containers
+	var allLines []string
+
 	if err == nil {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		info.Total = len(lines)
-
 		for _, line := range lines {
+			if line != "" {
+				// Extract container ID (first field) for deduplication
+				parts := strings.Split(line, "|")
+				if len(parts) > 0 {
+					containerID := parts[0]
+					if !containerMap[containerID] {
+						containerMap[containerID] = true
+						allLines = append(allLines, line)
+					}
+				}
+			}
+		}
+	}
+
+	// Second: Get containers with "mcp" in name (for legacy compatibility)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+	cmd2 := exec.CommandContext(ctx2, "docker", "ps", "-a", "--filter", "name=mcp", "--format", "{{.ID}}|{{.Names}}|{{.Status}}|")
+	output2, err2 := cmd2.Output()
+
+	if err2 == nil {
+		lines := strings.Split(strings.TrimSpace(string(output2)), "\n")
+		for _, line := range lines {
+			if line != "" {
+				parts := strings.Split(line, "|")
+				if len(parts) > 0 {
+					containerID := parts[0]
+					if !containerMap[containerID] {
+						containerMap[containerID] = true
+						allLines = append(allLines, line)
+					}
+				}
+			}
+		}
+	}
+
+	info.Total = len(allLines)
+
+	if len(allLines) > 0 {
+		for _, line := range allLines {
 			if line == "" {
 				continue
 			}
@@ -258,9 +318,16 @@ func getDockerInfo() DockerInfo {
 					Status: parts[2],
 				}
 
-				// Get container stats
-				statsCmd := exec.Command("docker", "stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", container.ID)
+				// Add server name from label if available (4th field)
+				if len(parts) >= 4 && parts[3] != "" {
+					container.Name = parts[3] + " (" + parts[1] + ")"
+				}
+
+				// Get container stats with timeout (skip if it takes too long)
+				statsCtx, statsCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				statsCmd := exec.CommandContext(statsCtx, "docker", "stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", container.ID)
 				statsOutput, err := statsCmd.Output()
+				statsCancel()
 				if err == nil {
 					statsParts := strings.Split(strings.TrimSpace(string(statsOutput)), "|")
 					if len(statsParts) >= 2 {
@@ -269,9 +336,11 @@ func getDockerInfo() DockerInfo {
 					}
 				}
 
-				// Get container mounts
-				mountCmd := exec.Command("docker", "inspect", "--format", "{{range .Mounts}}{{.Source}}:{{.Destination}}|{{end}}", container.ID)
+				// Get container mounts with timeout
+				mountCtx, mountCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				mountCmd := exec.CommandContext(mountCtx, "docker", "inspect", "--format", "{{range .Mounts}}{{.Source}}:{{.Destination}}|{{end}}", container.ID)
 				mountOutput, err := mountCmd.Output()
+				mountCancel()
 				if err == nil {
 					mounts := strings.Split(strings.TrimSpace(string(mountOutput)), "|")
 					for _, mount := range mounts {
@@ -291,6 +360,92 @@ func getDockerInfo() DockerInfo {
 	}
 
 	return info
+}
+
+// getProcessTree builds a process tree starting from mcpproxy main process
+func getProcessTree() []ProcessTreeNode {
+	pid := os.Getpid()
+
+	// Get all child processes using ps
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Use ps to get process information for mcpproxy and all its descendants
+	// -o for custom format, -e for all processes
+	cmd := exec.CommandContext(ctx, "ps", "-eo", "pid,ppid,%cpu,%mem,etime,command")
+	output, err := cmd.Output()
+	if err != nil {
+		return []ProcessTreeNode{}
+	}
+
+	// Parse process list
+	lines := strings.Split(string(output), "\n")
+	processMap := make(map[int]*ProcessTreeNode)
+
+	for i, line := range lines {
+		if i == 0 || line == "" {
+			continue // Skip header and empty lines
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+
+		procPID, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+
+		cpu := fields[2]
+		mem := fields[3]
+		runtime := fields[4]
+		command := strings.Join(fields[5:], " ")
+
+		// Truncate very long commands
+		if len(command) > 150 {
+			command = command[:147] + "..."
+		}
+
+		node := &ProcessTreeNode{
+			PID:      procPID,
+			PPID:     ppid,
+			Command:  command,
+			CPU:      cpu,
+			Memory:   mem,
+			Runtime:  runtime,
+			Children: []ProcessTreeNode{},
+		}
+
+		processMap[procPID] = node
+	}
+
+	// Build tree structure - find mcpproxy and all its children
+	var tree []ProcessTreeNode
+
+	// Find mcpproxy main process
+	if mainProcess, exists := processMap[pid]; exists {
+		// Build children recursively
+		buildChildren(mainProcess, processMap)
+		tree = append(tree, *mainProcess)
+	}
+
+	return tree
+}
+
+// buildChildren recursively builds the process tree
+func buildChildren(node *ProcessTreeNode, processMap map[int]*ProcessTreeNode) {
+	for _, proc := range processMap {
+		if proc.PPID == node.PID {
+			buildChildren(proc, processMap)
+			node.Children = append(node.Children, *proc)
+		}
+	}
 }
 
 // handleResourcesWeb serves the comprehensive resources web interface
@@ -501,6 +656,66 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
             position: relative;
             height: 300px;
         }
+        .process-node {
+            margin: 8px 0;
+            padding: 12px;
+            background: white;
+            border-left: 3px solid #667eea;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .process-node.child {
+            margin-left: 30px;
+            border-left-color: #764ba2;
+        }
+        .process-node.grandchild {
+            margin-left: 60px;
+            border-left-color: #10b981;
+        }
+        .process-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .process-command {
+            font-weight: 600;
+            color: #333;
+            flex: 1;
+            min-width: 200px;
+        }
+        .process-stats {
+            display: flex;
+            gap: 15px;
+            font-size: 0.9em;
+        }
+        .process-stat {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #666;
+        }
+        .process-stat-label {
+            font-weight: 600;
+            color: #333;
+        }
+        .collapse-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+            margin-left: 10px;
+        }
+        .collapse-btn:hover {
+            background: #5568d3;
+        }
+        .children-container {
+            margin-top: 8px;
+        }
     </style>
 </head>
 <body>
@@ -597,6 +812,16 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
                             </thead>
                             <tbody id="docker-containers"></tbody>
                         </table>
+                    </div>
+                </div>
+
+                <!-- Process Tree -->
+                <div class="section">
+                    <h2 class="section-title">🌳 Process Tree</h2>
+                    <div class="table-container" id="process-tree-container">
+                        <div id="process-tree-content" style="padding: 20px; font-family: 'Courier New', monospace; background: #f8f9fa;">
+                            <!-- Process tree will be rendered here -->
+                        </div>
                     </div>
                 </div>
 
@@ -890,6 +1115,69 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
             return 'badge-warning';
         }
 
+        function renderProcessNode(node, depth) {
+            const nodeDiv = document.createElement('div');
+            nodeDiv.className = 'process-node';
+
+            // Add depth-specific classes
+            if (depth === 1) nodeDiv.classList.add('child');
+            if (depth >= 2) nodeDiv.classList.add('grandchild');
+
+            // Create process info container
+            const infoDiv = document.createElement('div');
+            infoDiv.className = 'process-info';
+
+            // Command and collapse button
+            const commandDiv = document.createElement('div');
+            commandDiv.className = 'process-command';
+
+            const icon = depth === 0 ? '🔷' : depth === 1 ? '└─' : '  └─';
+            commandDiv.innerHTML = icon + ' PID ' + node.pid + ': ' + node.command;
+
+            if (node.children && node.children.length > 0) {
+                const collapseBtn = document.createElement('button');
+                collapseBtn.className = 'collapse-btn';
+                collapseBtn.textContent = '▼ ' + node.children.length;
+                collapseBtn.onclick = function() {
+                    const childrenContainer = nodeDiv.querySelector('.children-container');
+                    if (childrenContainer.style.display === 'none') {
+                        childrenContainer.style.display = 'block';
+                        collapseBtn.textContent = '▼ ' + node.children.length;
+                    } else {
+                        childrenContainer.style.display = 'none';
+                        collapseBtn.textContent = '▶ ' + node.children.length;
+                    }
+                };
+                commandDiv.appendChild(collapseBtn);
+            }
+
+            // Stats
+            const statsDiv = document.createElement('div');
+            statsDiv.className = 'process-stats';
+            statsDiv.innerHTML =
+                '<div class="process-stat"><span class="process-stat-label">CPU:</span> ' + node.cpu + '%</div>' +
+                '<div class="process-stat"><span class="process-stat-label">MEM:</span> ' + node.memory + '%</div>' +
+                '<div class="process-stat"><span class="process-stat-label">Runtime:</span> ' + node.runtime + '</div>';
+
+            infoDiv.appendChild(commandDiv);
+            infoDiv.appendChild(statsDiv);
+            nodeDiv.appendChild(infoDiv);
+
+            // Render children
+            if (node.children && node.children.length > 0) {
+                const childrenContainer = document.createElement('div');
+                childrenContainer.className = 'children-container';
+
+                node.children.forEach(child => {
+                    childrenContainer.appendChild(renderProcessNode(child, depth + 1));
+                });
+
+                nodeDiv.appendChild(childrenContainer);
+            }
+
+            return nodeDiv;
+        }
+
         function refreshResources() {
             fetch('/api/resources/current')
                 .then(response => response.json())
@@ -942,6 +1230,18 @@ func (s *Server) handleResourcesWeb(w http.ResponseWriter, r *http.Request) {
                         });
                     } else {
                         document.getElementById('docker-table-container').style.display = 'none';
+                    }
+
+                    // Process Tree
+                    const processTreeContent = document.getElementById('process-tree-content');
+                    processTreeContent.innerHTML = '';
+
+                    if (data.process_tree && data.process_tree.length > 0) {
+                        data.process_tree.forEach(node => {
+                            processTreeContent.appendChild(renderProcessNode(node, 0));
+                        });
+                    } else {
+                        processTreeContent.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No process tree data available</p>';
                     }
 
                     // Show content, hide loading
@@ -1010,6 +1310,7 @@ func (s *Server) handleResourcesAPI(w http.ResponseWriter, r *http.Request) {
 		Memory:           memStats,
 		UpstreamServers:  upstreamStats,
 		ConnectedServers: connectedCount,
+		ProcessTree:      getProcessTree(),
 	}
 
 	// Add to history
