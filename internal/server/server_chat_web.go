@@ -359,6 +359,25 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
             border-radius: 6px;
             margin-bottom: 15px;
         }
+        .configure-button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .configure-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+        .configure-button:active {
+            transform: translateY(0);
+        }
     </style>
 </head>
 <body>
@@ -373,6 +392,7 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
             <div class="info-section">
                 <h3>📊 Server Status</h3>
                 <div id="server-info">Loading...</div>
+                <button class="configure-button" onclick="openConfigureServer()">⚙️ Configure Server</button>
             </div>
 
             <div class="info-section">
@@ -439,40 +459,70 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
         async function loadServerInfo() {
             try {
                 const response = await fetch('/api/servers');
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                }
+
                 const data = await response.json();
                 const server = data.servers.find(s => s.name === serverName);
 
-                if (server) {
-                    const statusClass = server.enabled ?
-                        (server.state === 'Ready' ? 'status-connected' : 'status-error') :
-                        'status-disabled';
-
-                    let html = '<div class="info-item">';
-                    html += '<div class="info-label">Status</div>';
-                    html += '<div class="info-value"><span class="status-badge ' + statusClass + '">' + (server.state || 'Unknown') + '</span></div>';
-                    html += '</div>';
-
-                    if (server.protocol) {
-                        html += '<div class="info-item"><div class="info-label">Protocol</div><div class="info-value">' + server.protocol + '</div></div>';
-                    }
-
-                    if (server.url) {
-                        html += '<div class="info-item"><div class="info-label">URL</div><div class="info-value">' + server.url + '</div></div>';
-                    }
-
-                    if (server.command) {
-                        html += '<div class="info-item"><div class="info-label">Command</div><div class="info-value">' + server.command + '</div></div>';
-                    }
-
-                    if (server.last_error) {
-                        html += '<div class="error-message"><strong>Last Error:</strong><br>' + server.last_error + '</div>';
-                    }
-
-                    document.getElementById('server-info').innerHTML = html;
+                if (!server) {
+                    document.getElementById('server-info').innerHTML =
+                        '<div class="error-message">Server "' + serverName + '" not found in configuration.<br><button onclick="loadServerInfo()" style="margin-top:10px;padding:6px 12px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;">Retry</button></div>';
+                    return;
                 }
+
+                const statusClass = server.enabled ?
+                    (server.state === 'Ready' ? 'status-connected' : 'status-error') :
+                    'status-disabled';
+
+                let html = '<div class="info-item">';
+                html += '<div class="info-label">Status</div>';
+                html += '<div class="info-value"><span class="status-badge ' + statusClass + '">' + (server.state || 'Unknown') + '</span></div>';
+                html += '</div>';
+
+                html += '<div class="info-item">';
+                html += '<div class="info-label">Enabled</div>';
+                html += '<div class="info-value">' + (server.enabled ? 'Yes' : 'No') + '</div>';
+                html += '</div>';
+
+                if (server.protocol) {
+                    html += '<div class="info-item"><div class="info-label">Protocol</div><div class="info-value">' + server.protocol + '</div></div>';
+                }
+
+                if (server.url) {
+                    html += '<div class="info-item"><div class="info-label">URL</div><div class="info-value" style="word-break:break-all;">' + server.url + '</div></div>';
+                }
+
+                if (server.command) {
+                    html += '<div class="info-item"><div class="info-label">Command</div><div class="info-value">' + server.command + '</div></div>';
+                }
+
+                if (server.working_dir) {
+                    html += '<div class="info-item"><div class="info-label">Working Dir</div><div class="info-value" style="word-break:break-all;">' + server.working_dir + '</div></div>';
+                }
+
+                if (server.quarantined) {
+                    html += '<div class="error-message">⚠️ <strong>Quarantined:</strong><br>Server is quarantined for security review</div>';
+                }
+
+                if (server.last_error) {
+                    html += '<div class="error-message"><strong>Last Error:</strong><br>' + server.last_error + '</div>';
+                }
+
+                document.getElementById('server-info').innerHTML = html;
             } catch (error) {
-                document.getElementById('server-info').innerHTML = '<div class="error-message">Failed to load server info</div>';
+                console.error('Failed to load server info:', error);
+                document.getElementById('server-info').innerHTML =
+                    '<div class="error-message"><strong>Failed to load server info</strong><br>' +
+                    'Error: ' + error.message +
+                    '<br><button onclick="loadServerInfo()" style="margin-top:10px;padding:6px 12px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;">Retry</button></div>';
             }
+        }
+
+        // Open configure server dialog
+        function openConfigureServer() {
+            window.location.href = '/servers/configure?server=' + encodeURIComponent(serverName);
         }
 
         // Load tools
@@ -686,10 +736,20 @@ func (s *Server) handleChatMessage(w http.ResponseWriter, r *http.Request) {
 		serverContext := s.buildServerContext(serverName)
 		systemPrompt := fmt.Sprintf(`You are an expert diagnostic agent for MCP (Model Context Protocol) servers.
 
+IMPORTANT: You have direct access to the following tools that you can call autonomously:
+
+Available Tools:
+- read_config: Read the mcp_config.json configuration file to analyze current server setup
+- write_config: Write/update the mcp_config.json file (automatically creates backups and reloads configuration)
+- read_log: Read server log files to view MCP communication, errors, and diagnostic information
+- read_github: Fetch documentation or README from GitHub repository URLs
+
+You can and should use these tools directly whenever needed. DO NOT suggest that the user should manually read files or execute commands.
+
 Your capabilities include:
-1. Configuration Analysis and Updates - Analyze and fix server configurations
-2. Log Analysis - Diagnose issues from logs and error messages
-3. Documentation Analysis - Help understand and implement server features from GitHub
+1. Configuration Analysis and Updates - Analyze and fix server configurations using read_config and write_config
+2. Log Analysis - Diagnose issues from logs using read_log
+3. Documentation Analysis - Fetch and analyze GitHub docs using read_github
 4. Installation Help - Guide users through server setup and installation
 5. Testing Assistance - Help test server functionality and troubleshoot issues
 6. Server Management - Start, stop, enable, disable servers
@@ -699,21 +759,28 @@ Your capabilities include:
 %s
 
 === Instructions ===
+Always use tools proactively - don't ask the user to do things you can do yourself.
+
+Example: When asked "Can you read the config?", immediately call the read_config tool instead of explaining how the user could read it manually.
+
 Please provide clear, actionable responses that:
 - Directly address the user's questions
-- Analyze server configuration and status when relevant
+- Use read_config tool to analyze server configuration and status
+- Use read_log tool to investigate errors and diagnostic information
+- Use write_config tool to fix configuration issues (automatic backup and reload)
+- Use read_github tool to fetch repository documentation
 - Identify potential issues from error messages or status
 - Provide specific steps or solutions when applicable
 - Include relevant code examples or configuration snippets when helpful
 - Suggest tool tests with example parameters if testing is needed
-- Reference GitHub repository documentation when available
 - Recommend next steps or follow-up actions
 
 If the server has errors:
 1. Explain what the error means
-2. Identify the root cause based on configuration and status
+2. Use read_config and read_log to identify the root cause
 3. Provide step-by-step fix instructions
-4. Suggest verification steps after fix
+4. Use write_config to apply the fix if needed
+5. Suggest verification steps after fix
 
 If testing tools:
 1. Explain what the tool does
@@ -730,8 +797,8 @@ If testing tools:
 	// Get all messages for OpenAI
 	messages := sessions.getMessages(sessionID)
 
-	// Call OpenAI API with full conversation history
-	response, err := s.callOpenAI(apiKey, messages)
+	// Call OpenAI API with full conversation history and tools support
+	response, err := s.callOpenAIWithTools(apiKey, messages)
 	if err != nil {
 		responseData := map[string]interface{}{
 			"error": fmt.Sprintf("AI request failed: %v", err),
