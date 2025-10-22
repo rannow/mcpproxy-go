@@ -118,11 +118,56 @@ func (s *Server) handleMetricsWeb(w http.ResponseWriter, r *http.Request) {
             border: 1px solid #dee2e6;
             border-radius: 6px;
             padding: 15px;
-            font-family: 'Courier New', monospace;
-            font-size: 0.85em;
             overflow-x: auto;
-            max-height: 400px;
+            max-height: 600px;
             overflow-y: auto;
+        }
+        .metric-section {
+            margin-bottom: 25px;
+        }
+        .metric-section h4 {
+            color: #28a745;
+            margin: 0 0 15px 0;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e9ecef;
+            font-size: 1.1em;
+        }
+        .metric-row {
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            padding: 8px 0;
+            border-bottom: 1px solid #f1f3f5;
+        }
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+        .metric-key {
+            color: #666;
+            font-weight: 500;
+        }
+        .metric-val {
+            color: #333;
+            font-family: 'Courier New', monospace;
+        }
+        .server-list {
+            display: grid;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .server-item {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            border-left: 3px solid #28a745;
+        }
+        .server-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .server-details {
+            font-size: 0.85em;
+            color: #666;
         }
         .update-time {
             text-align: center;
@@ -198,6 +243,75 @@ func (s *Server) handleMetricsWeb(w http.ResponseWriter, r *http.Request) {
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
+        function formatDetailedMetrics(data) {
+            const mem = data.memory_stats;
+            let html = '';
+
+            // System Information Section
+            html += '<div class="metric-section">';
+            html += '<h4>🖥️ System Information</h4>';
+            html += '<div class="metric-row"><div class="metric-key">Go Version</div><div class="metric-val">' + data.go_version + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">CPU Cores</div><div class="metric-val">' + data.num_cpu + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Goroutines</div><div class="metric-val">' + data.num_goroutines + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Uptime</div><div class="metric-val">' + data.uptime + '</div></div>';
+            html += '</div>';
+
+            // Memory Statistics Section
+            html += '<div class="metric-section">';
+            html += '<h4>💾 Memory Statistics</h4>';
+            html += '<div class="metric-row"><div class="metric-key">Allocated Memory</div><div class="metric-val">' + formatBytes(mem.Alloc) + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Total Allocated</div><div class="metric-val">' + formatBytes(mem.TotalAlloc) + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">System Memory</div><div class="metric-val">' + formatBytes(mem.Sys) + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Heap Allocated</div><div class="metric-val">' + formatBytes(mem.HeapAlloc) + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Heap System</div><div class="metric-val">' + formatBytes(mem.HeapSys) + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Heap In Use</div><div class="metric-val">' + formatBytes(mem.HeapInuse) + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Stack In Use</div><div class="metric-val">' + formatBytes(mem.StackInuse) + '</div></div>';
+            html += '</div>';
+
+            // Garbage Collection Section
+            html += '<div class="metric-section">';
+            html += '<h4>🗑️ Garbage Collection</h4>';
+            html += '<div class="metric-row"><div class="metric-key">GC Runs</div><div class="metric-val">' + mem.NumGC + '</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Last GC Pause</div><div class="metric-val">' + (mem.PauseNs[(mem.NumGC+255)%256] / 1000000).toFixed(2) + ' ms</div></div>';
+            html += '<div class="metric-row"><div class="metric-key">Next GC Target</div><div class="metric-val">' + formatBytes(mem.NextGC) + '</div></div>';
+            html += '</div>';
+
+            // Upstream Servers Section
+            if (data.upstream_servers && data.upstream_servers.servers) {
+                html += '<div class="metric-section">';
+                html += '<h4>🔌 Upstream Servers</h4>';
+                html += '<div class="metric-row"><div class="metric-key">Total Servers</div><div class="metric-val">' + (data.upstream_servers.total || 0) + '</div></div>';
+
+                if (data.upstream_servers.servers.length > 0) {
+                    html += '<div class="server-list">';
+                    data.upstream_servers.servers.forEach(server => {
+                        const statusClass = server.enabled ? 'status-running' : 'status-badge';
+                        const statusText = server.enabled ? '✓ Enabled' : '✗ Disabled';
+                        html += '<div class="server-item">';
+                        html += '<div class="server-name">' + server.name + ' <span class="status-badge ' + statusClass + '">' + statusText + '</span></div>';
+                        html += '<div class="server-details">Protocol: ' + (server.protocol || 'unknown') + '</div>';
+                        if (server.url) {
+                            html += '<div class="server-details">URL: ' + server.url + '</div>';
+                        }
+                        if (server.quarantined) {
+                            html += '<div class="server-details" style="color: #dc3545;">⚠️ Quarantined</div>';
+                        }
+                        html += '</div>';
+                    });
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+
+            // Tools Section
+            html += '<div class="metric-section">';
+            html += '<h4>🔧 Tool Index</h4>';
+            html += '<div class="metric-row"><div class="metric-key">Tools Indexed</div><div class="metric-val">' + (data.tools_indexed || 0) + '</div></div>';
+            html += '</div>';
+
+            return html;
+        }
+
         function refreshMetrics() {
             fetch('/api/metrics/current')
                 .then(response => response.json())
@@ -207,8 +321,8 @@ func (s *Server) handleMetricsWeb(w http.ResponseWriter, r *http.Request) {
                     document.getElementById('memAlloc').innerHTML = formatBytes(data.memory_stats.Alloc) + '<span class="metric-unit"> / ' + formatBytes(data.memory_stats.Sys) + '</span>';
                     document.getElementById('toolsIndexed').textContent = data.tools_indexed || 0;
 
-                    // Update detailed view
-                    document.getElementById('metricsData').textContent = JSON.stringify(data, null, 2);
+                    // Update detailed view with formatted HTML
+                    document.getElementById('metricsData').innerHTML = formatDetailedMetrics(data);
 
                     // Update timestamp
                     const now = new Date();
@@ -216,7 +330,7 @@ func (s *Server) handleMetricsWeb(w http.ResponseWriter, r *http.Request) {
                 })
                 .catch(error => {
                     console.error('Error fetching metrics:', error);
-                    document.getElementById('metricsData').textContent = 'Error loading metrics: ' + error.message;
+                    document.getElementById('metricsData').innerHTML = '<div style="color: #dc3545; padding: 20px;">Error loading metrics: ' + error.message + '</div>';
                 });
         }
 
