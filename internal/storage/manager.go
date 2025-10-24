@@ -499,3 +499,185 @@ func (m *Manager) GetToolStats(topN int) ([]map[string]interface{}, error) {
 
 	return result, nil
 }
+
+// SaveToolMetadata saves tool metadata to the database for lazy loading
+// Tools are stored with key: {serverID}:{toolName}
+func (m *Manager) SaveToolMetadata(serverID string, tools []*config.ToolMetadata) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolMetadataBucket))
+		if bucket == nil {
+			return fmt.Errorf("tool metadata bucket not found")
+		}
+
+		now := time.Now()
+
+		for _, tool := range tools {
+			record := &ToolMetadataRecord{
+				ServerID:     serverID,
+				ToolName:     tool.Name,
+				PrefixedName: fmt.Sprintf("%s:%s", serverID, tool.Name),
+				Description:  tool.Description,
+				InputSchema:  map[string]interface{}{}, // Store as empty map for now
+				Created:      now,
+				Updated:      now,
+			}
+
+			// If tool has ParamsJSON, store it in InputSchema as a marker
+			if tool.ParamsJSON != "" {
+				record.InputSchema = map[string]interface{}{
+					"_params_json": tool.ParamsJSON,
+				}
+			}
+
+			key := fmt.Sprintf("%s:%s", serverID, tool.Name)
+			data, err := record.MarshalBinary()
+			if err != nil {
+				return fmt.Errorf("failed to marshal tool metadata: %w", err)
+			}
+
+			if err := bucket.Put([]byte(key), data); err != nil {
+				return fmt.Errorf("failed to save tool metadata: %w", err)
+			}
+		}
+
+		m.logger.Infof("Saved %d tool metadata records for server %s", len(tools), serverID)
+		return nil
+	})
+}
+
+// GetToolMetadata retrieves tool metadata for a specific server from the database
+func (m *Manager) GetToolMetadata(serverID string) ([]*config.ToolMetadata, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var tools []*config.ToolMetadata
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolMetadataBucket))
+		if bucket == nil {
+			return fmt.Errorf("tool metadata bucket not found")
+		}
+
+		// Iterate through all tools for this server
+		prefix := []byte(serverID + ":")
+		cursor := bucket.Cursor()
+
+		for k, v := cursor.Seek(prefix); k != nil && len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = cursor.Next() {
+			var record ToolMetadataRecord
+			if err := record.UnmarshalBinary(v); err != nil {
+				m.logger.Warnf("Failed to unmarshal tool metadata for key %s: %v", string(k), err)
+				continue
+			}
+
+			// Extract ParamsJSON from InputSchema if it exists
+			paramsJSON := ""
+			if pj, ok := record.InputSchema["_params_json"].(string); ok {
+				paramsJSON = pj
+			}
+
+			tools = append(tools, &config.ToolMetadata{
+				Name:        record.PrefixedName, // Use prefixed name for consistency
+				ServerName:  record.ServerID,
+				Description: record.Description,
+				ParamsJSON:  paramsJSON,
+				Hash:        "",
+				Created:     record.Created,
+				Updated:     record.Updated,
+			})
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	m.logger.Debugf("Retrieved %d tool metadata records for server %s from database", len(tools), serverID)
+	return tools, nil
+}
+
+// GetAllToolMetadata retrieves all tool metadata from the database
+func (m *Manager) GetAllToolMetadata() ([]*config.ToolMetadata, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var tools []*config.ToolMetadata
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolMetadataBucket))
+		if bucket == nil {
+			return fmt.Errorf("tool metadata bucket not found")
+		}
+
+		return bucket.ForEach(func(k, v []byte) error {
+			var record ToolMetadataRecord
+			if err := record.UnmarshalBinary(v); err != nil {
+				m.logger.Warnf("Failed to unmarshal tool metadata for key %s: %v", string(k), err)
+				return nil // Continue to next record
+			}
+
+			// Extract ParamsJSON from InputSchema if it exists
+			paramsJSON := ""
+			if pj, ok := record.InputSchema["_params_json"].(string); ok {
+				paramsJSON = pj
+			}
+
+			tools = append(tools, &config.ToolMetadata{
+				Name:        record.PrefixedName,
+				ServerName:  record.ServerID,
+				Description: record.Description,
+				ParamsJSON:  paramsJSON,
+				Hash:        "",
+				Created:     record.Created,
+				Updated:     record.Updated,
+			})
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	m.logger.Debugf("Retrieved %d total tool metadata records from database", len(tools))
+	return tools, nil
+}
+
+// DeleteServerToolMetadata deletes all tool metadata for a specific server
+func (m *Manager) DeleteServerToolMetadata(serverID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolMetadataBucket))
+		if bucket == nil {
+			return fmt.Errorf("tool metadata bucket not found")
+		}
+
+		// Delete all tools with this server prefix
+		prefix := []byte(serverID + ":")
+		cursor := bucket.Cursor()
+
+		keysToDelete := [][]byte{}
+		for k, _ := cursor.Seek(prefix); k != nil && len(k) > 0 && string(k[:len(prefix)]) == string(prefix); k, _ = cursor.Next() {
+			// Copy the key since it will be invalid after cursor moves
+			keyCopy := make([]byte, len(k))
+			copy(keyCopy, k)
+			keysToDelete = append(keysToDelete, keyCopy)
+		}
+
+		// Delete the keys
+		for _, key := range keysToDelete {
+			if err := bucket.Delete(key); err != nil {
+				return fmt.Errorf("failed to delete tool metadata key %s: %w", string(key), err)
+			}
+		}
+
+		m.logger.Infof("Deleted %d tool metadata records for server %s", len(keysToDelete), serverID)
+		return nil
+	})
+}

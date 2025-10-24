@@ -512,6 +512,19 @@ func (mc *Client) performHealthCheck() {
 		return
 	}
 
+	// NOTE: Active health checks via ListTools are now OPT-IN only
+	// Only call ListTools if the server explicitly has HealthCheck enabled
+	// This prevents excessive ListTools calls across all connected servers
+	// Tools should only be loaded:
+	// 1. At startup (if StartOnBoot=true or lazy loading disabled)
+	// 2. Manual reload from tray UI
+	// 3. Health check intervals (if HealthCheck=true)
+	if !mc.Config.HealthCheck {
+		mc.logger.Debug("Skipping active health check (HealthCheck not enabled for this server)",
+			zap.String("server", mc.Config.Name))
+		return
+	}
+
 	// Create a short timeout for health check
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
