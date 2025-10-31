@@ -190,6 +190,39 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
         .info-section {
             margin-bottom: 20px;
         }
+        .info-section h3 {
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px;
+            margin: -10px -10px 10px -10px;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+        .info-section h3:hover {
+            background: #f8f9fa;
+        }
+        .info-section h3::after {
+            content: '▼';
+            font-size: 0.7em;
+            transition: transform 0.2s;
+            color: #666;
+        }
+        .info-section.collapsed h3::after {
+            transform: rotate(-90deg);
+        }
+        .info-section-content {
+            transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
+            overflow: hidden;
+            max-height: 2000px;
+            opacity: 1;
+        }
+        .info-section.collapsed .info-section-content {
+            max-height: 0;
+            opacity: 0;
+        }
         .info-item {
             margin-bottom: 10px;
             padding: 10px;
@@ -359,7 +392,7 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
             border-radius: 6px;
             margin-bottom: 15px;
         }
-        .configure-button {
+        .configure-button, .save-config-button {
             width: 100%;
             padding: 10px;
             margin-top: 10px;
@@ -371,12 +404,47 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
             cursor: pointer;
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        .configure-button:hover {
+        .configure-button:hover, .save-config-button:hover {
             transform: translateY(-1px);
             box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
         }
-        .configure-button:active {
+        .configure-button:active, .save-config-button:active {
             transform: translateY(0);
+        }
+        .save-config-button {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+        .config-field {
+            margin-bottom: 8px;
+            font-size: 0.85em;
+        }
+        .config-label {
+            font-weight: 600;
+            color: #666;
+            margin-bottom: 3px;
+            display: block;
+        }
+        .config-input, .config-select {
+            width: 100%;
+            padding: 6px 8px;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            font-size: 0.85em;
+            transition: border-color 0.2s;
+        }
+        .config-input:focus, .config-select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .config-checkbox {
+            margin-right: 6px;
+        }
+        .config-value {
+            color: #333;
+            word-break: break-word;
+            padding: 6px 8px;
+            background: #f8f9fa;
+            border-radius: 4px;
         }
     </style>
 </head>
@@ -390,27 +458,68 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
     <div class="container">
         <div class="sidebar">
             <div class="info-section">
-                <h3>📊 Server Status</h3>
-                <div id="server-info">Loading...</div>
-                <button class="configure-button" onclick="openConfigureServer()">⚙️ Configure Server</button>
+                <h3 onclick="toggleSection(this)">📊 Server Status</h3>
+                <div class="info-section-content">
+                    <div id="server-info">Loading...</div>
+                </div>
             </div>
 
             <div class="info-section">
-                <h3>🔧 Available Tools</h3>
-                <div id="tools-info">Loading...</div>
+                <h3 onclick="toggleSection(this)">⚙️ Configuration</h3>
+                <div class="info-section-content">
+                    <div id="config-info">Loading...</div>
+                    <button class="save-config-button" onclick="saveConfiguration()" style="display:none;">💾 Save Changes</button>
+                </div>
             </div>
 
             <div class="info-section">
-                <h3>ℹ️ Quick Actions</h3>
-                <div style="font-size: 0.85em; color: #666; line-height: 1.6;">
-                    Ask the AI agent to:
-                    <ul style="margin: 10px 0 0 20px;">
-                        <li>Analyze server configuration</li>
-                        <li>Diagnose connection errors</li>
-                        <li>Test specific tools</li>
-                        <li>Review server logs</li>
-                        <li>Suggest fixes</li>
-                    </ul>
+                <h3 onclick="toggleSection(this)">🔧 Available Tools</h3>
+                <div class="info-section-content">
+                    <div id="tools-info">Loading...</div>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <h3 onclick="toggleSection(this)">⚡ Quick Actions</h3>
+                <div class="info-section-content">
+                    <div id="quick-actions" style="font-size: 0.85em; line-height: 1.8;">
+                        <div id="quick-actions-links">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <h3 onclick="toggleSection(this)">💭 Conversation Context</h3>
+                <div class="info-section-content">
+                    <div id="contextInfo" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #f8f9fa; border-radius: 6px; font-size: 13px;">
+                        <div class="context-item">
+                            <span style="font-weight: 500;">📊 Messages:</span>
+                            <span id="contextMessages" style="margin-left: 8px; color: #495057;">Loading...</span>
+                        </div>
+                        <div class="context-item">
+                            <span style="font-weight: 500;">🔢 Estimated Tokens:</span>
+                            <span id="contextTokens" style="margin-left: 8px; color: #495057;">Loading...</span>
+                        </div>
+                        <div class="context-item">
+                            <span style="font-weight: 500;">✂️ Context Status:</span>
+                            <span id="contextStatus" style="margin-left: 8px; color: #495057;">Loading...</span>
+                        </div>
+                        <div class="context-item" id="pruningInfo" style="display: none;">
+                            <span style="font-weight: 500;">📉 Last Pruning:</span>
+                            <span id="pruningDetails" style="margin-left: 8px; color: #6c757d; font-size: 12px;">N/A</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <h3 onclick="toggleSection(this)">🔌 MCP Communication</h3>
+                <div class="info-section-content">
+                    <div id="mcpCommunications" style="max-height: 400px; overflow-y: auto;">
+                        <div style="color: #666; font-size: 0.9em; padding: 12px;">
+                            No MCP communications yet. Start a conversation to see protocol messages.
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -473,12 +582,12 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 }
 
                 const statusClass = server.enabled ?
-                    (server.state === 'Ready' ? 'status-connected' : 'status-error') :
+                    (server.connection_state === 'Ready' ? 'status-connected' : 'status-error') :
                     'status-disabled';
 
                 let html = '<div class="info-item">';
                 html += '<div class="info-label">Status</div>';
-                html += '<div class="info-value"><span class="status-badge ' + statusClass + '">' + (server.state || 'Unknown') + '</span></div>';
+                html += '<div class="info-value"><span class="status-badge ' + statusClass + '">' + (server.connection_state || 'Unknown') + '</span></div>';
                 html += '</div>';
 
                 html += '<div class="info-item">';
@@ -511,6 +620,9 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 }
 
                 document.getElementById('server-info').innerHTML = html;
+
+                // Display quick actions
+                displayQuickActions(server);
             } catch (error) {
                 console.error('Failed to load server info:', error);
                 document.getElementById('server-info').innerHTML =
@@ -520,9 +632,339 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
             }
         }
 
-        // Open configure server dialog
-        function openConfigureServer() {
-            window.location.href = '/servers/configure?server=' + encodeURIComponent(serverName);
+        // Display quick action links
+        function displayQuickActions(server) {
+            let html = '';
+
+            // Log File link
+            const logFile = '/Users/hrannow/Library/Logs/mcpproxy/server-' + encodeURIComponent(server.name) + '.log';
+            html += '<div style="margin-bottom: 8px;">';
+            html += '📄 <a href="#" onclick="openPath(\'' + logFile + '\'); return false;" style="color:#667eea;text-decoration:none;">Log File</a>';
+            html += '</div>';
+
+            // Configuration file link
+            html += '<div style="margin-bottom: 8px;">';
+            html += '⚙️ <a href="#" onclick="openPath(\'/Users/hrannow/.mcpproxy/mcp_config.json\'); return false;" style="color:#667eea;text-decoration:none;">Configuration</a>';
+            html += '</div>';
+
+            // Repository link (if available)
+            if (server.repository_url) {
+                html += '<div style="margin-bottom: 8px;">';
+                html += '🔗 <a href="' + server.repository_url + '" target="_blank" style="color:#667eea;text-decoration:none;">Repository</a>';
+                html += '</div>';
+            }
+
+            document.getElementById('quick-actions-links').innerHTML = html;
+        }
+
+        // Open path using API
+        async function openPath(path) {
+            try {
+                const response = await fetch('/api/open-path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    alert('Failed to open path: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Failed to open path:', error);
+                alert('Failed to open path: ' + error.message);
+            }
+        }
+
+        // Toggle section collapse state
+        function toggleSection(headerElement) {
+            const section = headerElement.parentElement;
+            section.classList.toggle('collapsed');
+        }
+
+        // Current server configuration
+        let currentConfig = null;
+        let configModified = false;
+
+        // Load server configuration
+        async function loadConfiguration() {
+            try {
+                const response = await fetch('/api/servers');
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                }
+
+                const data = await response.json();
+                const server = data.servers.find(s => s.name === serverName);
+
+                if (!server) {
+                    document.getElementById('config-info').innerHTML =
+                        '<div class="error-message">Server configuration not found</div>';
+                    return;
+                }
+
+                currentConfig = server;
+                displayConfiguration(server);
+            } catch (error) {
+                console.error('Failed to load configuration:', error);
+                document.getElementById('config-info').innerHTML =
+                    '<div class="error-message">Failed to load configuration<br>' + error.message + '</div>';
+            }
+        }
+
+        // Display configuration fields
+        function displayConfiguration(server) {
+            let html = '';
+
+            // Enabled
+            html += '<div class="config-field">';
+            html += '<label class="config-label"><input type="checkbox" class="config-checkbox" id="cfg-enabled" ' +
+                    (server.enabled ? 'checked' : '') + ' onchange="markConfigModified()"> Enabled</label>';
+            html += '</div>';
+
+            // Description
+            html += '<div class="config-field">';
+            html += '<span class="config-label">Description</span>';
+            html += '<input type="text" class="config-input" id="cfg-description" value="' + (server.description || '') + '" onchange="markConfigModified()" placeholder="Optional description">';
+            html += '</div>';
+
+            // Protocol
+            html += '<div class="config-field">';
+            html += '<span class="config-label">Protocol</span>';
+            html += '<select class="config-select" id="cfg-protocol" onchange="markConfigModified();toggleProtocolFields()">';
+            ['stdio', 'http', 'sse', 'streamable-http'].forEach(function(proto) {
+                html += '<option value="' + proto + '"' + (server.protocol === proto ? ' selected' : '') + '>' + proto + '</option>';
+            });
+            html += '</select>';
+            html += '</div>';
+
+            // stdio fields
+            html += '<div id="stdio-fields" style="' + (server.protocol === 'stdio' ? '' : 'display:none;') + '">';
+
+            html += '<div class="config-field">';
+            html += '<span class="config-label">Command</span>';
+            html += '<input type="text" class="config-input" id="cfg-command" value="' + (server.command || '') + '" onchange="markConfigModified()">';
+            html += '</div>';
+
+            // Arguments
+            html += '<div class="config-field">';
+            html += '<span class="config-label">Arguments</span>';
+            html += '<div id="args-list" style="display: flex; flex-direction: column; gap: 8px;">';
+            if (server.args && server.args.length > 0) {
+                server.args.forEach(function(arg, idx) {
+                    html += '<div class="arg-row" style="display: flex; gap: 8px;">';
+                    html += '<input type="text" class="config-input arg-input" data-index="' + idx + '" value="' + arg + '" onchange="markConfigModified()" placeholder="Argument">';
+                    html += '<button type="button" class="remove-btn" onclick="removeArg(' + idx + ')" style="padding: 6px 12px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">Remove</button>';
+                    html += '</div>';
+                });
+            }
+            html += '</div>';
+            html += '<button type="button" onclick="addArg()" style="margin-top: 8px; padding: 6px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">Add Argument</button>';
+            html += '</div>';
+
+            html += '<div class="config-field">';
+            html += '<span class="config-label">Working Directory</span>';
+            html += '<input type="text" class="config-input" id="cfg-working-dir" value="' + (server.working_dir || '') + '" onchange="markConfigModified()" placeholder="Optional">';
+            html += '</div>';
+
+            // Environment Variables
+            html += '<div class="config-field">';
+            html += '<span class="config-label">Environment Variables</span>';
+            html += '<div id="env-list" style="display: flex; flex-direction: column; gap: 8px;">';
+            if (server.env && Object.keys(server.env).length > 0) {
+                Object.keys(server.env).forEach(function(key) {
+                    html += '<div class="env-row" style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px;">';
+                    html += '<input type="text" class="config-input env-key" value="' + key + '" onchange="markConfigModified()" placeholder="Variable name">';
+                    html += '<input type="text" class="config-input env-value" value="' + (server.env[key] || '') + '" onchange="markConfigModified()" placeholder="Value">';
+                    html += '<button type="button" class="remove-btn" onclick="removeEnv(this)" style="padding: 6px 12px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">Remove</button>';
+                    html += '</div>';
+                });
+            }
+            html += '</div>';
+            html += '<button type="button" onclick="addEnv()" style="margin-top: 8px; padding: 6px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">Add Variable</button>';
+            html += '</div>';
+
+            html += '</div>';
+
+            // HTTP fields
+            html += '<div id="http-fields" style="' + (server.protocol !== 'stdio' ? '' : 'display:none;') + '">';
+
+            html += '<div class="config-field">';
+            html += '<span class="config-label">URL</span>';
+            html += '<input type="text" class="config-input" id="cfg-url" value="' + (server.url || '') + '" onchange="markConfigModified()">';
+            html += '</div>';
+
+            html += '</div>';
+
+            // Repository URL
+            html += '<div class="config-field">';
+            html += '<span class="config-label">Repository URL</span>';
+            html += '<input type="text" class="config-input" id="cfg-repo-url" value="' + (server.repository_url || '') + '" onchange="markConfigModified()" placeholder="Optional">';
+            html += '</div>';
+
+            // Quarantined
+            if (server.quarantined !== undefined) {
+                html += '<div class="config-field">';
+                html += '<label class="config-label"><input type="checkbox" class="config-checkbox" id="cfg-quarantined" ' +
+                        (server.quarantined ? 'checked' : '') + ' onchange="markConfigModified()"> Quarantined</label>';
+                html += '</div>';
+            }
+
+            // Start on Boot
+            html += '<div class="config-field">';
+            html += '<label class="config-label"><input type="checkbox" class="config-checkbox" id="cfg-start-on-boot" ' +
+                    (server.start_on_boot ? 'checked' : '') + ' onchange="markConfigModified()"> Start on Boot</label>';
+            html += '</div>';
+
+            // Health Check
+            html += '<div class="config-field">';
+            html += '<label class="config-label"><input type="checkbox" class="config-checkbox" id="cfg-health-check" ' +
+                    (server.health_check ? 'checked' : '') + ' onchange="markConfigModified()"> Health Check</label>';
+            html += '</div>';
+
+            document.getElementById('config-info').innerHTML = html;
+        }
+
+        // Toggle protocol-specific fields
+        function toggleProtocolFields() {
+            const protocol = document.getElementById('cfg-protocol').value;
+            const isStdio = protocol === 'stdio';
+
+            const stdioFields = document.getElementById('stdio-fields');
+            const httpFields = document.getElementById('http-fields');
+
+            if (stdioFields) stdioFields.style.display = isStdio ? '' : 'none';
+            if (httpFields) httpFields.style.display = isStdio ? 'none' : '';
+        }
+
+        // Add argument field
+        function addArg() {
+            const argsList = document.getElementById('args-list');
+            const idx = argsList.children.length;
+            const div = document.createElement('div');
+            div.className = 'arg-row';
+            div.style.cssText = 'display: flex; gap: 8px;';
+            div.innerHTML = '<input type="text" class="config-input arg-input" data-index="' + idx + '" onchange="markConfigModified()" placeholder="Argument">' +
+                           '<button type="button" class="remove-btn" onclick="removeArg(' + idx + ')" style="padding: 6px 12px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">Remove</button>';
+            argsList.appendChild(div);
+            markConfigModified();
+        }
+
+        // Remove argument field
+        function removeArg(idx) {
+            const rows = document.querySelectorAll('.arg-row');
+            if (rows[idx]) {
+                rows[idx].remove();
+                markConfigModified();
+            }
+        }
+
+        // Add environment variable field
+        function addEnv() {
+            const envList = document.getElementById('env-list');
+            const div = document.createElement('div');
+            div.className = 'env-row';
+            div.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px;';
+            div.innerHTML = '<input type="text" class="config-input env-key" onchange="markConfigModified()" placeholder="Variable name">' +
+                           '<input type="text" class="config-input env-value" onchange="markConfigModified()" placeholder="Value">' +
+                           '<button type="button" class="remove-btn" onclick="removeEnv(this)" style="padding: 6px 12px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">Remove</button>';
+            envList.appendChild(div);
+            markConfigModified();
+        }
+
+        // Remove environment variable field
+        function removeEnv(btn) {
+            btn.parentElement.remove();
+            markConfigModified();
+        }
+
+        // Mark configuration as modified
+        function markConfigModified() {
+            configModified = true;
+            document.querySelector('.save-config-button').style.display = 'block';
+        }
+
+        // Save configuration
+        async function saveConfiguration() {
+            if (!currentConfig) {
+                alert('No configuration loaded');
+                return;
+            }
+
+            try {
+                // Collect arguments
+                const args = [];
+                document.querySelectorAll('.arg-input').forEach(input => {
+                    if (input.value.trim()) {
+                        args.push(input.value.trim());
+                    }
+                });
+
+                // Collect environment variables
+                const env = {};
+                document.querySelectorAll('.env-row').forEach(row => {
+                    const key = row.querySelector('.env-key').value.trim();
+                    const value = row.querySelector('.env-value').value.trim();
+                    if (key) {
+                        env[key] = value;
+                    }
+                });
+
+                // Build updated config from form fields
+                const updatedConfig = {
+                    name: serverName,
+                    description: document.getElementById('cfg-description')?.value || '',
+                    enabled: document.getElementById('cfg-enabled').checked,
+                    protocol: document.getElementById('cfg-protocol').value,
+                    command: document.getElementById('cfg-command')?.value || '',
+                    args: args,
+                    working_dir: document.getElementById('cfg-working-dir')?.value || '',
+                    env: env,
+                    url: document.getElementById('cfg-url')?.value || '',
+                    repository_url: document.getElementById('cfg-repo-url')?.value || '',
+                    quarantined: document.getElementById('cfg-quarantined')?.checked || false,
+                    start_on_boot: document.getElementById('cfg-start-on-boot')?.checked || false,
+                    health_check: document.getElementById('cfg-health-check')?.checked || false
+                };
+
+                // Send update request
+                const response = await fetch('/api/servers/' + encodeURIComponent(serverName) + '/config', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(updatedConfig)
+                });
+
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                }
+
+                // Reload everything
+                configModified = false;
+                document.querySelector('.save-config-button').style.display = 'none';
+
+                await Promise.all([
+                    loadServerInfo(),
+                    loadConfiguration()
+                ]);
+
+                alert('Configuration saved successfully!');
+            } catch (error) {
+                console.error('Failed to save configuration:', error);
+                alert('Failed to save configuration: ' + error.message);
+            }
+        }
+
+        // Auto-refresh configuration when agent makes changes
+        function startConfigAutoRefresh() {
+            setInterval(async function() {
+                if (!configModified) {
+                    // Only refresh if user hasn't made manual changes
+                    await loadConfiguration();
+                    await loadServerInfo();
+                }
+            }, 5000); // Check every 5 seconds
         }
 
         // Load tools
@@ -532,17 +974,15 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 const data = await response.json();
 
                 if (data.tools && data.tools.length > 0) {
-                    let html = '<div class="tools-list">';
-                    data.tools.slice(0, 10).forEach(tool => {
+                    let html = '<div class="tools-list" style="max-height: 400px; overflow-y: auto;">';
+                    html += '<div style="padding: 8px; color: #666; font-size: 0.85em; border-bottom: 1px solid #e9ecef;">Total: ' + data.tools.length + ' tools</div>';
+                    data.tools.forEach(tool => {
                         html += '<div class="tool-item">' + tool.name;
                         if (tool.description) {
-                            html += '<br><span style="color: #666; font-size: 0.9em;">' + tool.description.substring(0, 100) + '</span>';
+                            html += '<br><span style="color: #666; font-size: 0.9em;">' + tool.description.substring(0, 100) + (tool.description.length > 100 ? '...' : '') + '</span>';
                         }
                         html += '</div>';
                     });
-                    if (data.tools.length > 10) {
-                        html += '<div style="text-align: center; padding: 8px; color: #666; font-size: 0.85em;">... and ' + (data.tools.length - 10) + ' more</div>';
-                    }
                     html += '</div>';
                     document.getElementById('tools-info').innerHTML = html;
                 } else {
@@ -596,12 +1036,66 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 } else {
                     addMessage('agent', data.response);
                 }
+
+                // Display MCP communications if available
+                if (data.mcp_communications && data.mcp_communications.length > 0) {
+                    displayMCPCommunications(data.mcp_communications);
+                }
             } catch (error) {
                 addMessage('agent', 'Error: Failed to communicate with AI agent. Make sure OPENAI_API_KEY is set.', true);
             } finally {
                 document.getElementById('loading').classList.remove('active');
                 document.getElementById('send-button').disabled = false;
+                // Update context info after message is processed
+                updateContextInfo();
             }
+        }
+
+        // Display MCP communications in sidebar
+        function displayMCPCommunications(communications) {
+            const mcpDiv = document.getElementById('mcpCommunications');
+
+            // Clear placeholder if it's the first communication
+            if (mcpDiv.querySelector('[style*="No MCP communications"]')) {
+                mcpDiv.innerHTML = '';
+            }
+
+            communications.forEach(comm => {
+                const commDiv = document.createElement('div');
+                commDiv.style.cssText = 'padding: 10px; margin-bottom: 8px; background: #f8f9fa; border-left: 3px solid ' +
+                    (comm.error ? '#dc3545' : '#667eea') + '; border-radius: 4px; font-size: 12px;';
+
+                let html = '<div style="margin-bottom: 6px;">';
+                html += '<strong style="color: #495057;">' + comm.server + ' : ' + comm.tool + '</strong>';
+                html += '<span style="float: right; color: #6c757d; font-size: 11px;">' + new Date(comm.timestamp).toLocaleTimeString() + '</span>';
+                html += '</div>';
+
+                if (comm.error) {
+                    html += '<div style="color: #dc3545; margin-top: 4px;">❌ Error: ' + comm.error + '</div>';
+                }
+
+                // Add collapsible request section
+                html += '<details style="margin-top: 4px;">';
+                html += '<summary style="cursor: pointer; color: #667eea; font-weight: 500;">📤 Request</summary>';
+                html += '<pre style="background: white; padding: 8px; margin-top: 4px; border-radius: 4px; overflow-x: auto; font-size: 11px;">' +
+                    JSON.stringify(comm.request, null, 2) + '</pre>';
+                html += '</details>';
+
+                // Add collapsible response section if available
+                if (comm.response) {
+                    html += '<details style="margin-top: 4px;">';
+                    html += '<summary style="cursor: pointer; color: #10b981; font-weight: 500;">📥 Response</summary>';
+                    html += '<pre style="background: white; padding: 8px; margin-top: 4px; border-radius: 4px; overflow-x: auto; font-size: 11px;">' +
+                        JSON.stringify(comm.response, null, 2) + '</pre>';
+                    html += '</details>';
+                }
+
+                commDiv.innerHTML = html;
+                mcpDiv.appendChild(commDiv);
+            });
+
+            // Scroll to bottom of MCP communications
+            mcpDiv.scrollTop = mcpDiv.scrollHeight;
         }
 
         // Add message to chat
@@ -638,6 +1132,68 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
 
+        // Update context information
+        function updateContextInfo() {
+            if (!sessionId) {
+                return;
+            }
+
+            fetch('/chat/context?session_id=' + sessionId)
+            .then(response => response.json())
+            .then(data => {
+                // Update message count
+                const messagesEl = document.getElementById('contextMessages');
+                messagesEl.textContent = data.total_messages + ' messages';
+                messagesEl.style.color = data.total_messages > 50 ? '#dc3545' : '#495057';
+
+                // Update token count
+                const tokensEl = document.getElementById('contextTokens');
+                tokensEl.textContent = data.estimated_tokens.toLocaleString() + ' tokens';
+
+                // Color code based on token usage
+                const tokenPercentage = data.estimated_tokens / data.max_tokens;
+                if (tokenPercentage > 0.8) {
+                    tokensEl.style.color = '#dc3545'; // Red
+                } else if (tokenPercentage > 0.6) {
+                    tokensEl.style.color = '#ffc107'; // Yellow
+                } else {
+                    tokensEl.style.color = '#28a745'; // Green
+                }
+
+                // Update context status
+                const statusEl = document.getElementById('contextStatus');
+                if (data.pruning_active) {
+                    statusEl.textContent = '✂️ Pruning Active';
+                    statusEl.style.color = '#ffc107';
+                    statusEl.style.fontWeight = '600';
+                } else {
+                    statusEl.textContent = '✅ Normal';
+                    statusEl.style.color = '#28a745';
+                }
+
+                // Show/hide pruning info
+                const pruningInfoEl = document.getElementById('pruningInfo');
+                const pruningDetailsEl = document.getElementById('pruningDetails');
+
+                if (data.last_pruning) {
+                    pruningInfoEl.style.display = 'block';
+                    const saved = data.last_pruning.tokens_saved || 0;
+                    const original = data.last_pruning.original_messages || 0;
+                    const pruned = data.last_pruning.pruned_messages || 0;
+
+                    pruningDetailsEl.textContent =
+                        saved.toLocaleString() + ' tokens saved (' +
+                        original + ' → ' + pruned + ' msgs)';
+                } else {
+                    pruningInfoEl.style.display = 'none';
+                }
+            })
+            .catch(error => {
+                console.log('Context update error:', error);
+                // Don't show errors to user - just log them
+            });
+        }
+
         // Event listeners
         document.getElementById('send-button').addEventListener('click', sendMessage);
         document.getElementById('chat-input').addEventListener('keypress', (e) => {
@@ -646,7 +1202,15 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
 
         // Load initial data
         loadServerInfo();
+        loadConfiguration();
         loadTools();
+
+        // Start auto-refresh
+        startConfigAutoRefresh();
+
+        // Initialize context monitoring
+        updateContextInfo();
+        setInterval(updateContextInfo, 5000); // Update every 5 seconds
     </script>
 </body>
 </html>`
@@ -714,14 +1278,21 @@ func (s *Server) handleChatMessage(w http.ResponseWriter, r *http.Request) {
 	serverName = strings.Split(serverName, "_")[0]
 
 	// Check for OpenAI API key
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_KEY")
+	// Priority: Config file (.env or mcp_config.json) > Environment variables
+	apiKey := ""
+	if s.config.LLM != nil && s.config.LLM.OpenAIKey != "" {
+		apiKey = s.config.LLM.OpenAIKey
+	} else {
+		// Fallback to environment variables
+		apiKey = os.Getenv("OPENAI_API_KEY")
+		if apiKey == "" {
+			apiKey = os.Getenv("OPENAI_KEY")
+		}
 	}
 
 	if apiKey == "" {
 		responseData := map[string]interface{}{
-			"error": "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.",
+			"error": "OpenAI API key not configured. Please set OPENAI_API_KEY in .env file or environment variable.",
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responseData)
@@ -738,13 +1309,17 @@ func (s *Server) handleChatMessage(w http.ResponseWriter, r *http.Request) {
 
 IMPORTANT: You have direct access to the following tools that you can call autonomously:
 
-Available Tools:
+Built-in Diagnostic Tools:
 - read_config: Read the mcp_config.json configuration file to analyze current server setup
 - write_config: Write/update the mcp_config.json file (automatically creates backups and reloads configuration)
 - read_log: Read server log files to view MCP communication, errors, and diagnostic information
 - read_github: Fetch documentation or README from GitHub repository URLs
 
-You can and should use these tools directly whenever needed. DO NOT suggest that the user should manually read files or execute commands.
+Server-Specific Tools:
+All tools from the %s server are also available and can be called directly.
+These server-specific tools are prefixed with the server name (e.g., %s:tool_name).
+
+You can and should use these tools directly whenever needed. DO NOT suggest that the user should manually execute tools or commands.
 
 Your capabilities include:
 1. Configuration Analysis and Updates - Analyze and fix server configurations using read_config and write_config
@@ -760,6 +1335,13 @@ Your capabilities include:
 
 === Instructions ===
 Always use tools proactively - don't ask the user to do things you can do yourself.
+
+EFFICIENCY GUIDELINES:
+- You have a maximum of 10 tool call iterations per response
+- Use tools efficiently - call only what's necessary to answer the question
+- When creating and testing tools, do it in ONE iteration: create test → execute test → return results
+- If a task requires many tool calls, break it into smaller steps and complete the most critical parts first
+- After tool calls, provide a complete answer - don't make additional tool calls unless absolutely necessary
 
 Example: When asked "Can you read the config?", immediately call the read_config tool instead of explaining how the user could read it manually.
 
@@ -786,7 +1368,7 @@ If testing tools:
 1. Explain what the tool does
 2. Suggest appropriate test parameters
 3. Explain expected results
-4. Help interpret actual results`, serverContext)
+4. Help interpret actual results`, serverName, serverName, serverContext)
 
 		sessions.addMessage(sessionID, "system", systemPrompt)
 	}
@@ -797,11 +1379,17 @@ If testing tools:
 	// Get all messages for OpenAI
 	messages := sessions.getMessages(sessionID)
 
+	// Prune messages if context is too large (keep system prompt + recent messages)
+	// More aggressive pruning: target 40K tokens to account for OpenAI's tokenization
+	// and leave room for function definitions (~151 tokens) + response (~2000 tokens)
+	messages = pruneMessages(messages, 40000)
+
 	// Call OpenAI API with full conversation history and tools support
-	response, err := s.callOpenAIWithTools(apiKey, messages)
+	response, mcpCommunications, err := s.callOpenAIWithTools(apiKey, messages, serverName)
 	if err != nil {
 		responseData := map[string]interface{}{
-			"error": fmt.Sprintf("AI request failed: %v", err),
+			"error":               fmt.Sprintf("AI request failed: %v", err),
+			"mcp_communications":  mcpCommunications,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responseData)
@@ -812,11 +1400,80 @@ If testing tools:
 	sessions.addMessage(sessionID, "assistant", response)
 
 	responseData := map[string]interface{}{
-		"response": response,
+		"response":           response,
+		"mcp_communications": mcpCommunications,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(responseData)
+}
+
+// pruneMessages removes old messages to keep total tokens under target
+// Always preserves system prompt (first message)
+func pruneMessages(messages []chatMessage, targetTokens int) []chatMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	// Calculate total tokens (conservative estimate: 1 token ≈ 3 characters)
+	// OpenAI's actual tokenization is more aggressive than character count suggests
+	totalTokens := 0
+	for _, msg := range messages {
+		totalTokens += len(msg.Content) / 3
+	}
+
+	// If under target, no pruning needed
+	if totalTokens <= targetTokens {
+		return messages
+	}
+
+	// Start with system prompt (always first message)
+	pruned := []chatMessage{}
+	systemPromptTokens := 0
+
+	if len(messages) > 0 && messages[0].Role == "system" {
+		pruned = append(pruned, messages[0])
+		systemPromptTokens = len(messages[0].Content) / 3
+	}
+
+	// Add messages from most recent backwards until we hit token limit
+	// Leave 50% buffer for response, tool definitions, and safety margin
+	effectiveTarget := int(float64(targetTokens) * 0.5)
+	currentTokens := systemPromptTokens
+
+	// Collect messages in reverse order (excluding system prompt)
+	startIdx := 1
+	if len(messages) > 0 && messages[0].Role == "system" {
+		startIdx = 1
+	} else {
+		startIdx = 0
+	}
+
+	// Build from end backwards
+	recentMessages := []chatMessage{}
+	for i := len(messages) - 1; i >= startIdx; i-- {
+		msgTokens := len(messages[i].Content) / 3
+		if currentTokens+msgTokens > effectiveTarget {
+			break
+		}
+		recentMessages = append([]chatMessage{messages[i]}, recentMessages...)
+		currentTokens += msgTokens
+	}
+
+	// Combine system prompt + recent messages
+	pruned = append(pruned, recentMessages...)
+
+	// Log pruning statistics
+	originalCount := len(messages)
+	prunedCount := len(pruned)
+	tokensSaved := totalTokens - currentTokens
+
+	if prunedCount < originalCount {
+		fmt.Printf("Context pruned: %d → %d messages, %d → %d tokens (saved %d tokens)\n",
+			originalCount, prunedCount, totalTokens, currentTokens, tokensSaved)
+	}
+
+	return pruned
 }
 
 // buildServerContext creates comprehensive context about a server

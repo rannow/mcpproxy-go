@@ -57,10 +57,10 @@ type RepositoryAnalysis struct {
 }
 
 // NewDiagnosticAgent creates a new diagnostic agent with AI capabilities
-func NewDiagnosticAgent(logger *zap.Logger) *DiagnosticAgent {
+func NewDiagnosticAgent(logger *zap.Logger, llmConfig *config.LLMConfig) *DiagnosticAgent {
 	return &DiagnosticAgent{
 		logger:    logger,
-		llmClient: NewOpenAIClient(),
+		llmClient: NewLLMClientFromConfig(llmConfig),
 	}
 }
 

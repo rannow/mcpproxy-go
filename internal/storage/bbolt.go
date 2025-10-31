@@ -94,6 +94,7 @@ func (b *BoltDB) initBuckets() error {
 			UpstreamsBucket,
 			ToolStatsBucket,
 			ToolHashBucket,
+			ToolMetadataBucket,
 			OAuthTokenBucket,
 			MetaBucket,
 		}

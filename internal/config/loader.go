@@ -40,6 +40,15 @@ func LoadFromFile(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 	}
 
+	// Load .env file and apply to LLM config if values not already set
+	// Priority: mcp_config.json > .env > environment variables
+	if cfg.LLM != nil {
+		if err := ApplyDotEnvToLLMConfig(cfg.LLM, cfg.DataDir); err != nil {
+			// Log error but don't fail - .env is optional
+			fmt.Fprintf(os.Stderr, "[WARN] Failed to load .env file: %v\n", err)
+		}
+	}
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -120,6 +129,15 @@ func Load() (*Config, error) {
 	// Create data directory if it doesn't exist
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+	}
+
+	// Load .env file and apply to LLM config if values not already set
+	// Priority: mcp_config.json > .env > environment variables
+	if cfg.LLM != nil {
+		if err := ApplyDotEnvToLLMConfig(cfg.LLM, cfg.DataDir); err != nil {
+			// Log error but don't fail - .env is optional
+			fmt.Fprintf(os.Stderr, "[WARN] Failed to load .env file: %v\n", err)
+		}
 	}
 
 	// Parse upstream servers from CLI

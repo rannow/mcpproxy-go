@@ -11,6 +11,7 @@ const (
 	UpstreamsBucket       = "upstreams"
 	ToolStatsBucket       = "toolstats"
 	ToolHashBucket        = "toolhash"
+	ToolMetadataBucket    = "tool_metadata"    // Store complete tool metadata for lazy loading
 	OAuthTokenBucket      = "oauth_tokens" //nolint:gosec // bucket name, not a credential
 	OAuthCompletionBucket = "oauth_completion"
 	MetaBucket            = "meta"
@@ -30,6 +31,7 @@ const CurrentSchemaVersion = 1
 type UpstreamRecord struct {
 	ID            string                  `json:"id"`
 	Name          string                  `json:"name"`
+	Description   string                  `json:"description,omitempty"`
 	URL           string                  `json:"url,omitempty"`
 	Protocol      string                  `json:"protocol,omitempty"` // stdio, http, sse, streamable-http, auto
 	Command       string                  `json:"command,omitempty"`
@@ -69,6 +71,18 @@ type ToolHashRecord struct {
 	ToolName string    `json:"tool_name"`
 	Hash     string    `json:"hash"`
 	Updated  time.Time `json:"updated"`
+}
+
+// ToolMetadataRecord represents complete tool metadata stored in database
+// This enables lazy loading by providing tools from DB without calling ListTools
+type ToolMetadataRecord struct {
+	ServerID    string                 `json:"server_id"`
+	ToolName    string                 `json:"tool_name"`     // Unprefixed tool name
+	PrefixedName string                `json:"prefixed_name"` // server_id:tool_name
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"input_schema,omitempty"`
+	Created     time.Time              `json:"created"`
+	Updated     time.Time              `json:"updated"`
 }
 
 // OAuthTokenRecord represents stored OAuth tokens for a server
@@ -138,4 +152,14 @@ func (e *OAuthCompletionEvent) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary implements encoding.BinaryUnmarshaler
 func (e *OAuthCompletionEvent) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, e)
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler
+func (t *ToolMetadataRecord) MarshalBinary() ([]byte, error) {
+	return json.Marshal(t)
+}
+
+// UnmarshalBinary implements encoding.BinaryUnmarshaler
+func (t *ToolMetadataRecord) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, t)
 }

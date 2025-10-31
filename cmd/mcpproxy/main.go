@@ -16,6 +16,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/processlock"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server"
 )
@@ -391,6 +392,20 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("allow_server_remove", cfg.AllowServerRemove),
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
+	// Acquire process lock to prevent multiple instances
+	procLock := processlock.New(cfg.DataDir, logger)
+	if err := procLock.Acquire(cfg.Listen); err != nil {
+		logger.Error("Failed to acquire process lock - another instance may be running",
+			zap.Error(err),
+			zap.String("listen", cfg.Listen))
+		return fmt.Errorf("process lock failed: %w", err)
+	}
+	defer func() {
+		if err := procLock.Release(); err != nil {
+			logger.Error("Failed to release process lock", zap.Error(err))
+		}
+	}()
+
 	// Create server with the actual config path used
 	var actualConfigPath string
 	if configFile != "" {
@@ -449,6 +464,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				// Don't cancel context here - let tray handle manual start/stop
 			}
 		}()
+
+		// Give the server startup goroutine time to execute before tray blocks
+		time.Sleep(100 * time.Millisecond)
 
 		// This is a blocking call that runs the tray event loop
 		logger.Info("MAIN - Starting tray event loop")

@@ -41,6 +41,12 @@ var (
 	groupsMutex = sync.RWMutex{}
 )
 
+// toolCountCache represents cached tool count information
+type toolCountCache struct {
+	count      int
+	lastUpdate time.Time
+}
+
 // Status represents the current status of the server
 type Status struct {
 	Phase         string                 `json:"phase"`          // Starting, Ready, Error
@@ -85,6 +91,10 @@ type Server struct {
 	status   Status
 	statusMu sync.RWMutex
 	statusCh chan Status
+
+	// Tool count cache to avoid excessive ListTools operations
+	toolCountCache map[string]*toolCountCache
+	toolCountMu    sync.RWMutex
 }
 
 // NewServer creates a new server instance
@@ -145,6 +155,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		appCtx:          ctx,
 		appCancel:       cancel,
 		statusCh:        make(chan Status, 10), // Buffered channel for status updates
+		toolCountCache:  make(map[string]*toolCountCache), // Initialize tool count cache
 		status: Status{
 			Phase:       "Initializing",
 			Message:     "Server is initializing...",
@@ -352,30 +363,126 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 	}
 }
 
-// backgroundToolIndexing handles tool discovery and indexing
+// backgroundToolIndexing handles initial tool discovery for servers that need it
+// Tools are ONLY loaded at startup for servers with StartOnBoot=true or when lazy loading is disabled
 func (s *Server) backgroundToolIndexing(ctx context.Context) {
-	// Initial indexing after a short delay to let connections establish
+	// Wait for connections to establish
 	select {
 	case <-time.After(2 * time.Second):
-		_ = s.discoverAndIndexTools(ctx)
 	case <-ctx.Done():
 		s.logger.Info("Background tool indexing stopped during initial delay")
 		return
 	}
 
-	// Re-index every 15 minutes (less aggressive)
-	ticker := time.NewTicker(15 * time.Minute)
-	defer ticker.Stop()
+	// ONLY load tools for servers that should start on boot OR when lazy loading is disabled
+	if s.config.EnableLazyLoading {
+		s.logger.Info("Lazy loading enabled - skipping automatic tool discovery",
+			zap.String("note", "Tools will be loaded on-demand or for servers with StartOnBoot=true"))
 
-	for {
-		select {
-		case <-ticker.C:
-			_ = s.discoverAndIndexTools(ctx)
-		case <-ctx.Done():
-			s.logger.Info("Background tool indexing stopped due to context cancellation")
-			return
+		// Load tools ONLY for servers with StartOnBoot=true
+		if err := s.loadToolsForStartOnBootServers(ctx); err != nil {
+			s.logger.Error("Failed to load tools for StartOnBoot servers", zap.Error(err))
+		}
+	} else {
+		// Lazy loading disabled - load all tools
+		s.logger.Info("Lazy loading disabled - loading tools for all connected servers")
+		if err := s.discoverAndIndexTools(ctx); err != nil {
+			s.logger.Error("Failed to discover and index tools", zap.Error(err))
 		}
 	}
+
+	// NOTE: Removed periodic re-indexing ticker
+	// Tools should only be reloaded via:
+	// 1. Manual reload from tray UI
+	// 2. Server-specific health checks (if configured)
+	// 3. Lazy loading wake-up when tool is called
+}
+
+// loadToolsForStartOnBootServers loads tools ONLY for servers with StartOnBoot=true
+// This respects lazy loading while still allowing specific servers to load at startup
+func (s *Server) loadToolsForStartOnBootServers(ctx context.Context) error {
+	s.logger.Info("Loading tools for StartOnBoot servers only")
+
+	// Get all server names from upstream manager
+	serverNames := s.upstreamManager.GetAllServerNames()
+
+	var toolsToIndex []*config.ToolMetadata
+	startOnBootCount := 0
+
+	for _, serverName := range serverNames {
+		client, exists := s.upstreamManager.GetClient(serverName)
+		if !exists {
+			continue
+		}
+
+		// ONLY load tools if StartOnBoot is true
+		if !client.Config.StartOnBoot {
+			s.logger.Debug("Skipping server (StartOnBoot=false)",
+				zap.String("server", serverName))
+			continue
+		}
+
+		// Check if server is connected
+		if !client.IsConnected() {
+			s.logger.Debug("Skipping server (not connected)",
+				zap.String("server", serverName),
+				zap.Bool("start_on_boot", client.Config.StartOnBoot))
+			continue
+		}
+
+		s.logger.Info("Loading tools for StartOnBoot server",
+			zap.String("server", serverName))
+
+		// Call ListTools for this specific server
+		tools, err := client.ListTools(ctx)
+		if err != nil {
+			s.logger.Error("Failed to list tools for StartOnBoot server",
+				zap.String("server", serverName),
+				zap.Error(err))
+			continue
+		}
+
+		// Save tools to database for lazy loading
+		if err := s.storageManager.SaveToolMetadata(serverName, tools); err != nil {
+			s.logger.Error("Failed to save tool metadata to database",
+				zap.String("server", serverName),
+				zap.Error(err))
+			// Continue anyway - tools will still be indexed
+		}
+
+		// Prefix tools with server name for indexing
+		for _, tool := range tools {
+			prefixedTool := &config.ToolMetadata{
+				Name:        fmt.Sprintf("%s:%s", serverName, tool.Name),
+				ServerName:  serverName,
+				Description: tool.Description,
+				ParamsJSON:  tool.ParamsJSON,
+				Hash:        tool.Hash,
+				Created:     tool.Created,
+				Updated:     tool.Updated,
+			}
+			toolsToIndex = append(toolsToIndex, prefixedTool)
+		}
+
+		startOnBootCount++
+		s.logger.Info("Loaded and saved tools from StartOnBoot server",
+			zap.String("server", serverName),
+			zap.Int("tool_count", len(tools)))
+	}
+
+	// Index all collected tools
+	if len(toolsToIndex) > 0 {
+		if err := s.indexManager.BatchIndexTools(toolsToIndex); err != nil {
+			return fmt.Errorf("failed to index StartOnBoot tools: %w", err)
+		}
+		s.logger.Info("Successfully indexed StartOnBoot tools",
+			zap.Int("server_count", startOnBootCount),
+			zap.Int("total_tools", len(toolsToIndex)))
+	} else {
+		s.logger.Info("No StartOnBoot servers found or all sleeping")
+	}
+
+	return nil
 }
 
 // loadConfiguredServers synchronizes the storage and upstream manager from the current config.
@@ -655,12 +762,42 @@ func (s *Server) discoverAndIndexTools(ctx context.Context) error {
 		return nil
 	}
 
+	// Group tools by server for database storage
+	toolsByServer := make(map[string][]*config.ToolMetadata)
+	for _, tool := range tools {
+		serverID := tool.ServerName
+		if serverID == "" {
+			// If ServerName is not set, skip this tool
+			s.logger.Warn("Tool has no ServerName, skipping database save",
+				zap.String("tool", tool.Name))
+			continue
+		}
+		toolsByServer[serverID] = append(toolsByServer[serverID], tool)
+	}
+
+	// Save tools to database by server
+	for serverID, serverTools := range toolsByServer {
+		if err := s.storageManager.SaveToolMetadata(serverID, serverTools); err != nil {
+			s.logger.Error("Failed to save tool metadata to database",
+				zap.String("server", serverID),
+				zap.Int("tool_count", len(serverTools)),
+				zap.Error(err))
+			// Continue anyway - tools will still be indexed
+		} else {
+			s.logger.Info("Saved tool metadata to database",
+				zap.String("server", serverID),
+				zap.Int("tool_count", len(serverTools)))
+		}
+	}
+
 	// Index tools
 	if err := s.indexManager.BatchIndexTools(tools); err != nil {
 		return fmt.Errorf("failed to index tools: %w", err)
 	}
 
-	s.logger.Info("Successfully indexed tools", zap.Int("count", len(tools)))
+	s.logger.Info("Successfully discovered, saved, and indexed tools",
+		zap.Int("total_tools", len(tools)),
+		zap.Int("servers", len(toolsByServer)))
 	return nil
 }
 
@@ -856,8 +993,19 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			groupID = cfg.GroupID
 		}
 
+		// Get description, start_on_boot, health_check from config
+		var description string
+		var startOnBoot bool
+		var healthCheck bool
+		if cfg, ok := configByName[server.Name]; ok && cfg != nil {
+			description = cfg.Description
+			startOnBoot = cfg.StartOnBoot
+			healthCheck = cfg.HealthCheck
+		}
+
 		result = append(result, map[string]interface{}{
 			"name":            server.Name,
+			"description":     description,
 			"url":             server.URL,
 			"command":         server.Command,
 			"args":            server.Args,
@@ -875,6 +1023,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"tool_count":      toolCount,
 			"last_error":      lastError,
 			"group_id":        groupID,
+			"start_on_boot":   startOnBoot,
+			"health_check":    healthCheck,
 		})
 	}
 
@@ -1013,6 +1163,27 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 	return nil
 }
 
+// RestartServer restarts an individual upstream server by disabling and re-enabling it
+func (s *Server) RestartServer(serverName string) error {
+	s.logger.Info("Request to restart server", zap.String("server", serverName))
+
+	// First disable the server
+	if err := s.EnableServer(serverName, false); err != nil {
+		return fmt.Errorf("failed to disable server during restart: %w", err)
+	}
+
+	// Give it a moment to fully disconnect
+	time.Sleep(500 * time.Millisecond)
+
+	// Re-enable the server
+	if err := s.EnableServer(serverName, true); err != nil {
+		return fmt.Errorf("failed to re-enable server during restart: %w", err)
+	}
+
+	s.logger.Info("Successfully restarted server", zap.String("server", serverName))
+	return nil
+}
+
 // QuarantineServer quarantines/unquarantines a server
 func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	s.logger.Info("Request to change server quarantine state",
@@ -1059,39 +1230,76 @@ func (s *Server) getServerToolCount(serverID string) int {
 		return 0
 	}
 
-	// Use timeout for UI status updates (30 seconds for SSE servers)
-	// This allows time for SSE servers to establish connections and respond
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Check cache first
+	s.toolCountMu.RLock()
+	cached, hasCached := s.toolCountCache[serverID]
+	s.toolCountMu.RUnlock()
 
-	s.logger.Debug("Starting ListTools operation",
-		zap.String("server_id", serverID),
-		zap.Duration("timeout", 30*time.Second))
-
-	tools, err := client.ListTools(ctx)
-	if err != nil {
-		// Classify errors to reduce noise from expected failures
-		if isTimeoutError(err) {
-			// Timeout errors are common for servers that don't support tool listing
-			// Log at debug level to reduce noise
-			s.logger.Debug("Tool listing timeout for server (server may not support tools)",
-				zap.String("server_id", serverID),
-				zap.String("error_type", "timeout"))
-		} else if isConnectionError(err) {
-			// Connection errors suggest the server is actually disconnected
-			s.logger.Debug("Connection error during tool listing",
-				zap.String("server_id", serverID),
-				zap.String("error_type", "connection"))
-		} else {
-			// Other errors might be more significant
-			s.logger.Warn("Failed to get tool count for server",
-				zap.String("server_id", serverID),
-				zap.Error(err))
-		}
-		return 0
+	// Determine cache TTL (default 5 minutes if not configured)
+	cacheTTL := time.Duration(300) * time.Second
+	if s.config.ToolCacheTTL > 0 {
+		cacheTTL = time.Duration(s.config.ToolCacheTTL) * time.Second
 	}
 
-	return len(tools)
+	// Return cached value if it exists and is still valid
+	if hasCached && time.Since(cached.lastUpdate) < cacheTTL {
+		s.logger.Debug("Returning cached tool count",
+			zap.String("server_id", serverID),
+			zap.Int("count", cached.count),
+			zap.Duration("age", time.Since(cached.lastUpdate)))
+		return cached.count
+	}
+
+	// Cache miss or expired - read from database first (avoids ListTools calls)
+	s.logger.Debug("Reading tool count from database (cache miss or expired)",
+		zap.String("server_id", serverID))
+
+	// Try to get tool count from database first
+	dbTools, err := s.storageManager.GetToolMetadata(serverID)
+	if err == nil && len(dbTools) > 0 {
+		// Database has tools for this server - use that count
+		count := len(dbTools)
+
+		// Update cache with database value
+		s.toolCountMu.Lock()
+		s.toolCountCache[serverID] = &toolCountCache{
+			count:      count,
+			lastUpdate: time.Now(),
+		}
+		s.toolCountMu.Unlock()
+
+		s.logger.Debug("Retrieved tool count from database",
+			zap.String("server_id", serverID),
+			zap.Int("count", count))
+
+		return count
+	}
+
+	// Database has no tools for this server
+	// NOTE: We do NOT call ListTools here anymore
+	// Tools should be loaded via:
+	// 1. Startup (if StartOnBoot=true or lazy loading disabled)
+	// 2. Manual reload from tray UI
+	// 3. Health check intervals (if configured)
+
+	s.logger.Debug("No tools found in database for server",
+		zap.String("server_id", serverID),
+		zap.Error(err))
+
+	// Return 0 for now - tools will be loaded via proper triggers
+	count := 0
+	s.toolCountMu.Lock()
+	s.toolCountCache[serverID] = &toolCountCache{
+		count:      count,
+		lastUpdate: time.Now(),
+	}
+	s.toolCountMu.Unlock()
+
+	s.logger.Debug("Updated tool count cache",
+		zap.String("server_id", serverID),
+		zap.Int("count", count))
+
+	return count
 }
 
 // Helper functions for error classification
@@ -1333,12 +1541,25 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.HandleFunc("/servers", s.handleServersWeb)
 	mux.HandleFunc("/api/servers/status", s.handleServersStatusAPI)
 	mux.HandleFunc("/api/servers", s.handleServersAPI)
-	mux.HandleFunc("/api/servers/", s.handleServerToolsAPI)
+	mux.HandleFunc("/api/servers/", s.handleServerConfigOrToolsAPI)
 
 	// Server diagnostic chat interface
 	mux.HandleFunc("/server/chat", s.handleServerChat)
 	mux.HandleFunc("/api/chat/sessions", s.handleChatSession)
 	mux.HandleFunc("/api/chat/sessions/", s.handleChatMessage)
+
+	// Chat tool endpoints for OpenAI Function Calling
+	mux.HandleFunc("/chat/read-config", s.handleChatReadConfig)
+	mux.HandleFunc("/chat/write-config", s.handleChatWriteConfig)
+	mux.HandleFunc("/chat/read-log", s.handleChatReadLog)
+	mux.HandleFunc("/chat/read-github", s.handleChatReadGitHub)
+	mux.HandleFunc("/chat/restart-server", s.handleChatRestartServer)
+	mux.HandleFunc("/chat/call-tool", s.handleChatCallTool)
+	mux.HandleFunc("/chat/get-server-status", s.handleChatGetServerStatus)
+	mux.HandleFunc("/chat/test-server-tools", s.handleChatTestServerTools)
+	mux.HandleFunc("/chat/list-all-servers", s.handleChatListAllServers)
+	mux.HandleFunc("/chat/list-all-tools", s.handleChatListAllTools)
+	mux.HandleFunc("/chat/context", s.handleChatContext)
 
 	// Group management web interface
 	mux.HandleFunc("/groups", s.handleGroupsWeb)
@@ -2021,15 +2242,13 @@ func (s *Server) ReloadConfiguration() error {
 			s.logger.Warn("Some servers failed to reconnect after config reload", zap.Error(err))
 		}
 
-		// Wait a bit for connections to establish, then trigger tool re-indexing
-		select {
-		case <-time.After(2 * time.Second):
-			if err := s.discoverAndIndexTools(ctx); err != nil {
-				s.logger.Error("Failed to re-index tools after config reload", zap.Error(err))
-			}
-		case <-ctx.Done():
-			s.logger.Info("Tool re-indexing cancelled during config reload")
-		}
+		// NOTE: Removed automatic tool re-indexing after config reload
+		// Tools will be loaded based on:
+		// 1. StartOnBoot flag for individual servers
+		// 2. EnableLazyLoading global setting
+		// 3. Manual reload requests from tray UI
+		// 4. Server-specific health checks (if configured)
+		s.logger.Info("Config reload complete - tool loading will follow lazy loading policy")
 	}()
 
 	s.logger.Info("Configuration reload completed",
@@ -2043,17 +2262,16 @@ func (s *Server) ReloadConfiguration() error {
 
 // OnUpstreamServerChange should be called when upstream servers are modified
 func (s *Server) OnUpstreamServerChange() {
-	// This function should primarily trigger re-discovery and re-indexing.
-	// It should NOT save the configuration, as that can cause loops.
-	// Saving should be done explicitly when the state change is initiated.
-	s.logger.Info("Upstream server configuration changed, triggering comprehensive update")
-	go func() {
-		// Re-index tools from all active servers
-		// This will automatically handle removed/disabled servers since they won't be discovered
-		if err := s.discoverAndIndexTools(s.serverCtx); err != nil {
-			s.logger.Error("Failed to update tool index after upstream change", zap.Error(err))
-		}
+	// NOTE: Removed automatic tool re-indexing on server changes
+	// Tools will be loaded based on:
+	// 1. StartOnBoot flag for individual servers
+	// 2. EnableLazyLoading global setting
+	// 3. Manual reload requests from tray UI
+	// 4. Server-specific health checks (if configured)
+	// This prevents excessive ListTools calls when servers are modified
+	s.logger.Info("Upstream server configuration changed")
 
+	go func() {
 		// Clean up any orphaned tools in index that are no longer from active servers
 		// This handles edge cases where servers were removed abruptly
 		s.cleanupOrphanedIndexEntries()
@@ -2115,6 +2333,14 @@ func (s *Server) GetGitHubURL() string {
 	}
 	// Fallback to default GitHub URL if not configured
 	return "https://github.com/smart-mcp-proxy/mcpproxy-go"
+}
+
+// GetLLMConfig returns the LLM configuration for the AI Diagnostic Agent
+func (s *Server) GetLLMConfig() *config.LLMConfig {
+	if s.config == nil {
+		return nil
+	}
+	return s.config.LLM
 }
 
 // --- Startup Script Management (exposed for tray/MCP) ---
@@ -2261,20 +2487,17 @@ func (s *Server) handleServersAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(servers); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"servers": servers,
+	}); err != nil {
 		s.logger.Error("Failed to encode servers JSON", zap.Error(err))
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
 }
 
-// handleServerToolsAPI returns a JSON list of tools for a specific server
-func (s *Server) handleServerToolsAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Extract server name from URL path: /api/servers/{name}/tools
+// handleServerConfigOrToolsAPI handles both GET /api/servers/{name}/tools and PUT /api/servers/{name}/config
+func (s *Server) handleServerConfigOrToolsAPI(w http.ResponseWriter, r *http.Request) {
+	// Extract server name from URL path
 	path := r.URL.Path
 	prefix := "/api/servers/"
 	if !strings.HasPrefix(path, prefix) {
@@ -2282,20 +2505,33 @@ func (s *Server) handleServerToolsAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove prefix and extract server name
 	remainder := strings.TrimPrefix(path, prefix)
 	parts := strings.Split(remainder, "/")
-	if len(parts) < 2 || parts[1] != "tools" {
-		http.Error(w, "Invalid URL path, expected /api/servers/{name}/tools", http.StatusBadRequest)
+	if len(parts) < 2 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
 		return
 	}
 
 	serverName := parts[0]
+	endpoint := parts[1]
+
 	if serverName == "" {
 		http.Error(w, "Server name is required", http.StatusBadRequest)
 		return
 	}
 
+	// Route based on method and endpoint
+	if endpoint == "tools" && r.Method == http.MethodGet {
+		s.handleGetServerTools(w, r, serverName)
+	} else if endpoint == "config" && r.Method == http.MethodPut {
+		s.handleUpdateServerConfig(w, r, serverName)
+	} else {
+		http.Error(w, "Method not allowed or invalid endpoint", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGetServerTools returns a JSON list of tools for a specific server
+func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request, serverName string) {
 	s.logger.Debug("Getting tools for server", zap.String("server", serverName))
 
 	tools, err := s.GetServerTools(serverName)
@@ -2308,8 +2544,102 @@ func (s *Server) handleServerToolsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(tools); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"tools": tools,
+	}); err != nil {
 		s.logger.Error("Failed to encode tools JSON", zap.Error(err))
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
+}
+
+// handleUpdateServerConfig updates a server's configuration
+func (s *Server) handleUpdateServerConfig(w http.ResponseWriter, r *http.Request, serverName string) {
+	s.logger.Info("Updating server configuration", zap.String("server", serverName))
+
+	// Parse request body
+	var updateData struct {
+		Name          string                 `json:"name"`
+		Enabled       bool                   `json:"enabled"`
+		Protocol      string                 `json:"protocol"`
+		Command       string                 `json:"command"`
+		WorkingDir    string                 `json:"working_dir"`
+		URL           string                 `json:"url"`
+		RepositoryURL string                 `json:"repository_url"`
+		Quarantined   bool                   `json:"quarantined"`
+		Args          []string               `json:"args"`
+		Env           map[string]string      `json:"env"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&updateData); err != nil {
+		s.logger.Error("Failed to parse update request", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Get existing server configuration
+	servers, err := s.storageManager.ListUpstreamServers()
+	if err != nil {
+		s.logger.Error("Failed to get servers from storage", zap.Error(err))
+		http.Error(w, "Failed to load server configuration", http.StatusInternalServerError)
+		return
+	}
+
+	var serverConfig *config.ServerConfig
+	for _, srv := range servers {
+		if srv.Name == serverName {
+			serverConfig = srv
+			break
+		}
+	}
+
+	if serverConfig == nil {
+		http.Error(w, "Server not found", http.StatusNotFound)
+		return
+	}
+
+	// Update fields
+	serverConfig.Enabled = updateData.Enabled
+	serverConfig.Protocol = updateData.Protocol
+	serverConfig.Command = updateData.Command
+	serverConfig.WorkingDir = updateData.WorkingDir
+	serverConfig.URL = updateData.URL
+	serverConfig.RepositoryURL = updateData.RepositoryURL
+	serverConfig.Quarantined = updateData.Quarantined
+	serverConfig.Args = updateData.Args
+	serverConfig.Env = updateData.Env
+	serverConfig.Updated = time.Now()
+
+	// Save to storage
+	if err := s.storageManager.SaveUpstreamServer(serverConfig); err != nil {
+		s.logger.Error("Failed to save server configuration", zap.Error(err))
+		http.Error(w, "Failed to save configuration", http.StatusInternalServerError)
+		return
+	}
+
+	// Save to config file
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration file", zap.Error(err))
+		http.Error(w, "Failed to save configuration file", http.StatusInternalServerError)
+		return
+	}
+
+	// Publish config change event
+	action := "updated"
+	s.eventBus.Publish(events.Event{
+		Type:       events.EventConfigChange,
+		ServerName: serverName,
+		Data: events.ConfigChangeData{
+			Action: action,
+		},
+	})
+
+	// Return success
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Configuration updated successfully",
+		"server":  serverConfig,
+	})
+
+	s.logger.Info("Server configuration updated successfully", zap.String("server", serverName))
 }
