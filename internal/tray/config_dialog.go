@@ -48,6 +48,7 @@ type ServerConfigDialog struct {
 		GetLogDir() string
 		GetGitHubURL() string
 		GetListenAddress() string
+		ReloadConfiguration() error
 	}
 }
 
@@ -390,6 +391,72 @@ const configDialogTemplate = `<!DOCTYPE html>
             border-bottom-left-radius: 5px;
         }
 
+        .config-changed-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            margin-left: 8px;
+            background: #28a745;
+            color: white;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .tool-calls-container {
+            margin-top: 12px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-left: 3px solid #667eea;
+            border-radius: 4px;
+        }
+
+        .tool-calls-title {
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+
+        .tool-call-item {
+            margin-bottom: 10px;
+            padding: 8px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid #dee2e6;
+        }
+
+        .tool-call-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .tool-call-name {
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 4px;
+        }
+
+        .tool-call-args {
+            font-size: 12px;
+            color: #6c757d;
+            margin-bottom: 4px;
+        }
+
+        .tool-call-result {
+            font-size: 12px;
+            color: #28a745;
+        }
+
+        .tool-call-error {
+            font-size: 12px;
+            color: #dc3545;
+        }
+
+        .tool-call-duration {
+            font-size: 11px;
+            color: #6c757d;
+            font-style: italic;
+        }
+
         .chat-input-section {
             padding: 15px;
             background: white;
@@ -625,6 +692,29 @@ const configDialogTemplate = `<!DOCTYPE html>
                     <a href="{{.GitHubURL}}" target="_blank" style="color: #667eea; text-decoration: none; margin-left: 8px;">{{.GitHubURL}}</a>
                 </div>
                 {{end}}
+            </div>
+        </div>
+
+        <!-- Context Information Section -->
+        <div class="section" style="margin-top: 20px;">
+            <h3>💭 Conversation Context</h3>
+            <div id="contextInfo" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #f8f9fa; border-radius: 6px; font-size: 13px;">
+                <div class="context-item">
+                    <span style="font-weight: 500;">📊 Messages:</span>
+                    <span id="contextMessages" style="margin-left: 8px; color: #495057;">Loading...</span>
+                </div>
+                <div class="context-item">
+                    <span style="font-weight: 500;">🔢 Estimated Tokens:</span>
+                    <span id="contextTokens" style="margin-left: 8px; color: #495057;">Loading...</span>
+                </div>
+                <div class="context-item">
+                    <span style="font-weight: 500;">✂️ Context Status:</span>
+                    <span id="contextStatus" style="margin-left: 8px; color: #495057;">Loading...</span>
+                </div>
+                <div class="context-item" id="pruningInfo" style="display: none;">
+                    <span style="font-weight: 500;">📉 Last Pruning:</span>
+                    <span id="pruningDetails" style="margin-left: 8px; color: #6c757d; font-size: 12px;">N/A</span>
+                </div>
             </div>
         </div>
 
@@ -926,6 +1016,71 @@ const configDialogTemplate = `<!DOCTYPE html>
                     sendChatMessage();
                 }
             });
+
+            // Initialize context monitoring
+            updateContextInfo();
+            setInterval(updateContextInfo, 5000); // Update every 5 seconds
+        }
+
+        function updateContextInfo() {
+            if (!chatSession || !chatSession.id) {
+                return;
+            }
+
+            fetch('/chat/context?session_id=' + chatSession.id)
+            .then(response => response.json())
+            .then(data => {
+                // Update message count
+                const messagesEl = document.getElementById('contextMessages');
+                messagesEl.textContent = data.total_messages + ' messages';
+                messagesEl.style.color = data.total_messages > 50 ? '#dc3545' : '#495057';
+
+                // Update token count
+                const tokensEl = document.getElementById('contextTokens');
+                tokensEl.textContent = data.estimated_tokens.toLocaleString() + ' tokens';
+
+                // Color code based on token usage
+                const tokenPercentage = data.estimated_tokens / data.max_tokens;
+                if (tokenPercentage > 0.8) {
+                    tokensEl.style.color = '#dc3545'; // Red
+                } else if (tokenPercentage > 0.6) {
+                    tokensEl.style.color = '#ffc107'; // Yellow
+                } else {
+                    tokensEl.style.color = '#28a745'; // Green
+                }
+
+                // Update context status
+                const statusEl = document.getElementById('contextStatus');
+                if (data.pruning_active) {
+                    statusEl.textContent = '✂️ Pruning Active';
+                    statusEl.style.color = '#ffc107';
+                    statusEl.style.fontWeight = '600';
+                } else {
+                    statusEl.textContent = '✅ Normal';
+                    statusEl.style.color = '#28a745';
+                }
+
+                // Show/hide pruning info
+                const pruningInfoEl = document.getElementById('pruningInfo');
+                const pruningDetailsEl = document.getElementById('pruningDetails');
+
+                if (data.last_pruning) {
+                    pruningInfoEl.style.display = 'block';
+                    const saved = data.last_pruning.tokens_saved || 0;
+                    const original = data.last_pruning.original_messages || 0;
+                    const pruned = data.last_pruning.pruned_messages || 0;
+
+                    pruningDetailsEl.textContent =
+                        saved.toLocaleString() + ' tokens saved (' +
+                        original + ' → ' + pruned + ' msgs)';
+                } else {
+                    pruningInfoEl.style.display = 'none';
+                }
+            })
+            .catch(error => {
+                console.log('Context update error:', error);
+                // Don't show errors to user - just log them
+            });
         }
 
         function startNewChatSession() {
@@ -980,11 +1135,62 @@ const configDialogTemplate = `<!DOCTYPE html>
             const timestamp = new Date(message.timestamp).toLocaleTimeString();
             const agentName = getAgentDisplayName(message.agent_type);
 
+            // Build config change badge if present
+            let configBadge = '';
+            if (message.metadata && message.metadata.config_changed) {
+                configBadge = '<span class="config-changed-badge">⚙️ Config Updated</span>';
+            }
+
+            // Build tool calls section if present
+            let toolCallsHtml = '';
+            if (message.metadata && message.metadata.tool_calls && message.metadata.tool_calls.length > 0) {
+                toolCallsHtml = '<div class="tool-calls-container">';
+                toolCallsHtml += '<div class="tool-calls-title">🔧 MCP Tool Calls:</div>';
+
+                message.metadata.tool_calls.forEach((tc, idx) => {
+                    toolCallsHtml += '<div class="tool-call-item">';
+                    toolCallsHtml += ` + "`<div class=\"tool-call-name\">${idx + 1}. ${escapeHtml(tc.tool_name)}</div>`" + `;
+
+                    // Arguments
+                    if (tc.arguments && Object.keys(tc.arguments).length > 0) {
+                        toolCallsHtml += '<div class="tool-call-args">📥 Arguments: ';
+                        const argPairs = Object.entries(tc.arguments).map(([k, v]) => {
+                            let valStr = String(v);
+                            if (valStr.length > 50) valStr = valStr.substring(0, 47) + '...';
+                            return ` + "`${escapeHtml(k)}: ${escapeHtml(valStr)}`" + `;
+                        });
+                        toolCallsHtml += argPairs.join(', ') + '</div>';
+                    }
+
+                    // Result or Error
+                    if (tc.error) {
+                        toolCallsHtml += ` + "`<div class=\"tool-call-error\">❌ Error: ${escapeHtml(tc.error)}</div>`" + `;
+                    } else if (tc.result) {
+                        let result = String(tc.result);
+                        if (result.length > 150) result = result.substring(0, 147) + '...';
+                        toolCallsHtml += ` + "`<div class=\"tool-call-result\">✅ Result: ${escapeHtml(result)}</div>`" + `;
+                    }
+
+                    // Duration
+                    if (tc.duration) {
+                        const durationMs = tc.duration / 1000000; // Convert nanoseconds to milliseconds
+                        toolCallsHtml += ` + "`<div class=\"tool-call-duration\">⏱️ ${durationMs.toFixed(2)}ms</div>`" + `;
+                    }
+
+                    toolCallsHtml += '</div>';
+                });
+
+                toolCallsHtml += '</div>';
+            }
+
             messageElement.innerHTML = ` + "`" + `
                 <div class="chat-message-header">
-                    ` + "${message.type === 'user' ? 'You' : agentName} - ${timestamp}" + `
+                    ` + "${message.type === 'user' ? 'You' : agentName} - ${timestamp}${configBadge}" + `
                 </div>
-                <div class="chat-message-content">` + "${escapeHtml(message.content)}" + `</div>
+                <div class="chat-message-content">
+                    ` + "${escapeHtml(message.content)}" + `
+                    ` + "${toolCallsHtml}" + `
+                </div>
             ` + "`" + `;
 
             chatMessages.appendChild(messageElement);
@@ -998,7 +1204,8 @@ const configDialogTemplate = `<!DOCTYPE html>
                 doc_analyzer: '📖 Documentation Analyzer',
                 config_updater: '⚙️ Config Updater',
                 installer: '📦 Installer',
-                tester: '🧪 Tester'
+                tester: '🧪 Tester',
+                llm: '🤖 AI Diagnostic Agent'
             };
             return agentNames[agentType] || 'Agent';
         }
@@ -1078,6 +1285,8 @@ const configDialogTemplate = `<!DOCTYPE html>
                 chatSend.disabled = false;
                 chatSend.textContent = 'Send';
                 chatInput.focus();
+                // Update context info after message is processed
+                updateContextInfo();
             });
         }
 
@@ -1213,6 +1422,7 @@ func (d *ServerConfigDialog) Show(ctx context.Context, onSave func(*config.Serve
 	mux.HandleFunc("/chat/message", d.handleChatMessage)
 	mux.HandleFunc("/chat/read-log", d.handleChatReadLog)
 	mux.HandleFunc("/chat/read-config", d.handleChatReadConfig)
+	mux.HandleFunc("/chat/write-config", d.handleChatWriteConfig)
 	mux.HandleFunc("/chat/read-github", d.handleChatReadGitHub)
 	mux.HandleFunc("/chat/inspector/start", d.handleChatInspectorStart)
 	mux.HandleFunc("/chat/inspector/stop", d.handleChatInspectorStop)
@@ -1684,6 +1894,104 @@ func (d *ServerConfigDialog) handleChatReadConfig(w http.ResponseWriter, r *http
 		"success": true,
 		"content": string(content),
 		"path":    configPath,
+	})
+}
+
+// handleChatWriteConfig handles requests to write/update configuration file
+func (d *ServerConfigDialog) handleChatWriteConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if d.serverManager == nil {
+		http.Error(w, "Server manager not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse request body
+	var request struct {
+		Content string `json:"content"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		d.logger.Error("Failed to decode write-config request", zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Invalid request format",
+		})
+		return
+	}
+
+	if request.Content == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Config content is required",
+		})
+		return
+	}
+
+	// Get config path
+	configPath := d.serverManager.GetConfigPath()
+	if configPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Config path not available",
+		})
+		return
+	}
+
+	// Parse and validate the new configuration
+	var newConfig config.Config
+	if err := json.Unmarshal([]byte(request.Content), &newConfig); err != nil {
+		d.logger.Error("Failed to parse config JSON",
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Invalid JSON format: %v", err),
+		})
+		return
+	}
+
+	// Save configuration (automatically creates backup)
+	if err := config.SaveConfig(&newConfig, configPath); err != nil {
+		d.logger.Error("Failed to save config file",
+			zap.String("path", configPath),
+			zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to save config: %v", err),
+		})
+		return
+	}
+
+	d.logger.Info("Config file saved successfully",
+		zap.String("path", configPath))
+
+	// Trigger configuration reload
+	if err := d.serverManager.ReloadConfiguration(); err != nil {
+		d.logger.Warn("Failed to reload configuration after save",
+			zap.Error(err))
+		// Don't fail the request - config was saved successfully
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"path":    configPath,
+			"warning": fmt.Sprintf("Config saved but reload failed: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"path":    configPath,
+		"message": "Configuration saved and reloaded successfully",
 	})
 }
 

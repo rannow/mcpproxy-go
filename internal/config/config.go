@@ -98,6 +98,26 @@ type Config struct {
 
 	// Tool cache TTL in seconds (default: 300 = 5 minutes)
 	ToolCacheTTL int `json:"tool_cache_ttl" mapstructure:"tool-cache-ttl"`
+
+	// LLM configuration for AI Diagnostic Agent
+	LLM *LLMConfig `json:"llm,omitempty" mapstructure:"llm"`
+}
+
+// LLMConfig represents LLM provider configuration for AI Diagnostic Agent
+type LLMConfig struct {
+	Provider string `json:"provider" mapstructure:"provider"` // "openai", "anthropic", "ollama"
+	Model    string `json:"model,omitempty" mapstructure:"model"` // Model name (e.g., "gpt-4o-mini", "claude-3-5-sonnet-20241022", "llama2")
+
+	// API Keys - prefer config over environment variables for GUI apps
+	OpenAIKey    string `json:"openai_api_key,omitempty" mapstructure:"openai_api_key"`
+	AnthropicKey string `json:"anthropic_api_key,omitempty" mapstructure:"anthropic_api_key"`
+
+	// Ollama specific settings
+	OllamaURL string `json:"ollama_url,omitempty" mapstructure:"ollama_url"` // Default: "http://localhost:11434"
+
+	// General settings
+	Temperature float64 `json:"temperature,omitempty" mapstructure:"temperature"` // 0.0 - 1.0, default: 0.7
+	MaxTokens   int     `json:"max_tokens,omitempty" mapstructure:"max_tokens"`   // Default: 2000
 }
 
 // LogConfig represents logging configuration
@@ -534,6 +554,15 @@ func DefaultConfig() *Config {
 
 		// Default concurrent connections: 20 servers at once
 		MaxConcurrentConnections: 20,
+
+		// Default LLM configuration (tries environment variables as fallback)
+		LLM: &LLMConfig{
+			Provider:    "openai",      // Default to OpenAI
+			Model:       "gpt-4o-mini", // Cost-effective model
+			Temperature: 0.7,
+			MaxTokens:   2000,
+			OllamaURL:   "http://localhost:11434", // Default Ollama endpoint
+		},
 	}
 }
 
@@ -622,6 +651,44 @@ func (c *Config) Validate() error {
 	}
 	if c.Logging.Communication.Filename == "" {
 		c.Logging.Communication.Filename = "communication.log"
+	}
+
+	// Ensure LLM config is not nil
+	if c.LLM == nil {
+		c.LLM = &LLMConfig{
+			Provider:    "openai",
+			Model:       "gpt-4o-mini",
+			Temperature: 0.7,
+			MaxTokens:   2000,
+			OllamaURL:   "http://localhost:11434",
+		}
+	}
+
+	// Validate LLM configuration
+	if c.LLM.Provider == "" {
+		c.LLM.Provider = "openai"
+	}
+	if c.LLM.Model == "" {
+		// Set default model based on provider
+		switch c.LLM.Provider {
+		case "openai":
+			c.LLM.Model = "gpt-4o-mini"
+		case "anthropic":
+			c.LLM.Model = "claude-3-5-sonnet-20241022"
+		case "ollama":
+			c.LLM.Model = "llama2"
+		default:
+			c.LLM.Model = "gpt-4o-mini"
+		}
+	}
+	if c.LLM.Temperature <= 0 {
+		c.LLM.Temperature = 0.7
+	}
+	if c.LLM.MaxTokens <= 0 {
+		c.LLM.MaxTokens = 2000
+	}
+	if c.LLM.OllamaURL == "" {
+		c.LLM.OllamaURL = "http://localhost:11434"
 	}
 
 	return nil

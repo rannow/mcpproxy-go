@@ -5,6 +5,7 @@ package tray
 import (
 	"context"
 	"fmt"
+	"mcpproxy-go/internal/config"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ type ChatSystem struct {
 	storage    ChatStorage
 	agents     map[AgentType]DiagnosticAgentInterface
 	mutex      sync.RWMutex
+	llmConfig  *config.LLMConfig // LLM configuration
 
 	// Server interface for interactions
 	serverManager interface {
@@ -75,7 +77,7 @@ type ChatStorage interface {
 }
 
 // NewChatSystem creates a new chat system
-func NewChatSystem(logger *zap.Logger, storage ChatStorage, serverManager interface {
+func NewChatSystem(logger *zap.Logger, storage ChatStorage, llmConfig *config.LLMConfig, serverManager interface {
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
 	EnableServer(serverName string, enabled bool) error
 	GetAllServers() ([]map[string]interface{}, error)
@@ -88,6 +90,7 @@ func NewChatSystem(logger *zap.Logger, storage ChatStorage, serverManager interf
 		logger:        logger,
 		storage:       storage,
 		agents:        make(map[AgentType]DiagnosticAgentInterface),
+		llmConfig:     llmConfig,
 		serverManager: serverManager,
 	}
 
@@ -99,7 +102,7 @@ func NewChatSystem(logger *zap.Logger, storage ChatStorage, serverManager interf
 
 // initializeAgents creates and registers the LLM-powered agent
 func (cs *ChatSystem) initializeAgents() {
-	cs.agents[AgentTypeLLM] = NewLLMAgent(cs.logger, cs.serverManager)
+	cs.agents[AgentTypeLLM] = NewLLMAgent(cs.logger, cs.llmConfig, cs.serverManager)
 }
 
 // CreateSession creates a new chat session for a server

@@ -71,6 +71,7 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 	record := &UpstreamRecord{
 		ID:                       serverConfig.Name, // Use name as ID for simplicity
 		Name:                     serverConfig.Name,
+		Description:              serverConfig.Description,
 		URL:                      serverConfig.URL,
 		Protocol:                 serverConfig.Protocol,
 		Command:                  serverConfig.Command,
@@ -109,6 +110,7 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 
 	return &config.ServerConfig{
 		Name:                     record.Name,
+		Description:              record.Description,
 		URL:                      record.URL,
 		Protocol:                 record.Protocol,
 		Command:                  record.Command,
@@ -147,6 +149,7 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 	for _, record := range records {
 		servers = append(servers, &config.ServerConfig{
 			Name:                     record.Name,
+			Description:              record.Description,
 			URL:                      record.URL,
 			Protocol:                 record.Protocol,
 			Command:                  record.Command,
@@ -201,6 +204,7 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 		if record.Quarantined {
 			quarantinedServers = append(quarantinedServers, &config.ServerConfig{
 				Name:                     record.Name,
+				Description:              record.Description,
 				URL:                      record.URL,
 				Protocol:                 record.Protocol,
 				Command:                  record.Command,

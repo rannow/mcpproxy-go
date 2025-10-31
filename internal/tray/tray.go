@@ -111,6 +111,7 @@ type ServerInterface interface {
 	GetConfigPath() string
 	GetLogDir() string
 	GetGitHubURL() string
+	GetLLMConfig() *config.LLMConfig
 
 	// OAuth control
 	TriggerOAuthLogin(serverName string) error
@@ -484,7 +485,7 @@ func (a *App) onReady() {
 	// --- Initialize Managers ---
 	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.stoppedServersMenu, a.disabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
-	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar())
+	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig())
 
 	// Initialize event-based synchronization
 	if eventBus := a.server.GetEventBus(); eventBus != nil {
@@ -500,7 +501,10 @@ func (a *App) onReady() {
 	if err != nil {
 		a.logger.Warnf("Failed to initialize chat storage: %v", err)
 	}
-	a.chatSystem = NewChatSystem(a.logger.Desugar(), storage, a.server)
+
+	// Get LLM configuration from server
+	llmConfig := a.server.GetLLMConfig()
+	a.chatSystem = NewChatSystem(a.logger.Desugar(), storage, llmConfig, a.server)
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions

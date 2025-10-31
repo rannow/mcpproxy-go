@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -565,6 +566,10 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
 
 // handleServersStatusAPI returns comprehensive server status as JSON
 func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) {
+	// Add timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
 	// Get all servers from storage
 	allServers, err := s.storageManager.ListUpstreamServers()
 	if err != nil {
@@ -577,11 +582,12 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 
 	var activeServers []ServerStatusData
 	summary := struct {
-		Total       int `json:"total"`
-		ConfigTotal int `json:"config_total"` // Total servers in configuration
-		Connected   int `json:"connected"`
-		Connecting  int `json:"connecting"`
-		Errors      int `json:"errors"`
+		Total       int  `json:"total"`
+		ConfigTotal int  `json:"config_total"` // Total servers in configuration
+		Connected   int  `json:"connected"`
+		Connecting  int  `json:"connecting"`
+		Errors      int  `json:"errors"`
+		Timeout     bool `json:"timeout"` // Indicates if response was incomplete due to timeout
 	}{
 		ConfigTotal: configTotal, // Set total from config (source of truth)
 	}
@@ -589,6 +595,17 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 	startTime := time.Now()
 
 	for _, server := range allServers {
+		// Check for timeout
+		select {
+		case <-ctx.Done():
+			s.logger.Warn("Server status API timeout reached",
+				zap.Int("processed", len(activeServers)),
+				zap.Int("total", len(allServers)))
+			summary.Timeout = true
+			goto respond
+		default:
+		}
+
 		serverData := ServerStatusData{
 			Name:             server.Name,
 			Protocol:         server.Protocol,
@@ -675,13 +692,15 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 		activeServers = append(activeServers, serverData)
 	}
 
+respond:
 	s.logger.Debug("Server status API request completed",
 		zap.Duration("duration", time.Since(startTime)),
-		zap.Int("active_servers", len(activeServers)))
+		zap.Int("active_servers", len(activeServers)),
+		zap.Bool("timeout", summary.Timeout))
 
 	response := map[string]interface{}{
-		"servers": activeServers,
-		"summary": summary,
+		"servers":   activeServers,
+		"summary":   summary,
 		"timestamp": time.Now(),
 	}
 
