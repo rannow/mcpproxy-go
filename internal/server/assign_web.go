@@ -118,6 +118,26 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
         tbody tr:hover {
             background: #f8f9fa;
         }
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+        }
+        th.sortable:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        th.sortable::after {
+            content: ' ⇅';
+            opacity: 0.3;
+            font-size: 0.9em;
+        }
+        th.sort-asc::after {
+            content: ' ▲';
+            opacity: 1;
+        }
+        th.sort-desc::after {
+            content: ' ▼';
+            opacity: 1;
+        }
         .checkbox-cell {
             width: 50px;
             text-align: center;
@@ -239,6 +259,50 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             font-size: 0.9em;
             margin-left: auto;
         }
+        .filter-row {
+            background: rgba(102, 126, 234, 0.1);
+        }
+        .filter-input {
+            width: 100%;
+            padding: 6px 8px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            font-size: 0.85em;
+            box-sizing: border-box;
+            background: white;
+        }
+        .filter-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+        }
+        .filter-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .filter-status {
+            font-size: 1em;
+            color: #333;
+        }
+        .clear-filters-btn {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .clear-filters-btn:hover {
+            background: #5a6268;
+            transform: translateY(-2px);
+        }
     </style>
 </head>
 <body>
@@ -266,6 +330,13 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                     </div>
                 </div>
 
+                <div class="filter-controls">
+                    <div class="filter-status">
+                        Showing <strong><span id="filtered-count">0</span></strong> of <strong><span id="total-count">0</span></strong> servers
+                    </div>
+                    <button class="clear-filters-btn" onclick="clearAllFilters()">🗑️ Clear Filters</button>
+                </div>
+
                 <div class="select-all-container">
                     <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
                     <label for="selectAll">Select All Servers</label>
@@ -277,10 +348,17 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                         <thead>
                             <tr>
                                 <th class="checkbox-cell">Select</th>
-                                <th>Server Name</th>
-                                <th>Status</th>
-                                <th>Protocol</th>
+                                <th class="sortable" data-sort="name">Server Name</th>
+                                <th class="sortable" data-sort="status">Status</th>
+                                <th class="sortable" data-sort="protocol">Protocol</th>
                                 <th>Current Groups</th>
+                            </tr>
+                            <tr class="filter-row">
+                                <th></th>
+                                <th><input type="text" class="filter-input" id="filter-name" placeholder="Filter by name..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-status" placeholder="Filter status..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-protocol" placeholder="Filter protocol..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-groups" placeholder="Filter groups..." onkeyup="applyFilters()"></th>
                             </tr>
                         </thead>
                         <tbody id="servers-table"></tbody>
@@ -304,13 +382,115 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
 
     <script>
         let allServers = [];
+        let filteredServers = [];
         let allGroups = [];
         let currentAssignments = {};
         let selectedGroup = '';
+        let currentSort = loadSortPreference();
+
+        // Load sort preference from localStorage
+        function loadSortPreference() {
+            try {
+                const saved = localStorage.getItem('assignmentSortPreference');
+                if (saved) {
+                    return JSON.parse(saved);
+                }
+            } catch (e) {
+                console.error('Error loading sort preference:', e);
+            }
+            return { column: null, direction: 'asc' };
+        }
+
+        // Save sort preference to localStorage
+        function saveSortPreference() {
+            try {
+                localStorage.setItem('assignmentSortPreference', JSON.stringify(currentSort));
+            } catch (e) {
+                console.error('Error saving sort preference:', e);
+            }
+        }
+
+        // Get filtered servers based on current filter values
+        function getFilteredServers() {
+            const nameFilter = document.getElementById('filter-name').value.toLowerCase();
+            const statusFilter = document.getElementById('filter-status').value.toLowerCase();
+            const protocolFilter = document.getElementById('filter-protocol').value.toLowerCase();
+            const groupsFilter = document.getElementById('filter-groups').value.toLowerCase();
+
+            return allServers.filter(server => {
+                // Name filter (includes server name and url/command)
+                if (nameFilter &&
+                    !server.name.toLowerCase().includes(nameFilter) &&
+                    !(server.url || '').toLowerCase().includes(nameFilter) &&
+                    !(server.command || '').toLowerCase().includes(nameFilter)) {
+                    return false;
+                }
+
+                // Status filter
+                if (statusFilter && !server.status.toLowerCase().includes(statusFilter)) {
+                    return false;
+                }
+
+                // Protocol filter
+                if (protocolFilter && !(server.protocol || '').toLowerCase().includes(protocolFilter)) {
+                    return false;
+                }
+
+                // Groups filter
+                if (groupsFilter) {
+                    const serverGroups = currentAssignments[server.name] || [];
+                    const groupsText = serverGroups.join(' ').toLowerCase();
+                    if (!groupsText.includes(groupsFilter)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            });
+        }
+
+        // Apply all filters
+        function applyFilters() {
+            filteredServers = getFilteredServers();
+            renderServersTable();
+            updateFilterCounts();
+        }
+
+        // Clear all filters
+        function clearAllFilters() {
+            document.getElementById('filter-name').value = '';
+            document.getElementById('filter-status').value = '';
+            document.getElementById('filter-protocol').value = '';
+            document.getElementById('filter-groups').value = '';
+            applyFilters();
+        }
+
+        // Check if any filters are active
+        function hasActiveFilters() {
+            return document.getElementById('filter-name').value !== '' ||
+                   document.getElementById('filter-status').value !== '' ||
+                   document.getElementById('filter-protocol').value !== '' ||
+                   document.getElementById('filter-groups').value !== '';
+        }
+
+        // Update filter counts
+        function updateFilterCounts() {
+            const serversToDisplay = hasActiveFilters() ? filteredServers : allServers;
+            document.getElementById('filtered-count').textContent = serversToDisplay.length;
+            document.getElementById('total-count').textContent = allServers.length;
+        }
 
         // Load on page load
         document.addEventListener('DOMContentLoaded', function() {
             refreshAll();
+
+            // Add click handlers to sortable headers
+            document.querySelectorAll('th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const sortColumn = th.getAttribute('data-sort');
+                    sortServers(sortColumn);
+                });
+            });
         });
 
         // Refresh all data
@@ -325,8 +505,10 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                     loadAssignments()
                 ]);
 
+                applyFilters();
                 renderServersTable();
                 updateButtonStates();
+                updateFilterCounts();
 
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('content').style.display = 'block';
@@ -341,7 +523,39 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             const data = await response.json();
 
             if (data.servers && Array.isArray(data.servers)) {
-                allServers = data.servers.sort((a, b) => a.name.localeCompare(b.name));
+                allServers = data.servers;
+
+                // Apply saved sort if any
+                if (currentSort.column) {
+                    allServers.sort((a, b) => {
+                        let valA, valB;
+
+                        switch(currentSort.column) {
+                            case 'name':
+                                valA = (a.name || '').toLowerCase();
+                                valB = (b.name || '').toLowerCase();
+                                break;
+                            case 'status':
+                                valA = (a.status || '').toLowerCase();
+                                valB = (b.status || '').toLowerCase();
+                                break;
+                            case 'protocol':
+                                valA = (a.protocol || '').toLowerCase();
+                                valB = (b.protocol || '').toLowerCase();
+                                break;
+                            default:
+                                return 0;
+                        }
+
+                        if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
+                        if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
+                        return 0;
+                    });
+                    updateSortIndicators();
+                } else {
+                    // Default sort by name if no preference
+                    allServers.sort((a, b) => a.name.localeCompare(b.name));
+                }
             }
         }
 
@@ -382,12 +596,75 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             }
         }
 
+        // Sort servers by column
+        function sortServers(column) {
+            // Toggle direction if clicking same column
+            if (currentSort.column === column) {
+                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.column = column;
+                currentSort.direction = 'asc';
+            }
+
+            // Save preference
+            saveSortPreference();
+
+            // Sort the filtered servers array (or all servers if no filter)
+            const serversToSort = hasActiveFilters() ? filteredServers : allServers;
+            serversToSort.sort((a, b) => {
+                let valA, valB;
+
+                switch(column) {
+                    case 'name':
+                        valA = (a.name || '').toLowerCase();
+                        valB = (b.name || '').toLowerCase();
+                        break;
+                    case 'status':
+                        valA = (a.status || '').toLowerCase();
+                        valB = (b.status || '').toLowerCase();
+                        break;
+                    case 'protocol':
+                        valA = (a.protocol || '').toLowerCase();
+                        valB = (b.protocol || '').toLowerCase();
+                        break;
+                    default:
+                        return 0;
+                }
+
+                if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
+                if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            // Update UI
+            renderServersTable();
+            updateSortIndicators();
+        }
+
+        // Update sort indicator arrows
+        function updateSortIndicators() {
+            // Remove all sort classes
+            document.querySelectorAll('th.sortable').forEach(th => {
+                th.classList.remove('sort-asc', 'sort-desc');
+            });
+
+            // Add current sort class
+            if (currentSort.column) {
+                const th = document.querySelector('th[data-sort="' + currentSort.column + '"]');
+                if (th) {
+                    th.classList.add('sort-' + currentSort.direction);
+                }
+            }
+        }
+
         // Render servers table
         function renderServersTable() {
             const tbody = document.getElementById('servers-table');
             tbody.innerHTML = '';
 
-            allServers.forEach(server => {
+            const serversToDisplay = filteredServers.length > 0 || hasActiveFilters() ? filteredServers : allServers;
+
+            serversToDisplay.forEach(server => {
                 const row = document.createElement('tr');
 
                 // Checkbox cell
@@ -452,7 +729,8 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
         // Toggle select all
         function toggleSelectAll() {
             const selectAll = document.getElementById('selectAll').checked;
-            allServers.forEach(server => {
+            const serversToToggle = hasActiveFilters() ? filteredServers : allServers;
+            serversToToggle.forEach(server => {
                 const checkbox = document.getElementById('server-' + server.name);
                 if (checkbox) {
                     checkbox.checked = selectAll;
@@ -530,6 +808,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
 
                     // Reload data
                     await loadAssignments();
+                    applyFilters();
                     renderServersTable();
                     updateButtonStates();
                 } else {
@@ -590,6 +869,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
 
                     // Reload data
                     await loadAssignments();
+                    applyFilters();
                     renderServersTable();
                     updateButtonStates();
                 } else {
