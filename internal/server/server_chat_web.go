@@ -446,6 +446,30 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
             background: #f8f9fa;
             border-radius: 4px;
         }
+        .fast-action-btn {
+            width: 100%;
+            padding: 10px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            text-align: left;
+            font-size: 0.9em;
+        }
+        .fast-action-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+        .fast-action-btn:active {
+            transform: translateY(0);
+        }
+        .fast-action-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -484,6 +508,29 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 <div class="info-section-content">
                     <div id="quick-actions" style="font-size: 0.85em; line-height: 1.8;">
                         <div id="quick-actions-links">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <h3 onclick="toggleSection(this)">🚀 Fast Actions</h3>
+                <div class="info-section-content">
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        <button class="fast-action-btn" onclick="runFastAction('check_startup')" title="Analyze server configuration, logs, and environment">
+                            🔍 Check Startup Issues
+                        </button>
+                        <button class="fast-action-btn" onclick="runFastAction('test_local')" title="Start server locally and test communication">
+                            🧪 Test Local Communication
+                        </button>
+                        <button class="fast-action-btn" onclick="runFastAction('check_docs')" title="Fetch and analyze GitHub documentation">
+                            📚 Check Documentation
+                        </button>
+                        <button class="fast-action-btn" onclick="runFastAction('preload_packages')" title="Install required packages (uvx, npm, pip)">
+                            📦 Preload Packages
+                        </button>
+                        <button class="fast-action-btn" onclick="runFastAction('check_disabled_servers')" title="Analyze all disabled servers and generate report">
+                            📊 Check All Disabled Servers
+                        </button>
                     </div>
                 </div>
             </div>
@@ -1211,6 +1258,52 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
         // Initialize context monitoring
         updateContextInfo();
         setInterval(updateContextInfo, 5000); // Update every 5 seconds
+
+        // Fast action functions
+        async function runFastAction(action) {
+            // Disable all fast action buttons
+            document.querySelectorAll('.fast-action-btn').forEach(btn => {
+                btn.disabled = true;
+            });
+
+            try {
+                // Show loading message
+                addMessage('agent', '⏳ Running ' + action.replace(/_/g, ' ') + '...');
+
+                const response = await fetch('/api/fast-action', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: action,
+                        server_name: serverName
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    // Format the response message
+                    let message = '✅ ' + action.replace(/_/g, ' ').toUpperCase() + '\n\n';
+                    message += data.message;
+
+                    if (data.details) {
+                        message += '\n\n📋 Details:\n';
+                        message += JSON.stringify(data.details, null, 2);
+                    }
+
+                    addMessage('agent', message);
+                } else {
+                    addMessage('agent', '❌ Error: ' + (data.error || 'Unknown error'), true);
+                }
+            } catch (error) {
+                addMessage('agent', '❌ Failed to execute action: ' + error.message, true);
+            } finally {
+                // Re-enable all fast action buttons
+                document.querySelectorAll('.fast-action-btn').forEach(btn => {
+                    btn.disabled = false;
+                });
+            }
+        }
     </script>
 </body>
 </html>`

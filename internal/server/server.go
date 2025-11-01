@@ -75,6 +75,9 @@ type Server struct {
 	// MCP Inspector manager
 	inspectorManager *InspectorManager
 
+	// Semantic search service
+	semanticSearchService *SemanticSearchService
+
 	// Server control
 	httpServer *http.Server
 	running    bool
@@ -168,6 +171,22 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 	// Initialize MCP Inspector manager
 	server.inspectorManager = NewInspectorManager(logger.Sugar())
+
+	// Initialize semantic search service
+	semanticSearchURL := os.Getenv("SEMANTIC_SEARCH_URL")
+	if semanticSearchURL == "" {
+		semanticSearchURL = "http://127.0.0.1:8081"
+	}
+	server.semanticSearchService = NewSemanticSearchService(semanticSearchURL, logger)
+
+	// Check if semantic search is available
+	if server.semanticSearchService.IsAvailable(context.Background()) {
+		logger.Info("Semantic search service available", zap.String("url", semanticSearchURL))
+	} else {
+		logger.Warn("Semantic search service not available - semantic_search_tools will not work",
+			zap.String("url", semanticSearchURL),
+			zap.String("help", "Start with: python3 agent/semantic_search_api.py"))
+	}
 
 	// Create MCP proxy server
 	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, cacheManager, truncator, logger, server, cfg.DebugSearch, cfg)
@@ -1596,6 +1615,9 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.HandleFunc("/api/inspector/start", s.handleInspectorStart)
 	mux.HandleFunc("/api/inspector/stop", s.handleInspectorStop)
 	mux.HandleFunc("/api/inspector/status", s.handleInspectorStatus)
+
+	// Fast action endpoints for diagnostic agent
+	mux.HandleFunc("/api/fast-action", s.handleFastAction)
 
 	// File/path opening endpoint
 	mux.HandleFunc("/api/open-path", s.handleOpenPath)
