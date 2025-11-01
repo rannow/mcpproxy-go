@@ -1600,6 +1600,22 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	// File/path opening endpoint
 	mux.HandleFunc("/api/open-path", s.handleOpenPath)
 
+	// Agent API endpoints for Python MCP agent integration
+	mux.HandleFunc("/api/v1/agent/servers", s.handleAgentListServers)
+	mux.HandleFunc("/api/v1/agent/servers/", func(w http.ResponseWriter, r *http.Request) {
+		// Route to either server details or server config based on path
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			s.handleAgentServerLogs(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/config") {
+			s.handleAgentServerConfig(w, r)
+		} else {
+			s.handleAgentServerDetails(w, r)
+		}
+	})
+	mux.HandleFunc("/api/v1/agent/logs/main", s.handleAgentMainLogs)
+	mux.HandleFunc("/api/v1/agent/registries/search", s.handleAgentSearchRegistries)
+	mux.HandleFunc("/api/v1/agent/install", s.handleAgentInstallServer)
+
 	s.mu.Lock()
 	s.httpServer = &http.Server{
 		Addr:              s.config.Listen,
