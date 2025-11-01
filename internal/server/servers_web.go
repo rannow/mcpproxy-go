@@ -230,6 +230,52 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             padding: 60px;
             color: #666;
         }
+        .filter-row {
+            background: rgba(102, 126, 234, 0.1);
+        }
+        .filter-row th {
+            padding: 8px 12px;
+        }
+        .filter-input {
+            width: 100%;
+            padding: 6px 8px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            font-size: 0.85em;
+            box-sizing: border-box;
+        }
+        .filter-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+        }
+        .filter-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .filter-status {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .clear-filters-btn {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .clear-filters-btn:hover {
+            background: #5a6268;
+            transform: translateY(-1px);
+        }
     </style>
 </head>
 <body>
@@ -269,6 +315,13 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                     </div>
                 </div>
 
+                <div class="filter-controls">
+                    <div class="filter-status">
+                        Showing <strong><span id="filtered-count">0</span></strong> of <strong><span id="total-count">0</span></strong> servers
+                    </div>
+                    <button class="clear-filters-btn" onclick="clearAllFilters()">🗑️ Clear Filters</button>
+                </div>
+
                 <div class="table-container">
                     <table>
                         <thead>
@@ -282,6 +335,17 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                                 <th class="sortable" data-sort="tool_count">Tools</th>
                                 <th>Error</th>
                                 <th>Actions</th>
+                            </tr>
+                            <tr class="filter-row">
+                                <th><input type="text" class="filter-input" id="filter-name" placeholder="Filter by name..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-status" placeholder="Filter status..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-protocol" placeholder="Filter protocol..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-retry" placeholder="Min retries..." onkeyup="applyFilters()"></th>
+                                <th></th>
+                                <th></th>
+                                <th><input type="text" class="filter-input" id="filter-tools" placeholder="Min tools..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-error" placeholder="Filter error..." onkeyup="applyFilters()"></th>
+                                <th></th>
                             </tr>
                         </thead>
                         <tbody id="servers-table"></tbody>
@@ -304,6 +368,7 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
 
     <script>
         let currentServers = [];
+        let filteredServers = [];
         let currentSort = loadSortPreference();
 
         // Load sort preference from localStorage
@@ -372,8 +437,9 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             // Save preference
             saveSortPreference();
 
-            // Sort the servers array
-            currentServers.sort((a, b) => {
+            // Sort the filtered servers array (or current servers if no filter)
+            const serversToSort = hasActiveFilters() ? filteredServers : currentServers;
+            serversToSort.sort((a, b) => {
                 let valA, valB;
 
                 switch(column) {
@@ -434,11 +500,80 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             }
         }
 
+        function getFilteredServers() {
+            const nameFilter = document.getElementById('filter-name').value.toLowerCase();
+            const statusFilter = document.getElementById('filter-status').value.toLowerCase();
+            const protocolFilter = document.getElementById('filter-protocol').value.toLowerCase();
+            const retryFilter = document.getElementById('filter-retry').value;
+            const toolsFilter = document.getElementById('filter-tools').value;
+            const errorFilter = document.getElementById('filter-error').value.toLowerCase();
+
+            return currentServers.filter(server => {
+                // Name filter (includes server name and url/command)
+                if (nameFilter &&
+                    !server.name.toLowerCase().includes(nameFilter) &&
+                    !(server.url || '').toLowerCase().includes(nameFilter) &&
+                    !(server.command || '').toLowerCase().includes(nameFilter)) {
+                    return false;
+                }
+
+                // Status filter
+                if (statusFilter && !server.status.toLowerCase().includes(statusFilter)) {
+                    return false;
+                }
+
+                // Protocol filter
+                if (protocolFilter && !(server.protocol || '').toLowerCase().includes(protocolFilter)) {
+                    return false;
+                }
+
+                // Retry count filter (minimum)
+                if (retryFilter && (server.retry_count || 0) < parseInt(retryFilter)) {
+                    return false;
+                }
+
+                // Tool count filter (minimum)
+                if (toolsFilter && (server.tool_count || 0) < parseInt(toolsFilter)) {
+                    return false;
+                }
+
+                // Error filter
+                if (errorFilter && !(server.last_error || '').toLowerCase().includes(errorFilter)) {
+                    return false;
+                }
+
+                return true;
+            });
+        }
+
+        function applyFilters() {
+            filteredServers = getFilteredServers();
+            updateTableWithCurrentData();
+            updateFilterCounts();
+        }
+
+        function clearAllFilters() {
+            document.getElementById('filter-name').value = '';
+            document.getElementById('filter-status').value = '';
+            document.getElementById('filter-protocol').value = '';
+            document.getElementById('filter-retry').value = '';
+            document.getElementById('filter-tools').value = '';
+            document.getElementById('filter-error').value = '';
+            applyFilters();
+        }
+
+        function updateFilterCounts() {
+            document.getElementById('total-count').textContent = currentServers.length;
+            document.getElementById('filtered-count').textContent = filteredServers.length;
+        }
+
         function updateTableWithCurrentData() {
             const tbody = document.getElementById('servers-table');
             tbody.innerHTML = '';
 
-            currentServers.forEach(server => {
+            const serversToDisplay = filteredServers.length > 0 || hasActiveFilters() ? filteredServers : currentServers;
+
+            serversToDisplay.forEach(server => {
                 const row = document.createElement('tr');
                 const timeSince = formatTimeSince(server.last_retry_time);
                 const errorText = server.last_error || '-';
@@ -457,6 +592,17 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
 
                 tbody.appendChild(row);
             });
+
+            updateFilterCounts();
+        }
+
+        function hasActiveFilters() {
+            return document.getElementById('filter-name').value !== '' ||
+                   document.getElementById('filter-status').value !== '' ||
+                   document.getElementById('filter-protocol').value !== '' ||
+                   document.getElementById('filter-retry').value !== '' ||
+                   document.getElementById('filter-tools').value !== '' ||
+                   document.getElementById('filter-error').value !== '';
         }
 
         function refreshServers() {
@@ -477,13 +623,17 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                     document.getElementById('connecting-servers').textContent = data.summary.connecting;
                     document.getElementById('error-servers').textContent = data.summary.errors;
 
-                    // Store servers and update table
+                    // Store servers
                     currentServers = data.servers;
+
+                    // Apply filters first (important for correct display)
+                    applyFilters();
 
                     // Apply current sort if any
                     if (currentSort.column) {
-                        // Apply sort without triggering save (already loaded from localStorage)
-                        currentServers.sort((a, b) => {
+                        // Apply existing sort column and direction
+                        const serversToSort = hasActiveFilters() ? filteredServers : currentServers;
+                        serversToSort.sort((a, b) => {
                             let valA, valB;
 
                             switch(currentSort.column) {
