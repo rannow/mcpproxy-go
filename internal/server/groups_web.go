@@ -327,6 +327,11 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
 <body>
     <div class="header">
         <div class="header-content">
+            <div style="margin-bottom: 10px;">
+                <a href="/" style="color: rgba(255,255,255,0.9); text-decoration: none; font-size: 14px; display: inline-flex; align-items: center; gap: 5px;">
+                    ← Back to Dashboard
+                </a>
+            </div>
             <h1>🏷️ Server Group Management</h1>
             <div class="subtitle">Organize and manage your MCP server groups</div>
         </div>
@@ -362,7 +367,6 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                     <tr>
                         <th class="sortable" data-sort="icon">Icon</th>
                         <th class="sortable" data-sort="name">Name</th>
-                        <th class="sortable" data-sort="color">Color</th>
                         <th class="sortable" data-sort="servers">Servers</th>
                         <th class="sortable" data-sort="description">Description</th>
                         <th>Actions</th>
@@ -370,7 +374,6 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                     <tr class="filter-row">
                         <th><input type="text" class="filter-input" id="filter-icon" placeholder="🔍" onkeyup="applyFilters()"></th>
                         <th><input type="text" class="filter-input" id="filter-name" placeholder="Filter..." onkeyup="applyFilters()"></th>
-                        <th><input type="text" class="filter-input" id="filter-color" placeholder="Filter..." onkeyup="applyFilters()"></th>
                         <th><input type="text" class="filter-input" id="filter-servers" placeholder="Filter..." onkeyup="applyFilters()"></th>
                         <th><input type="text" class="filter-input" id="filter-description" placeholder="Filter..." onkeyup="applyFilters()"></th>
                         <th></th>
@@ -533,10 +536,6 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                         aVal = a.name || '';
                         bVal = b.name || '';
                         break;
-                    case 'color':
-                        aVal = a.color || '';
-                        bVal = b.color || '';
-                        break;
                     case 'servers':
                         aVal = (serverAssignments[a.name] || []).length;
                         bVal = (serverAssignments[b.name] || []).length;
@@ -564,7 +563,6 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             const filters = {
                 icon: document.getElementById('filter-icon').value.toLowerCase(),
                 name: document.getElementById('filter-name').value.toLowerCase(),
-                color: document.getElementById('filter-color').value.toLowerCase(),
                 servers: document.getElementById('filter-servers').value.toLowerCase(),
                 description: document.getElementById('filter-description').value.toLowerCase()
             };
@@ -576,14 +574,12 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
 
                 const icon = cells[0]?.textContent.toLowerCase() || '';
                 const name = cells[1]?.textContent.toLowerCase() || '';
-                const color = cells[2]?.textContent.toLowerCase() || '';
-                const servers = cells[3]?.textContent.toLowerCase() || '';
-                const description = cells[4]?.textContent.toLowerCase() || '';
+                const servers = cells[2]?.textContent.toLowerCase() || '';
+                const description = cells[3]?.textContent.toLowerCase() || '';
 
                 const match = (
                     icon.includes(filters.icon) &&
                     name.includes(filters.name) &&
-                    color.includes(filters.color) &&
                     servers.includes(filters.servers) &&
                     description.includes(filters.description)
                 );
@@ -598,7 +594,7 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             tbody.innerHTML = '';
 
             if (groups.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:40px; color:#666;">No groups yet. Click "Create New Group" to get started.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:40px; color:#666;">No groups yet. Click "Create New Group" to get started.</td></tr>';
                 return;
             }
 
@@ -614,7 +610,6 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                 row.innerHTML = ` + "`" + `
                     <td class="group-icon-cell">${icon}</td>
                     <td class="group-name-cell">${group.name}</td>
-                    <td><span class="group-color-badge" style="background-color: ${group.color}"></span></td>
                     <td><span class="server-count ${serverCount > 0 ? 'has-servers' : ''}">${serverCount}</span></td>
                     <td>${description}</td>
                     <td class="actions-cell">
