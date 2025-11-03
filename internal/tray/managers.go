@@ -1452,7 +1452,7 @@ func (m *MenuManager) createGroupActionsSubmenu(serverMenuItem *systray.MenuItem
 		for groupName, group := range *m.serverGroups {
 			if group.Enabled && groupName != currentGroupName {
 				groupItem := assignSubmenu.AddSubMenuItem(
-					fmt.Sprintf("%s %s (%d servers)", group.Icon, groupName, len(group.ServerNames)),
+					fmt.Sprintf("%s %s", group.Icon, groupName),
 					fmt.Sprintf("Assign server to group '%s'", groupName))
 
 				go func(name, group string, item *systray.MenuItem) {
