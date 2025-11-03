@@ -489,8 +489,8 @@ func (a *App) onReady() {
 	// --- Group Management Menu ---
 	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "")
 
-	// --- Resource Monitor Menu ---
-	a.resourceMonitorMenu = systray.AddMenuItem("📊 Resource Monitor", "View system resources and metrics")
+	// --- MCPProxy Management Menu ---
+	a.resourceMonitorMenu = systray.AddMenuItem("⚙️ MCPProxy Management", "Manage MCPProxy settings and configuration")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
@@ -2702,8 +2702,9 @@ func (a *App) loadGroupsFromConfig() bool {
 
 				description, _ := group["description"].(string)
 				color, _ := group["color"].(string)
+				iconEmoji, _ := group["icon_emoji"].(string)
 				enabled, _ := group["enabled"].(bool)
-				
+
 				// Set defaults
 				if description == "" {
 					description = fmt.Sprintf("Custom group: %s", name)
@@ -2711,11 +2712,15 @@ func (a *App) loadGroupsFromConfig() bool {
 				if color == "" {
 					color = "#6c757d"
 				}
-				
+				if iconEmoji == "" {
+					iconEmoji = "📁" // Default folder icon
+				}
+
 				a.serverGroups[name] = &ServerGroup{
 					ID:          int(id),
 					Name:        name,
 					Description: description,
+					Icon:        iconEmoji,
 					Color:       color,
 					ServerNames: make([]string, 0),
 					Enabled:     enabled,
@@ -2784,11 +2789,17 @@ func (a *App) syncWithAPIGroups() {
 			color = "#6c757d" // Default color
 		}
 
+		iconEmoji, ok := apiGroup["icon_emoji"].(string)
+		if !ok || iconEmoji == "" {
+			iconEmoji = "📁" // Default folder icon
+		}
+
 		// Create tray group from API group
 		newGroup := &ServerGroup{
 			ID:          a.getNextGroupID(),
 			Name:        name,
 			Description: fmt.Sprintf("Synced from API: %s", name),
+			Icon:        iconEmoji,
 			Color:       color,
 			ServerNames: make([]string, 0),
 			Enabled:     true,
