@@ -22,75 +22,179 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             margin: 0;
-            padding: 20px;
-            background: #f5f5f5;
+            padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
         }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 8px;
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 30px 20px;
+            color: white;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 30px;
+        }
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
         }
         h1 {
-            color: #333;
-            margin-bottom: 30px;
-            text-align: center;
+            margin: 0 0 10px 0;
+            font-size: 32px;
+            font-weight: 600;
         }
-        .group-grid {
+        .subtitle {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        .summary-cards {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
-        .group-card {
-            border: 2px solid #ddd;
-            border-radius: 8px;
-            padding: 20px;
-            background: #fafafa;
-            position: relative;
+        .summary-card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
         }
-        .group-header {
-            display: flex;
-            align-items: center;
-            margin-bottom: 15px;
+        .summary-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
-        .group-icon {
+        .summary-card h3 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .summary-card .value {
             font-size: 32px;
-            margin-right: 15px;
-        }
-        .group-color {
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            margin-right: 10px;
-            border: 2px solid #ccc;
-        }
-        .group-name {
-            font-size: 18px;
             font-weight: bold;
-            flex: 1;
+            color: #333;
         }
-        .group-actions {
+        .table-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+            margin-bottom: 30px;
+        }
+        .table-header {
+            padding: 20px;
+            border-bottom: 2px solid #f0f0f0;
             display: flex;
-            gap: 10px;
-            margin-top: 15px;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .table-header h2 {
+            margin: 0;
+            font-size: 20px;
+            color: #333;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        thead {
+            background: #f8f9fa;
+        }
+        th {
+            padding: 16px;
+            text-align: left;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 2px solid #e0e0e0;
+            white-space: nowrap;
+        }
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+        }
+        th.sortable:hover {
+            background: #e9ecef;
+        }
+        .filter-row th {
+            padding: 8px 16px;
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .filter-input {
+            width: 100%;
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .filter-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+        }
+        td {
+            padding: 16px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        tbody tr:hover {
+            background: #f8f9fa;
+        }
+        .group-icon-cell {
+            font-size: 24px;
+            text-align: center;
+            width: 60px;
+        }
+        .group-color-badge {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: inline-block;
+            border: 2px solid #ddd;
+            vertical-align: middle;
+        }
+        .group-name-cell {
+            font-weight: 600;
+            color: #333;
+        }
+        .server-count {
+            display: inline-block;
+            padding: 4px 12px;
+            background: #e9ecef;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #495057;
+        }
+        .server-count.has-servers {
+            background: #d4edda;
+            color: #155724;
+        }
+        .actions-cell {
+            white-space: nowrap;
         }
         .btn {
             padding: 8px 16px;
             border: none;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
             font-size: 14px;
-            transition: background-color 0.2s;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: inline-block;
         }
         .btn-primary {
-            background: #007bff;
+            background: #667eea;
             color: white;
         }
         .btn-primary:hover {
-            background: #0056b3;
+            background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
         }
         .btn-secondary {
             background: #6c757d;
@@ -106,24 +210,20 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
         .btn-danger:hover {
             background: #c82333;
         }
-        .create-group {
-            border: 2px dashed #007bff;
-            background: #f8f9ff;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 150px;
-            cursor: pointer;
-            transition: all 0.2s;
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 13px;
         }
-        .create-group:hover {
-            background: #e6f3ff;
-            border-color: #0056b3;
+        .btn-create {
+            background: #667eea;
+            color: white;
+            padding: 12px 24px;
+            font-size: 15px;
         }
-        .create-group-text {
-            text-align: center;
-            color: #007bff;
-            font-size: 16px;
+        .btn-create:hover {
+            background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
         }
         .modal {
             display: none;
@@ -225,11 +325,61 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
     </style>
 </head>
 <body>
+    <div class="header">
+        <div class="header-content">
+            <h1>🏷️ Server Group Management</h1>
+            <div class="subtitle">Organize and manage your MCP server groups</div>
+        </div>
+    </div>
+
     <div class="container">
-        <h1>🏷️ Server Group Management</h1>
-        
-        <div class="group-grid" id="groupGrid">
-            <!-- Groups will be loaded here -->
+        <div class="summary-cards">
+            <div class="summary-card">
+                <h3>Total Groups</h3>
+                <div class="value" id="totalGroups">0</div>
+            </div>
+            <div class="summary-card">
+                <h3>Groups with Servers</h3>
+                <div class="value" id="groupsWithServers">0</div>
+            </div>
+            <div class="summary-card">
+                <h3>Empty Groups</h3>
+                <div class="value" id="emptyGroups">0</div>
+            </div>
+            <div class="summary-card">
+                <h3>Available Icons</h3>
+                <div class="value" id="availableIcons">40</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <div class="table-header">
+                <h2>Groups</h2>
+                <button class="btn btn-create" onclick="openCreateModal()">➕ Create New Group</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th class="sortable" data-sort="icon">Icon</th>
+                        <th class="sortable" data-sort="name">Name</th>
+                        <th class="sortable" data-sort="color">Color</th>
+                        <th class="sortable" data-sort="servers">Servers</th>
+                        <th class="sortable" data-sort="description">Description</th>
+                        <th>Actions</th>
+                    </tr>
+                    <tr class="filter-row">
+                        <th><input type="text" class="filter-input" id="filter-icon" placeholder="🔍" onkeyup="applyFilters()"></th>
+                        <th><input type="text" class="filter-input" id="filter-name" placeholder="Filter..." onkeyup="applyFilters()"></th>
+                        <th><input type="text" class="filter-input" id="filter-color" placeholder="Filter..." onkeyup="applyFilters()"></th>
+                        <th><input type="text" class="filter-input" id="filter-servers" placeholder="Filter..." onkeyup="applyFilters()"></th>
+                        <th><input type="text" class="filter-input" id="filter-description" placeholder="Filter..." onkeyup="applyFilters()"></th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="groupsTable">
+                    <!-- Groups will be loaded here -->
+                </tbody>
+            </table>
         </div>
 
         <div class="unused-icons">
@@ -291,15 +441,19 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
         ];
 
         let groups = [];
+        let serverAssignments = {};
         let editingGroup = null;
         let selectedColor = colors[0];
         let selectedIcon = icons[0];
+        let sortColumn = 'name';
+        let sortDirection = 'asc';
 
         // Initialize page
         document.addEventListener('DOMContentLoaded', function() {
             loadGroups();
             initIconPicker();
             initColorPicker();
+            initSorting();
         });
 
         // Load groups from server
@@ -308,7 +462,16 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                 .then(response => response.json())
                 .then(data => {
                     groups = data.groups || [];
+                    // Build server assignments map
+                    serverAssignments = {};
+                    (data.assignments || []).forEach(a => {
+                        if (!serverAssignments[a.group_name]) {
+                            serverAssignments[a.group_name] = [];
+                        }
+                        serverAssignments[a.group_name].push(a.server_name);
+                    });
                     renderGroups();
+                    updateSummaryCards();
                 })
                 .catch(error => {
                     console.error('Failed to load groups:', error);
@@ -316,35 +479,150 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                 });
         }
 
-        // Render groups grid
-        function renderGroups() {
-            const grid = document.getElementById('groupGrid');
-            grid.innerHTML = '';
+        // Update summary cards
+        function updateSummaryCards() {
+            const totalGroups = groups.length;
+            let groupsWithServers = 0;
+            let emptyGroups = 0;
 
-            // Add create group card
-            const createCard = document.createElement('div');
-            createCard.className = 'group-card create-group';
-            createCard.onclick = () => openCreateModal();
-            createCard.innerHTML = '<div class="create-group-text">➕<br>Create New Group</div>';
-            grid.appendChild(createCard);
-
-            // Add existing groups
             groups.forEach(group => {
-                const card = document.createElement('div');
-                card.className = 'group-card';
+                const servers = serverAssignments[group.name] || [];
+                if (servers.length > 0) {
+                    groupsWithServers++;
+                } else {
+                    emptyGroups++;
+                }
+            });
+
+            const usedIcons = new Set(groups.map(g => g.icon_emoji).filter(Boolean));
+            const availableIcons = icons.length - usedIcons.size;
+
+            document.getElementById('totalGroups').textContent = totalGroups;
+            document.getElementById('groupsWithServers').textContent = groupsWithServers;
+            document.getElementById('emptyGroups').textContent = emptyGroups;
+            document.getElementById('availableIcons').textContent = availableIcons;
+        }
+
+        // Initialize sorting
+        function initSorting() {
+            document.querySelectorAll('th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const column = th.dataset.sort;
+                    if (sortColumn === column) {
+                        sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        sortColumn = column;
+                        sortDirection = 'asc';
+                    }
+                    renderGroups();
+                });
+            });
+        }
+
+        // Sort groups
+        function sortGroups(groupsToSort) {
+            return groupsToSort.sort((a, b) => {
+                let aVal, bVal;
+
+                switch(sortColumn) {
+                    case 'icon':
+                        aVal = a.icon_emoji || '';
+                        bVal = b.icon_emoji || '';
+                        break;
+                    case 'name':
+                        aVal = a.name || '';
+                        bVal = b.name || '';
+                        break;
+                    case 'color':
+                        aVal = a.color || '';
+                        bVal = b.color || '';
+                        break;
+                    case 'servers':
+                        aVal = (serverAssignments[a.name] || []).length;
+                        bVal = (serverAssignments[b.name] || []).length;
+                        break;
+                    case 'description':
+                        aVal = a.description || '';
+                        bVal = b.description || '';
+                        break;
+                    default:
+                        aVal = a.name || '';
+                        bVal = b.name || '';
+                }
+
+                if (sortColumn === 'servers') {
+                    return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+                }
+
+                const compareResult = aVal.toString().localeCompare(bVal.toString());
+                return sortDirection === 'asc' ? compareResult : -compareResult;
+            });
+        }
+
+        // Apply filters
+        function applyFilters() {
+            const filters = {
+                icon: document.getElementById('filter-icon').value.toLowerCase(),
+                name: document.getElementById('filter-name').value.toLowerCase(),
+                color: document.getElementById('filter-color').value.toLowerCase(),
+                servers: document.getElementById('filter-servers').value.toLowerCase(),
+                description: document.getElementById('filter-description').value.toLowerCase()
+            };
+
+            const rows = document.querySelectorAll('#groupsTable tr');
+            rows.forEach(row => {
+                const cells = row.cells;
+                if (!cells) return;
+
+                const icon = cells[0]?.textContent.toLowerCase() || '';
+                const name = cells[1]?.textContent.toLowerCase() || '';
+                const color = cells[2]?.textContent.toLowerCase() || '';
+                const servers = cells[3]?.textContent.toLowerCase() || '';
+                const description = cells[4]?.textContent.toLowerCase() || '';
+
+                const match = (
+                    icon.includes(filters.icon) &&
+                    name.includes(filters.name) &&
+                    color.includes(filters.color) &&
+                    servers.includes(filters.servers) &&
+                    description.includes(filters.description)
+                );
+
+                row.style.display = match ? '' : 'none';
+            });
+        }
+
+        // Render groups table
+        function renderGroups() {
+            const tbody = document.getElementById('groupsTable');
+            tbody.innerHTML = '';
+
+            if (groups.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:40px; color:#666;">No groups yet. Click "Create New Group" to get started.</td></tr>';
+                return;
+            }
+
+            const sortedGroups = sortGroups([...groups]);
+
+            sortedGroups.forEach(group => {
                 const icon = group.icon_emoji || '📁';
-                card.innerHTML = ` + "`" + `
-                    <div class="group-header">
-                        <div class="group-icon">${icon}</div>
-                        <div class="group-color" style="background-color: ${group.color}"></div>
-                        <div class="group-name">${group.name}</div>
-                    </div>
-                    <div class="group-actions">
-                        <button class="btn btn-primary" onclick="editGroup('${group.name}')">Edit</button>
-                        <button class="btn btn-danger" onclick="deleteGroup('${group.name}')">Delete</button>
-                    </div>
+                const servers = serverAssignments[group.name] || [];
+                const serverCount = servers.length;
+                const description = group.description || '';
+
+                const row = document.createElement('tr');
+                row.innerHTML = ` + "`" + `
+                    <td class="group-icon-cell">${icon}</td>
+                    <td class="group-name-cell">${group.name}</td>
+                    <td><span class="group-color-badge" style="background-color: ${group.color}"></span></td>
+                    <td><span class="server-count ${serverCount > 0 ? 'has-servers' : ''}">${serverCount}</span></td>
+                    <td>${description}</td>
+                    <td class="actions-cell">
+                        <button class="btn btn-primary btn-sm" onclick="editGroup('${group.name}')">Edit</button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteGroup('${group.name}')">Delete</button>
+                    </td>
                 ` + "`" + `;
-                grid.appendChild(card);
+                tbody.appendChild(row);
             });
 
             // Update unused icons list
@@ -537,7 +815,7 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             .then(data => {
                 if (data.success) {
                     closeModal();
-                    loadGroups();
+                    loadGroups(); // This will update both table and summary cards
                 } else {
                     alert('Failed to save group: ' + (data.error || 'Unknown error'));
                 }
