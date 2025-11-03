@@ -446,10 +446,21 @@ func (a *App) cleanup() {
 }
 
 func (a *App) onReady() {
+	a.logger.Info("🎨 TRAY: onReady() called - starting icon setup", zap.Int("icon_bytes", len(iconData)))
+
+	if len(iconData) == 0 {
+		a.logger.Error("🚨 CRITICAL: Icon data is EMPTY!")
+	} else {
+		a.logger.Info("✅ Icon data loaded successfully", zap.Int("size", len(iconData)))
+	}
+
 	systray.SetIcon(iconData)
+	a.logger.Info("✅ systray.SetIcon() called")
+
 	// On macOS, also set as template icon for better system integration
 	if runtime.GOOS == osDarwin {
 		systray.SetTemplateIcon(iconData, iconData)
+		a.logger.Info("✅ systray.SetTemplateIcon() called for macOS")
 	}
 	a.updateServerCountFromConfig()
 
