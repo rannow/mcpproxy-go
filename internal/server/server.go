@@ -2040,10 +2040,8 @@ func (s *Server) syncServerGroupAssignments() {
 				s.config.Servers[i].GroupName = "" // Clear legacy field
 			}
 			groupsMutex.RUnlock()
-		} else {
-			s.config.Servers[i].GroupID = 0
-			s.config.Servers[i].GroupName = "" // Clear legacy field
 		}
+		// REMOVED ELSE CLAUSE - preserve existing group_id if not in assignments map
 	}
 
 	s.logger.Debug("Synced server-group assignments to config",

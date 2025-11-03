@@ -1184,6 +1184,12 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 }
 
 func (m *MenuManager) findGroupForServer(serverName string, server map[string]interface{}) *ServerGroup {
+	// Debug: log what we're looking for
+	m.logger.Debug("[ICON DEBUG] Finding group for server",
+		zap.String("server", serverName),
+		zap.Any("server_data", server),
+		zap.Int("total_groups", len(*m.serverGroups)))
+
 	// Prefer explicit group_id
 	if v, ok := server["group_id"]; ok {
 		switch id := v.(type) {
@@ -1452,7 +1458,7 @@ func (m *MenuManager) createGroupActionsSubmenu(serverMenuItem *systray.MenuItem
 		for groupName, group := range *m.serverGroups {
 			if group.Enabled && groupName != currentGroupName {
 				groupItem := assignSubmenu.AddSubMenuItem(
-					fmt.Sprintf("%s %s (%d servers)", group.Icon, groupName, len(group.ServerNames)),
+					fmt.Sprintf("%s %s", group.Icon, groupName),
 					fmt.Sprintf("Assign server to group '%s'", groupName))
 
 				go func(name, group string, item *systray.MenuItem) {

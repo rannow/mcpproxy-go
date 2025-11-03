@@ -489,8 +489,8 @@ func (a *App) onReady() {
 	// --- Group Management Menu ---
 	a.groupManagementMenu = systray.AddMenuItem("🌐 Group Management", "")
 
-	// --- Resource Monitor Menu ---
-	a.resourceMonitorMenu = systray.AddMenuItem("📊 Resource Monitor", "View system resources and metrics")
+	// --- MCPProxy Management Menu ---
+	a.resourceMonitorMenu = systray.AddMenuItem("📊 MCPProxy Management", "View system resources and metrics")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
@@ -1792,6 +1792,11 @@ func (a *App) saveGroupsToConfig() error {
 		return fmt.Errorf("config path not available")
 	}
 
+	// IMPORTANT: Populate ServerNames from current config FIRST
+	// This ensures we have the complete list of server assignments
+	// before saving, preventing accidental reset of group_ids
+	a.populateServerNamesFromConfig()
+
 	// Read the current config file as JSON
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1811,8 +1816,9 @@ func (a *App) saveGroupsToConfig() error {
 				"id":          group.ID,
 				"name":        group.Name,
 				"description": group.Description,
+				"icon_emoji":  group.Icon,
 				"color":       group.Color,
-					"enabled":     group.Enabled,
+				"enabled":     group.Enabled,
 			})
 		}
 	}
@@ -1820,24 +1826,26 @@ func (a *App) saveGroupsToConfig() error {
 	// Update the groups in the config
 	configData["groups"] = groups
 
+	// Build map of server -> group ID from current group assignments
+	serverToGroupID := make(map[string]int)
+	for _, group := range a.serverGroups {
+		for _, assignedServerName := range group.ServerNames {
+			serverToGroupID[assignedServerName] = group.ID
+		}
+	}
+
 	// Update server group assignments using group IDs
 	if servers, ok := configData["mcpServers"].([]interface{}); ok {
 		for _, serverInterface := range servers {
 			if server, ok := serverInterface.(map[string]interface{}); ok {
 				if serverName, ok := server["name"].(string); ok {
-					// Find which group this server belongs to
 					delete(server, "group_name") // Remove old field
-					server["group_id"] = 0       // Reset to 0 (no group)
-					for _, group := range a.serverGroups {
-						for _, assignedServerName := range group.ServerNames {
-							if assignedServerName == serverName {
-								server["group_id"] = group.ID
-								break
-							}
-						}
-						if groupID, ok := server["group_id"].(int); ok && groupID != 0 {
-							break
-						}
+
+					// Set group_id from map, or 0 if not in any group
+					if groupID, exists := serverToGroupID[serverName]; exists {
+						server["group_id"] = groupID
+					} else {
+						server["group_id"] = 0
 					}
 				}
 			}
@@ -2702,6 +2710,7 @@ func (a *App) loadGroupsFromConfig() bool {
 
 				description, _ := group["description"].(string)
 				color, _ := group["color"].(string)
+				icon, _ := group["icon_emoji"].(string)
 				enabled, _ := group["enabled"].(bool)
 				
 				// Set defaults
@@ -2716,6 +2725,7 @@ func (a *App) loadGroupsFromConfig() bool {
 					ID:          int(id),
 					Name:        name,
 					Description: description,
+					Icon:        icon,
 					Color:       color,
 					ServerNames: make([]string, 0),
 					Enabled:     enabled,
