@@ -369,25 +369,30 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
     <script>
         let currentServers = [];
         let filteredServers = [];
-        let currentSort = loadSortPreference();
+        let sortColumn = 'name';
+        let sortDirection = 'asc';
 
-        // Load sort preference from localStorage
+        // Load sort preference from localStorage on init
         function loadSortPreference() {
             try {
                 const saved = localStorage.getItem('serversSortPreference');
                 if (saved) {
-                    return JSON.parse(saved);
+                    const pref = JSON.parse(saved);
+                    sortColumn = pref.column || 'name';
+                    sortDirection = pref.direction || 'asc';
                 }
             } catch (e) {
                 console.error('Error loading sort preference:', e);
             }
-            return { column: null, direction: 'asc' };
         }
 
         // Save sort preference to localStorage
         function saveSortPreference() {
             try {
-                localStorage.setItem('serversSortPreference', JSON.stringify(currentSort));
+                localStorage.setItem('serversSortPreference', JSON.stringify({
+                    column: sortColumn,
+                    direction: sortDirection
+                }));
             } catch (e) {
                 console.error('Error saving sort preference:', e);
             }
@@ -425,24 +430,29 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             return Math.floor(diff / 86400) + 'd ago';
         }
 
-        function sortServers(column) {
-            // Toggle direction if clicking same column
-            if (currentSort.column === column) {
-                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
-            } else {
-                currentSort.column = column;
-                currentSort.direction = 'asc';
-            }
+        // Initialize sorting (like groups page)
+        function initSorting() {
+            document.querySelectorAll('th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const column = th.dataset.sort;
+                    if (sortColumn === column) {
+                        sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        sortColumn = column;
+                        sortDirection = 'asc';
+                    }
+                    saveSortPreference();
+                    renderServers();
+                });
+            });
+        }
 
-            // Save preference
-            saveSortPreference();
-
-            // Sort the filtered servers array (or current servers if no filter)
-            const serversToSort = hasActiveFilters() ? filteredServers : currentServers;
-            serversToSort.sort((a, b) => {
+        // Sort servers array
+        function sortServers(serversToSort) {
+            return serversToSort.sort((a, b) => {
                 let valA, valB;
 
-                switch(column) {
+                switch(sortColumn) {
                     case 'name':
                         valA = (a.name || '').toLowerCase();
                         valB = (b.name || '').toLowerCase();
@@ -475,14 +485,15 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                         return 0;
                 }
 
-                if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
-                if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
-                return 0;
-            });
+                // Numeric comparison for numeric columns
+                if (sortColumn === 'retry_count' || sortColumn === 'tool_count' || sortColumn === 'last_retry') {
+                    return sortDirection === 'asc' ? valA - valB : valB - valA;
+                }
 
-            // Update UI
-            updateTableWithCurrentData();
-            updateSortIndicators();
+                // String comparison for text columns
+                const compareResult = valA.toString().localeCompare(valB.toString());
+                return sortDirection === 'asc' ? compareResult : -compareResult;
+            });
         }
 
         function updateSortIndicators() {
@@ -492,10 +503,10 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             });
 
             // Add current sort class
-            if (currentSort.column) {
-                const th = document.querySelector('th[data-sort="' + currentSort.column + '"]');
+            if (sortColumn) {
+                const th = document.querySelector('th[data-sort="' + sortColumn + '"]');
                 if (th) {
-                    th.classList.add('sort-' + currentSort.direction);
+                    th.classList.add('sort-' + sortDirection);
                 }
             }
         }
@@ -548,8 +559,7 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
 
         function applyFilters() {
             filteredServers = getFilteredServers();
-            updateTableWithCurrentData();
-            updateFilterCounts();
+            renderServers();
         }
 
         function clearAllFilters() {
@@ -567,13 +577,18 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             document.getElementById('filtered-count').textContent = filteredServers.length;
         }
 
-        function updateTableWithCurrentData() {
+        // Render servers table (like groups page)
+        function renderServers() {
             const tbody = document.getElementById('servers-table');
             tbody.innerHTML = '';
 
-            const serversToDisplay = filteredServers.length > 0 || hasActiveFilters() ? filteredServers : currentServers;
+            // Determine which servers to display
+            const serversToDisplay = hasActiveFilters() ? filteredServers : currentServers;
 
-            serversToDisplay.forEach(server => {
+            // Sort the servers
+            const sortedServers = sortServers([...serversToDisplay]);
+
+            sortedServers.forEach(server => {
                 const row = document.createElement('tr');
                 const timeSince = formatTimeSince(server.last_retry_time);
                 const errorText = server.last_error || '-';
@@ -594,6 +609,7 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
             });
 
             updateFilterCounts();
+            updateSortIndicators();
         }
 
         function hasActiveFilters() {
@@ -626,58 +642,8 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                     // Store servers
                     currentServers = data.servers;
 
-                    // Apply filters first (important for correct display)
+                    // Apply filters and render
                     applyFilters();
-
-                    // Apply current sort if any
-                    if (currentSort.column) {
-                        // Apply existing sort column and direction
-                        const serversToSort = hasActiveFilters() ? filteredServers : currentServers;
-                        serversToSort.sort((a, b) => {
-                            let valA, valB;
-
-                            switch(currentSort.column) {
-                                case 'name':
-                                    valA = (a.name || '').toLowerCase();
-                                    valB = (b.name || '').toLowerCase();
-                                    break;
-                                case 'status':
-                                    valA = (a.status || '').toLowerCase();
-                                    valB = (b.status || '').toLowerCase();
-                                    break;
-                                case 'protocol':
-                                    valA = (a.protocol || '').toLowerCase();
-                                    valB = (b.protocol || '').toLowerCase();
-                                    break;
-                                case 'retry_count':
-                                    valA = a.retry_count || 0;
-                                    valB = b.retry_count || 0;
-                                    break;
-                                case 'last_retry':
-                                    valA = a.last_retry_time ? new Date(a.last_retry_time).getTime() : 0;
-                                    valB = b.last_retry_time ? new Date(b.last_retry_time).getTime() : 0;
-                                    break;
-                                case 'time_to_connect':
-                                    valA = a.time_to_connection || '';
-                                    valB = b.time_to_connection || '';
-                                    break;
-                                case 'tool_count':
-                                    valA = a.tool_count || 0;
-                                    valB = b.tool_count || 0;
-                                    break;
-                                default:
-                                    return 0;
-                            }
-
-                            if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
-                            if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
-                            return 0;
-                        });
-                        updateTableWithCurrentData();
-                        updateSortIndicators();
-                    } else {
-                        updateTableWithCurrentData();
-                    }
 
                     // Show content, hide loading
                     document.getElementById('loading').style.display = 'none';
@@ -693,16 +659,10 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                 });
         }
 
-        // Initial load
+        // Initialize page (like groups page)
+        loadSortPreference();
+        initSorting();
         refreshServers();
-
-        // Add click handlers to sortable headers (add once after initial load)
-        document.querySelectorAll('th.sortable').forEach(th => {
-            th.addEventListener('click', () => {
-                const sortColumn = th.getAttribute('data-sort');
-                sortServers(sortColumn);
-            });
-        });
 
         // Auto-refresh every 5 seconds
         setInterval(refreshServers, 5000);
