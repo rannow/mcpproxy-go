@@ -1,0 +1,6 @@
+#!/bin/bash
+# MCPProxy Application Launcher
+# This script runs as a proper macOS application with GUI access
+
+cd "$(dirname "$0")/../../.."
+exec ./mcpproxy serve --log-to-file=true

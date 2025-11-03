@@ -1,0 +1,17 @@
+# Additional requirements for semantic search agent
+
+# Vector embeddings and similarity search
+sentence-transformers>=2.2.0
+chromadb>=0.4.24
+
+# FastAPI for HTTP API
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# HTTP client for semantic tools
+httpx>=0.25.0
+
+# Already in base requirements.txt but needed for semantic search:
+# langgraph>=0.2.0
+# langchain>=0.3.0
+# pydantic>=2.0.0
