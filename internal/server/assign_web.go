@@ -452,6 +452,12 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
         // Apply all filters
         function applyFilters() {
             filteredServers = getFilteredServers();
+
+            // Apply current sort to filtered results
+            if (currentSort.column) {
+                applySortToArray(filteredServers);
+            }
+
             renderServersTable();
             updateFilterCounts();
         }
@@ -527,30 +533,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
 
                 // Apply saved sort if any
                 if (currentSort.column) {
-                    allServers.sort((a, b) => {
-                        let valA, valB;
-
-                        switch(currentSort.column) {
-                            case 'name':
-                                valA = (a.name || '').toLowerCase();
-                                valB = (b.name || '').toLowerCase();
-                                break;
-                            case 'status':
-                                valA = (a.status || '').toLowerCase();
-                                valB = (b.status || '').toLowerCase();
-                                break;
-                            case 'protocol':
-                                valA = (a.protocol || '').toLowerCase();
-                                valB = (b.protocol || '').toLowerCase();
-                                break;
-                            default:
-                                return 0;
-                        }
-
-                        if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
-                        if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
-                        return 0;
-                    });
+                    applySortToArray(allServers);
                     updateSortIndicators();
                 } else {
                     // Default sort by name if no preference
@@ -596,25 +579,14 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             }
         }
 
-        // Sort servers by column
-        function sortServers(column) {
-            // Toggle direction if clicking same column
-            if (currentSort.column === column) {
-                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
-            } else {
-                currentSort.column = column;
-                currentSort.direction = 'asc';
-            }
+        // Apply sort to an array (helper function)
+        function applySortToArray(arr) {
+            if (!currentSort.column) return;
 
-            // Save preference
-            saveSortPreference();
-
-            // Sort the filtered servers array (or all servers if no filter)
-            const serversToSort = hasActiveFilters() ? filteredServers : allServers;
-            serversToSort.sort((a, b) => {
+            arr.sort((a, b) => {
                 let valA, valB;
 
-                switch(column) {
+                switch(currentSort.column) {
                     case 'name':
                         valA = (a.name || '').toLowerCase();
                         valB = (b.name || '').toLowerCase();
@@ -635,6 +607,24 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                 if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
                 return 0;
             });
+        }
+
+        // Sort servers by column
+        function sortServers(column) {
+            // Toggle direction if clicking same column
+            if (currentSort.column === column) {
+                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.column = column;
+                currentSort.direction = 'asc';
+            }
+
+            // Save preference
+            saveSortPreference();
+
+            // Sort the filtered servers array (or all servers if no filter)
+            const serversToSort = hasActiveFilters() ? filteredServers : allServers;
+            applySortToArray(serversToSort);
 
             // Update UI
             renderServersTable();
@@ -662,7 +652,8 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             const tbody = document.getElementById('servers-table');
             tbody.innerHTML = '';
 
-            const serversToDisplay = filteredServers.length > 0 || hasActiveFilters() ? filteredServers : allServers;
+            // Use the same logic as sortServers() to determine which array to display
+            const serversToDisplay = hasActiveFilters() ? filteredServers : allServers;
 
             serversToDisplay.forEach(server => {
                 const row = document.createElement('tr');
