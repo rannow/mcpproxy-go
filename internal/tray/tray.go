@@ -2254,6 +2254,9 @@ func (a *App) handleDeleteGroup(groupName string) {
 	// Refresh the menu
 	a.refreshGroupsMenu()
 	a.updateGroupManagementSubmenus() // Update Group Management submenus to reflect deletion
+	if a.syncManager != nil {
+		a.syncManager.SyncDelayed() // Refresh server menus to remove group icons
+	}
 }
 
 // handleAssignServerToGroup assigns a server to a specific group
