@@ -1184,6 +1184,12 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 }
 
 func (m *MenuManager) findGroupForServer(serverName string, server map[string]interface{}) *ServerGroup {
+	// Debug: log what we're looking for
+	m.logger.Debug("[ICON DEBUG] Finding group for server",
+		zap.String("server", serverName),
+		zap.Any("server_data", server),
+		zap.Int("total_groups", len(*m.serverGroups)))
+
 	// Prefer explicit group_id
 	if v, ok := server["group_id"]; ok {
 		switch id := v.(type) {
