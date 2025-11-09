@@ -295,33 +295,6 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Start background status updater (every 5 seconds for more responsive UI)
-	// Wait for menu initialization to complete before starting updates
-	go func() {
-		a.logger.Debug("Waiting for core menu items to be initialized...")
-		// Wait for menu items to be initialized using the flag
-		for !a.coreMenusReady {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				time.Sleep(100 * time.Millisecond) // Check every 100ms
-			}
-		}
-
-		a.logger.Debug("Core menu items ready, starting status updater")
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				a.updateStatus()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
 	// Start config file watcher
 	if a.configWatcher != nil {
 		go a.watchConfigFile()
