@@ -135,6 +135,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
                 <a href="/servers" class="card-button" style="background: #6f42c1;">Access Chat</a>
             </div>
 
+            <div class="card" style="border-left-color: #dc3545;">
+                <h3 style="color: #dc3545;">❌ Failed Servers</h3>
+                <p>View servers with connection or initialization failures</p>
+                <a href="/failed-servers" class="card-button" style="background: #dc3545;">View Failures</a>
+            </div>
+
             <div class="card">
                 <h3>🔗 Server Assignments</h3>
                 <p>Assign servers to groups for better organization</p>

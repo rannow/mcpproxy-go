@@ -1558,6 +1558,7 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 
 	// Server overview web interface
 	mux.HandleFunc("/servers", s.handleServersWeb)
+	mux.HandleFunc("/failed-servers", s.handleFailedServers)
 	mux.HandleFunc("/api/servers/status", s.handleServersStatusAPI)
 	mux.HandleFunc("/api/servers", s.handleServersAPI)
 	mux.HandleFunc("/api/servers/", s.handleServerConfigOrToolsAPI)
