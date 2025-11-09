@@ -210,9 +210,35 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
         .btn-danger:hover {
             background: #c82333;
         }
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #218838;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);
+        }
+        .btn-warning {
+            background: #ffc107;
+            color: #212529;
+        }
+        .btn-warning:hover {
+            background: #e0a800;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(255, 193, 7, 0.3);
+        }
         .btn-sm {
             padding: 6px 12px;
             font-size: 13px;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn:disabled:hover {
+            transform: none;
+            box-shadow: none;
         }
         .btn-create {
             background: #667eea;
@@ -613,6 +639,8 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                     <td><span class="server-count ${serverCount > 0 ? 'has-servers' : ''}">${serverCount}</span></td>
                     <td>${description}</td>
                     <td class="actions-cell">
+                        <button class="btn btn-success btn-sm" onclick="toggleGroupServers('${group.name}', true)" ${serverCount === 0 ? 'disabled' : ''} title="Enable all servers in this group">✓ Enable All</button>
+                        <button class="btn btn-warning btn-sm" onclick="toggleGroupServers('${group.name}', false)" ${serverCount === 0 ? 'disabled' : ''} title="Disable all servers in this group">✗ Disable All</button>
                         <button class="btn btn-primary btn-sm" onclick="editGroup('${group.name}')">Edit</button>
                         <button class="btn btn-danger btn-sm" onclick="deleteGroup('${group.name}')">Delete</button>
                     </td>
@@ -775,6 +803,36 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             .catch(error => {
                 console.error('Failed to delete group:', error);
                 alert('Failed to delete group');
+            });
+        }
+
+        // Toggle all servers in a group (enable or disable)
+        function toggleGroupServers(groupName, enabled) {
+            const action = enabled ? 'enable' : 'disable';
+            if (!confirm(` + "`" + `Are you sure you want to ${action} all servers in group "${groupName}"?` + "`" + `)) return;
+
+            fetch('/api/toggle-group-servers', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    group_name: groupName,
+                    enabled: enabled
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert(data.message || ` + "`" + `Servers ${action}d successfully` + "`" + `);
+                    // Optionally reload the page or update UI
+                } else {
+                    alert('Failed to ' + action + ' servers: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Failed to toggle group servers:', error);
+                alert('Failed to ' + action + ' servers');
             });
         }
 
@@ -1282,4 +1340,120 @@ func (s *Server) handleUnassignServer(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": fmt.Sprintf("Server '%s' unassigned from group", payload.ServerName),
 	})
+}
+
+// handleToggleGroupServers enables or disables all servers in a group
+func (s *Server) handleToggleGroupServers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload struct {
+		GroupName string `json:"group_name"`
+		Enabled   bool   `json:"enabled"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(payload.GroupName) == "" {
+		http.Error(w, "group_name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get all servers assigned to this group
+	assignmentsMutex.RLock()
+	var serversInGroup []string
+	for serverName, groupName := range serverGroupAssignments {
+		if groupName == payload.GroupName {
+			serversInGroup = append(serversInGroup, serverName)
+		}
+	}
+	assignmentsMutex.RUnlock()
+
+	if len(serversInGroup) == 0 {
+		response := map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("No servers in group '%s'", payload.GroupName),
+			"updated": 0,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Get current server configurations
+	servers, err := s.storageManager.ListUpstreamServers()
+	if err != nil {
+		s.logger.Error("Failed to get servers from storage", zap.Error(err))
+		http.Error(w, "Failed to load server configuration", http.StatusInternalServerError)
+		return
+	}
+
+	// Update enabled status for all servers in the group
+	updatedCount := 0
+	for _, srv := range servers {
+		// Check if this server is in the group
+		isInGroup := false
+		for _, serverName := range serversInGroup {
+			if srv.Name == serverName {
+				isInGroup = true
+				break
+			}
+		}
+
+		if isInGroup {
+			srv.Enabled = payload.Enabled
+			if err := s.storageManager.UpdateUpstream(srv.Name, srv); err != nil {
+				s.logger.Error("Failed to update server in storage",
+					zap.String("server", srv.Name),
+					zap.Error(err))
+				continue
+			}
+			updatedCount++
+
+			// Update upstream manager if server exists
+			if payload.Enabled {
+				// Re-add server to manager with updated config
+				if err := s.upstreamManager.AddServerConfig(srv.Name, srv); err != nil {
+					s.logger.Warn("Failed to add server to upstream manager",
+						zap.String("server", srv.Name),
+						zap.Error(err))
+				}
+			} else {
+				// Disconnect and stop the server
+				s.upstreamManager.RemoveServer(srv.Name)
+			}
+		}
+	}
+
+	// Save configuration to disk
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after toggling group servers", zap.Error(err))
+	}
+
+	// Trigger upstream server change event
+	s.OnUpstreamServerChange()
+
+	action := "disabled"
+	if payload.Enabled {
+		action = "enabled"
+	}
+
+	s.logger.Info("Toggled servers in group",
+		zap.String("group", payload.GroupName),
+		zap.String("action", action),
+		zap.Int("count", updatedCount))
+
+	response := map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("%d servers %s in group '%s'", updatedCount, action, payload.GroupName),
+		"updated": updatedCount,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }

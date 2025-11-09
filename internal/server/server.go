@@ -1588,6 +1588,7 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.HandleFunc("/api/groups/", s.handleGroupsAPI)
 
 	// Server assignment endpoints
+	mux.HandleFunc("/api/toggle-group-servers", s.handleToggleGroupServers)
 	mux.HandleFunc("/api/assign-server", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			s.handleAssignServer(w, r)
