@@ -93,6 +93,9 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		ToolCount:                serverConfig.ToolCount,
 		StartOnBoot:              serverConfig.StartOnBoot,
 		HealthCheck:              serverConfig.HealthCheck,
+		AutoDisabled:             serverConfig.AutoDisabled,
+		AutoDisableReason:        serverConfig.AutoDisableReason,
+		AutoDisableThreshold:     serverConfig.AutoDisableThreshold,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -132,6 +135,9 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		ToolCount:                record.ToolCount,
 		StartOnBoot:              record.StartOnBoot,
 		HealthCheck:              record.HealthCheck,
+		AutoDisabled:             record.AutoDisabled,
+		AutoDisableReason:        record.AutoDisableReason,
+		AutoDisableThreshold:     record.AutoDisableThreshold,
 	}, nil
 }
 
@@ -171,6 +177,9 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			ToolCount:                record.ToolCount,
 			StartOnBoot:              record.StartOnBoot,
 			HealthCheck:              record.HealthCheck,
+			AutoDisabled:             record.AutoDisabled,
+			AutoDisableReason:        record.AutoDisableReason,
+			AutoDisableThreshold:     record.AutoDisableThreshold,
 		})
 	}
 

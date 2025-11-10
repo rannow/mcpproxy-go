@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/core"
 	"mcpproxy-go/internal/upstream/types"
@@ -44,6 +45,9 @@ type Client struct {
 
 	// Reconnection protection
 	reconnectMu         sync.Mutex
+
+	// Auto-disable callback
+	onAutoDisable func(serverName string, reason string)
 	reconnectInProgress bool
 }
 
@@ -73,6 +77,15 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		storage:        storage,
 		toolCache:      NewToolCache(cacheTTL),
 		stopMonitoring: make(chan struct{}),
+	}
+
+	// Initialize StateManager from config to preserve auto-disable state across restarts
+	// This ensures the runtime state matches the persisted config file state
+	if serverConfig.AutoDisabled {
+		mc.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+		mc.logger.Info("Initialized StateManager with auto-disabled state from config",
+			zap.String("server", serverConfig.Name),
+			zap.String("reason", serverConfig.AutoDisableReason))
 	}
 
 	// Set up state change callback
@@ -237,16 +250,21 @@ func (mc *Client) GetConnectionStatus() map[string]interface{} {
 	info := mc.StateManager.GetConnectionInfo()
 
 	status := map[string]interface{}{
-		"state":        info.State.String(),
-		"connected":    mc.IsConnected(),
-		"connecting":   mc.IsConnecting(),
-		"should_retry": mc.ShouldRetry(),
-		"retry_count":  info.RetryCount,
-		"server_name":  info.ServerName,
+		"state":         info.State.String(),
+		"connected":     mc.IsConnected(),
+		"connecting":    mc.IsConnecting(),
+		"should_retry":  mc.ShouldRetry(),
+		"retry_count":   info.RetryCount,
+		"server_name":   info.ServerName,
+		"auto_disabled": info.AutoDisabled,
 	}
 
 	if info.LastError != nil {
 		status["last_error"] = info.LastError.Error()
+	}
+
+	if info.AutoDisabled && info.AutoDisableReason != "" {
+		status["auto_disable_reason"] = info.AutoDisableReason
 	}
 
 	if !info.LastRetryTime.IsZero() {
@@ -279,6 +297,11 @@ func (mc *Client) ShouldRetry() bool {
 // SetStateChangeCallback sets a callback for state changes
 func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo)) {
 	mc.StateManager.SetStateChangeCallback(callback)
+}
+
+// SetAutoDisableCallback sets a callback to be invoked when a server is automatically disabled
+func (mc *Client) SetAutoDisableCallback(callback func(serverName string, reason string)) {
+	mc.onAutoDisable = callback
 }
 
 // ListTools retrieves tools with concurrency control
@@ -470,6 +493,63 @@ func (mc *Client) backgroundHealthCheck() {
 
 // performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
+	// Check if server should be auto-disabled due to consecutive failures
+	if mc.StateManager.ShouldAutoDisable() {
+		info := mc.StateManager.GetConnectionInfo()
+		reason := fmt.Sprintf("Server automatically disabled after %d consecutive failures (threshold: %d)",
+			info.ConsecutiveFailures, info.AutoDisableThreshold)
+
+		mc.StateManager.SetAutoDisabled(reason)
+
+		// Persist auto-disable state to config (so it survives restarts)
+		mc.Config.AutoDisabled = true
+		mc.Config.AutoDisableReason = reason
+
+		mc.logger.Warn("Server auto-disabled due to consecutive failures",
+			zap.String("server", mc.Config.Name),
+			zap.Int("consecutive_failures", info.ConsecutiveFailures),
+			zap.Int("threshold", info.AutoDisableThreshold),
+			zap.String("reason", reason))
+
+		// Write detailed failure information to failed_servers.log for web UI display
+		dataDir := mc.globalConfig.DataDir
+		errorMsg := "Unknown error"
+		if info.LastError != nil {
+			errorMsg = info.LastError.Error()
+		}
+
+		// Use detailed logging with error categorization
+		if err := logs.LogServerFailureDetailed(
+			dataDir,
+			mc.Config.Name,
+			errorMsg,
+			info.ConsecutiveFailures,
+			info.FirstAttemptTime,
+		); err != nil {
+			mc.logger.Error("Failed to write detailed failure to failed_servers.log",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+			// Fallback to simple logging
+			if fallbackErr := logs.LogServerFailure(dataDir, mc.Config.Name, reason); fallbackErr != nil {
+				mc.logger.Error("Failed to write simple failure log as fallback",
+					zap.String("server", mc.Config.Name),
+					zap.Error(fallbackErr))
+			}
+		}
+
+		// Trigger configuration update callback to persist auto-disable state
+		if mc.onAutoDisable != nil {
+			mc.onAutoDisable(mc.Config.Name, reason)
+		}
+
+		return
+	}
+
+	// Skip health checks if server is already auto-disabled
+	if mc.StateManager.IsAutoDisabled() {
+		return
+	}
+
 	// Handle OAuth errors with extended backoff
 	if mc.StateManager.GetState() == types.StateError && mc.StateManager.IsOAuthError() {
 		if mc.StateManager.ShouldRetryOAuth() {
