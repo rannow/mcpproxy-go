@@ -57,6 +57,11 @@ type UpstreamRecord struct {
 	// Lazy loading and health check configuration
 	StartOnBoot              bool      `json:"start_on_boot,omitempty"`
 	HealthCheck              bool      `json:"health_check,omitempty"`
+
+	// Auto-disable state (for servers automatically disabled due to failures)
+	AutoDisabled         bool   `json:"auto_disabled,omitempty"`
+	AutoDisableReason    string `json:"auto_disable_reason,omitempty"`
+	AutoDisableThreshold int    `json:"auto_disable_threshold,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics
