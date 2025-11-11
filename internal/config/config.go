@@ -101,6 +101,9 @@ type Config struct {
 
 	// LLM configuration for AI Diagnostic Agent
 	LLM *LLMConfig `json:"llm,omitempty" mapstructure:"llm"`
+
+	// Auto-disable threshold - number of consecutive failures before auto-disabling (default: 3)
+	AutoDisableThreshold int `json:"auto_disable_threshold,omitempty" mapstructure:"auto-disable-threshold"`
 }
 
 // LLMConfig represents LLM provider configuration for AI Diagnostic Agent
@@ -190,6 +193,16 @@ type ServerConfig struct {
 	// Lazy loading and connection behavior flags
 	StartOnBoot               bool      `json:"start_on_boot" mapstructure:"start_on_boot"`         // Connect to server on startup (default: false for lazy loading)
 	HealthCheck               bool      `json:"health_check" mapstructure:"health_check"`           // Perform regular health checks (default: false)
+
+	// Auto-disable threshold - per-server override (0 = use global default)
+	AutoDisableThreshold      int       `json:"auto_disable_threshold,omitempty" mapstructure:"auto_disable_threshold"` // Number of consecutive failures before auto-disabling
+
+	// Auto-disable state - persisted across restarts
+	AutoDisabled              bool      `json:"auto_disabled,omitempty" mapstructure:"auto_disabled"`             // Server was automatically disabled due to failures
+	AutoDisableReason         string    `json:"auto_disable_reason,omitempty" mapstructure:"auto_disable_reason"` // Reason for auto-disable
+
+	// Stopped state - temporary manual stop via tray (separate from Enabled/Disabled)
+	Stopped                   bool      `json:"stopped,omitempty" mapstructure:"stopped"` // Server temporarily stopped by user (keeps Enabled: true)
 }
 
 // OAuthConfig represents OAuth configuration for a server

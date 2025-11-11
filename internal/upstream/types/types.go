@@ -50,33 +50,43 @@ func (s ConnectionState) String() string {
 
 // ConnectionInfo holds information about the current connection state
 type ConnectionInfo struct {
-	State            ConnectionState `json:"state"`
-	LastError        error           `json:"last_error,omitempty"`
-	RetryCount       int             `json:"retry_count"`
-	LastRetryTime    time.Time       `json:"last_retry_time,omitempty"`
-	ServerName       string          `json:"server_name,omitempty"`
-	ServerVersion    string          `json:"server_version,omitempty"`
-	LastOAuthAttempt time.Time       `json:"last_oauth_attempt,omitempty"`
-	OAuthRetryCount  int             `json:"oauth_retry_count"`
-	IsOAuthError     bool            `json:"is_oauth_error"`
-	FirstAttemptTime time.Time       `json:"first_attempt_time,omitempty"` // When first connection attempt was made
-	ConnectedAt      time.Time       `json:"connected_at,omitempty"`       // When connection was successfully established
+	State                ConnectionState `json:"state"`
+	LastError            error           `json:"last_error,omitempty"`
+	RetryCount           int             `json:"retry_count"`
+	LastRetryTime        time.Time       `json:"last_retry_time,omitempty"`
+	ServerName           string          `json:"server_name,omitempty"`
+	ServerVersion        string          `json:"server_version,omitempty"`
+	LastOAuthAttempt     time.Time       `json:"last_oauth_attempt,omitempty"`
+	OAuthRetryCount      int             `json:"oauth_retry_count"`
+	IsOAuthError         bool            `json:"is_oauth_error"`
+	FirstAttemptTime     time.Time       `json:"first_attempt_time,omitempty"` // When first connection attempt was made
+	ConnectedAt          time.Time       `json:"connected_at,omitempty"`       // When connection was successfully established
+	ConsecutiveFailures  int             `json:"consecutive_failures"`         // Number of consecutive failures
+	AutoDisabled         bool            `json:"auto_disabled"`                // Whether server was auto-disabled
+	AutoDisableReason    string          `json:"auto_disable_reason,omitempty"`// Reason for auto-disable
+	AutoDisableThreshold int             `json:"auto_disable_threshold"`       // Threshold for auto-disable (default: 10)
+	LastSuccessTime      time.Time       `json:"last_success_time,omitempty"`  // Last successful connection
 }
 
 // StateManager manages the state transitions for an upstream connection
 type StateManager struct {
-	mu               sync.RWMutex
-	currentState     ConnectionState
-	lastError        error
-	retryCount       int
-	lastRetryTime    time.Time
-	serverName       string
-	serverVersion    string
-	lastOAuthAttempt time.Time
-	oauthRetryCount  int
-	isOAuthError     bool
-	firstAttemptTime time.Time // Time of first connection attempt
-	connectedAt      time.Time // Time when connection was established
+	mu                   sync.RWMutex
+	currentState         ConnectionState
+	lastError            error
+	retryCount           int
+	lastRetryTime        time.Time
+	serverName           string
+	serverVersion        string
+	lastOAuthAttempt     time.Time
+	oauthRetryCount      int
+	isOAuthError         bool
+	firstAttemptTime     time.Time // Time of first connection attempt
+	connectedAt          time.Time // Time when connection was established
+	consecutiveFailures  int       // Consecutive failures counter
+	autoDisabled         bool      // Auto-disable flag
+	autoDisableReason    string    // Reason for auto-disable
+	autoDisableThreshold int       // Threshold for auto-disable (default: 10)
+	lastSuccessTime      time.Time // Last successful connection time
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
@@ -85,7 +95,8 @@ type StateManager struct {
 // NewStateManager creates a new state manager
 func NewStateManager() *StateManager {
 	return &StateManager{
-		currentState: StateDisconnected,
+		currentState:         StateDisconnected,
+		autoDisableThreshold: 3, // Default threshold (user-friendly, overridden by config)
 	}
 }
 
@@ -116,17 +127,22 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 	defer sm.mu.RUnlock()
 
 	return ConnectionInfo{
-		State:            sm.currentState,
-		LastError:        sm.lastError,
-		RetryCount:       sm.retryCount,
-		LastRetryTime:    sm.lastRetryTime,
-		ServerName:       sm.serverName,
-		ServerVersion:    sm.serverVersion,
-		LastOAuthAttempt: sm.lastOAuthAttempt,
-		OAuthRetryCount:  sm.oauthRetryCount,
-		IsOAuthError:     sm.isOAuthError,
-		FirstAttemptTime: sm.firstAttemptTime,
-		ConnectedAt:      sm.connectedAt,
+		State:                sm.currentState,
+		LastError:            sm.lastError,
+		RetryCount:           sm.retryCount,
+		LastRetryTime:        sm.lastRetryTime,
+		ServerName:           sm.serverName,
+		ServerVersion:        sm.serverVersion,
+		LastOAuthAttempt:     sm.lastOAuthAttempt,
+		OAuthRetryCount:      sm.oauthRetryCount,
+		IsOAuthError:         sm.isOAuthError,
+		FirstAttemptTime:     sm.firstAttemptTime,
+		ConnectedAt:          sm.connectedAt,
+		ConsecutiveFailures:  sm.consecutiveFailures,
+		AutoDisabled:         sm.autoDisabled,
+		AutoDisableReason:    sm.autoDisableReason,
+		AutoDisableThreshold: sm.autoDisableThreshold,
+		LastSuccessTime:      sm.lastSuccessTime,
 	}
 }
 
@@ -152,22 +168,30 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 	// Record successful connection time
 	if newState == StateReady {
 		sm.connectedAt = time.Now()
+		sm.lastSuccessTime = time.Now()
 		sm.lastError = nil
 		sm.retryCount = 0
+		sm.consecutiveFailures = 0 // Reset consecutive failures on success
+		sm.isOAuthError = false
 	}
 
 	info := ConnectionInfo{
-		State:            sm.currentState,
-		LastError:        sm.lastError,
-		RetryCount:       sm.retryCount,
-		LastRetryTime:    sm.lastRetryTime,
-		ServerName:       sm.serverName,
-		ServerVersion:    sm.serverVersion,
-		LastOAuthAttempt: sm.lastOAuthAttempt,
-		OAuthRetryCount:  sm.oauthRetryCount,
-		IsOAuthError:     sm.isOAuthError,
-		FirstAttemptTime: sm.firstAttemptTime,
-		ConnectedAt:      sm.connectedAt,
+		State:                sm.currentState,
+		LastError:            sm.lastError,
+		RetryCount:           sm.retryCount,
+		LastRetryTime:        sm.lastRetryTime,
+		ServerName:           sm.serverName,
+		ServerVersion:        sm.serverVersion,
+		LastOAuthAttempt:     sm.lastOAuthAttempt,
+		OAuthRetryCount:      sm.oauthRetryCount,
+		IsOAuthError:         sm.isOAuthError,
+		FirstAttemptTime:     sm.firstAttemptTime,
+		ConnectedAt:          sm.connectedAt,
+		ConsecutiveFailures:  sm.consecutiveFailures,
+		AutoDisabled:         sm.autoDisabled,
+		AutoDisableReason:    sm.autoDisableReason,
+		AutoDisableThreshold: sm.autoDisableThreshold,
+		LastSuccessTime:      sm.lastSuccessTime,
 	}
 
 	callback := sm.onStateChange
@@ -188,20 +212,26 @@ func (sm *StateManager) SetError(err error) {
 	sm.currentState = StateError
 	sm.lastError = err
 	sm.retryCount++
+	sm.consecutiveFailures++ // Increment consecutive failures
 	sm.lastRetryTime = time.Now()
 
 	info := ConnectionInfo{
-		State:            sm.currentState,
-		LastError:        sm.lastError,
-		RetryCount:       sm.retryCount,
-		LastRetryTime:    sm.lastRetryTime,
-		ServerName:       sm.serverName,
-		ServerVersion:    sm.serverVersion,
-		LastOAuthAttempt: sm.lastOAuthAttempt,
-		OAuthRetryCount:  sm.oauthRetryCount,
-		IsOAuthError:     sm.isOAuthError,
-		FirstAttemptTime: sm.firstAttemptTime,
-		ConnectedAt:      sm.connectedAt,
+		State:                sm.currentState,
+		LastError:            sm.lastError,
+		RetryCount:           sm.retryCount,
+		LastRetryTime:        sm.lastRetryTime,
+		ServerName:           sm.serverName,
+		ServerVersion:        sm.serverVersion,
+		LastOAuthAttempt:     sm.lastOAuthAttempt,
+		OAuthRetryCount:      sm.oauthRetryCount,
+		IsOAuthError:         sm.isOAuthError,
+		FirstAttemptTime:     sm.firstAttemptTime,
+		ConnectedAt:          sm.connectedAt,
+		ConsecutiveFailures:  sm.consecutiveFailures,
+		AutoDisabled:         sm.autoDisabled,
+		AutoDisableReason:    sm.autoDisableReason,
+		AutoDisableThreshold: sm.autoDisableThreshold,
+		LastSuccessTime:      sm.lastSuccessTime,
 	}
 
 	callback := sm.onStateChange
@@ -220,17 +250,22 @@ func (sm *StateManager) SetSleeping() {
 	sm.lastError = nil
 
 	info := ConnectionInfo{
-		State:            sm.currentState,
-		LastError:        sm.lastError,
-		RetryCount:       sm.retryCount,
-		LastRetryTime:    sm.lastRetryTime,
-		ServerName:       sm.serverName,
-		ServerVersion:    sm.serverVersion,
-		LastOAuthAttempt: sm.lastOAuthAttempt,
-		OAuthRetryCount:  sm.oauthRetryCount,
-		IsOAuthError:     sm.isOAuthError,
-		FirstAttemptTime: sm.firstAttemptTime,
-		ConnectedAt:      sm.connectedAt,
+		State:                sm.currentState,
+		LastError:            sm.lastError,
+		RetryCount:           sm.retryCount,
+		LastRetryTime:        sm.lastRetryTime,
+		ServerName:           sm.serverName,
+		ServerVersion:        sm.serverVersion,
+		LastOAuthAttempt:     sm.lastOAuthAttempt,
+		OAuthRetryCount:      sm.oauthRetryCount,
+		IsOAuthError:         sm.isOAuthError,
+		FirstAttemptTime:     sm.firstAttemptTime,
+		ConnectedAt:          sm.connectedAt,
+		ConsecutiveFailures:  sm.consecutiveFailures,
+		AutoDisabled:         sm.autoDisabled,
+		AutoDisableReason:    sm.autoDisableReason,
+		AutoDisableThreshold: sm.autoDisableThreshold,
+		LastSuccessTime:      sm.lastSuccessTime,
 	}
 
 	callback := sm.onStateChange
@@ -343,19 +378,26 @@ func (sm *StateManager) Reset() {
 	sm.isOAuthError = false
 	sm.firstAttemptTime = time.Time{}
 	sm.connectedAt = time.Time{}
+	// NOTE: Do NOT reset consecutiveFailures, autoDisabled, or lastSuccessTime
+	// These should persist across disconnections for proper auto-disable logic
 
 	info := ConnectionInfo{
-		State:            sm.currentState,
-		LastError:        sm.lastError,
-		RetryCount:       sm.retryCount,
-		LastRetryTime:    sm.lastRetryTime,
-		ServerName:       sm.serverName,
-		ServerVersion:    sm.serverVersion,
-		LastOAuthAttempt: sm.lastOAuthAttempt,
-		OAuthRetryCount:  sm.oauthRetryCount,
-		IsOAuthError:     sm.isOAuthError,
-		FirstAttemptTime: sm.firstAttemptTime,
-		ConnectedAt:      sm.connectedAt,
+		State:                sm.currentState,
+		LastError:            sm.lastError,
+		RetryCount:           sm.retryCount,
+		LastRetryTime:        sm.lastRetryTime,
+		ServerName:           sm.serverName,
+		ServerVersion:        sm.serverVersion,
+		LastOAuthAttempt:     sm.lastOAuthAttempt,
+		OAuthRetryCount:      sm.oauthRetryCount,
+		IsOAuthError:         sm.isOAuthError,
+		FirstAttemptTime:     sm.firstAttemptTime,
+		ConnectedAt:          sm.connectedAt,
+		ConsecutiveFailures:  sm.consecutiveFailures,
+		AutoDisabled:         sm.autoDisabled,
+		AutoDisableReason:    sm.autoDisableReason,
+		AutoDisableThreshold: sm.autoDisableThreshold,
+		LastSuccessTime:      sm.lastSuccessTime,
 	}
 
 	callback := sm.onStateChange
@@ -379,17 +421,22 @@ func (sm *StateManager) SetOAuthError(err error) {
 	sm.lastRetryTime = time.Now()
 
 	info := ConnectionInfo{
-		State:            sm.currentState,
-		LastError:        sm.lastError,
-		RetryCount:       sm.retryCount,
-		LastRetryTime:    sm.lastRetryTime,
-		ServerName:       sm.serverName,
-		ServerVersion:    sm.serverVersion,
-		LastOAuthAttempt: sm.lastOAuthAttempt,
-		OAuthRetryCount:  sm.oauthRetryCount,
-		IsOAuthError:     sm.isOAuthError,
-		FirstAttemptTime: sm.firstAttemptTime,
-		ConnectedAt:      sm.connectedAt,
+		State:                sm.currentState,
+		LastError:            sm.lastError,
+		RetryCount:           sm.retryCount,
+		LastRetryTime:        sm.lastRetryTime,
+		ServerName:           sm.serverName,
+		ServerVersion:        sm.serverVersion,
+		LastOAuthAttempt:     sm.lastOAuthAttempt,
+		OAuthRetryCount:      sm.oauthRetryCount,
+		IsOAuthError:         sm.isOAuthError,
+		FirstAttemptTime:     sm.firstAttemptTime,
+		ConnectedAt:          sm.connectedAt,
+		ConsecutiveFailures:  sm.consecutiveFailures,
+		AutoDisabled:         sm.autoDisabled,
+		AutoDisableReason:    sm.autoDisableReason,
+		AutoDisableThreshold: sm.autoDisableThreshold,
+		LastSuccessTime:      sm.lastSuccessTime,
 	}
 
 	callback := sm.onStateChange
@@ -437,4 +484,64 @@ func (sm *StateManager) IsOAuthError() bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.isOAuthError
+}
+
+// ShouldAutoDisable returns true if consecutive failures exceed threshold
+func (sm *StateManager) ShouldAutoDisable() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	// Don't auto-disable if already disabled or if threshold is 0 (disabled feature)
+	if sm.autoDisabled || sm.autoDisableThreshold <= 0 {
+		return false
+	}
+
+	return sm.consecutiveFailures >= sm.autoDisableThreshold
+}
+
+// SetAutoDisabled marks the server as auto-disabled with reason
+func (sm *StateManager) SetAutoDisabled(reason string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.autoDisabled = true
+	sm.autoDisableReason = reason
+}
+
+// IsAutoDisabled returns true if the server was auto-disabled
+func (sm *StateManager) IsAutoDisabled() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.autoDisabled
+}
+
+// GetAutoDisableReason returns the reason for auto-disable
+func (sm *StateManager) GetAutoDisableReason() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.autoDisableReason
+}
+
+// SetAutoDisableThreshold sets the threshold for auto-disable
+func (sm *StateManager) SetAutoDisableThreshold(threshold int) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.autoDisableThreshold = threshold
+}
+
+// GetConsecutiveFailures returns the current consecutive failures count
+func (sm *StateManager) GetConsecutiveFailures() int {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.consecutiveFailures
+}
+
+// ResetAutoDisable clears the auto-disable state (for manual re-enable)
+func (sm *StateManager) ResetAutoDisable() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.autoDisabled = false
+	sm.autoDisableReason = ""
+	sm.consecutiveFailures = 0
 }

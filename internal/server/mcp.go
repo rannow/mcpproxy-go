@@ -1702,7 +1702,18 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
 		updatedServer.WorkingDir = workingDir
 	}
+
+	// Handle enabled state change
+	wasEnabled := updatedServer.Enabled
 	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
+
+	// If re-enabling a previously auto-disabled server, clear the auto-disable state
+	if !wasEnabled && updatedServer.Enabled && updatedServer.AutoDisabled {
+		updatedServer.AutoDisabled = false
+		updatedServer.AutoDisableReason = ""
+		p.logger.Info("Cleared auto-disable state on manual re-enable",
+			zap.String("server", name))
+	}
 
 	// Update in storage
 	if err := p.storage.UpdateUpstream(serverID, &updatedServer); err != nil {
@@ -1787,7 +1798,18 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
 		updatedServer.WorkingDir = workingDir
 	}
+
+	// Handle enabled state change
+	wasEnabled := updatedServer.Enabled
 	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
+
+	// If re-enabling a previously auto-disabled server, clear the auto-disable state
+	if !wasEnabled && updatedServer.Enabled && updatedServer.AutoDisabled {
+		updatedServer.AutoDisabled = false
+		updatedServer.AutoDisableReason = ""
+		p.logger.Info("Cleared auto-disable state on manual re-enable",
+			zap.String("server", name))
+	}
 
 	// Update in storage
 	if err := p.storage.UpdateUpstream(serverID, &updatedServer); err != nil {

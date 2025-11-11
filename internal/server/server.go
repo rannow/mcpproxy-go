@@ -202,6 +202,32 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize server-group assignments from config
 	server.initServerGroupAssignments()
 
+	// Setup auto-disable callback to persist config changes
+	upstreamManager.SetServerAutoDisableCallback(func(serverName string, reason string) {
+		server.logger.Info("Server auto-disabled, updating configuration",
+			zap.String("server", serverName),
+			zap.String("reason", reason))
+
+		// Update server config to set enabled=false AND auto_disabled fields
+		server.mu.Lock()
+		for i := range server.config.Servers {
+			if server.config.Servers[i].Name == serverName {
+				server.config.Servers[i].Enabled = false
+				server.config.Servers[i].AutoDisabled = true
+				server.config.Servers[i].AutoDisableReason = reason
+				break
+			}
+		}
+		server.mu.Unlock()
+
+		// Save configuration to disk
+		if err := server.SaveConfiguration(); err != nil {
+			server.logger.Error("Failed to save configuration after auto-disable",
+				zap.String("server", serverName),
+				zap.Error(err))
+		}
+	})
+
 	// Setup event bridge to connect StateManager to EventBus
 	server.setupEventBridge()
 
@@ -291,6 +317,14 @@ func (s *Server) getIndexedToolCount() int {
 
 // backgroundInitialization handles server initialization in the background
 func (s *Server) backgroundInitialization() {
+	// Backup and clear failed servers log on startup
+	s.logger.Info("Backing up and clearing failed servers log")
+	if err := logs.BackupAndClearFailureLog(s.config.DataDir); err != nil {
+		s.logger.Warn("Failed to backup/clear failure log", zap.Error(err))
+	} else {
+		s.logger.Info("Failed servers log backed up successfully")
+	}
+
 	s.updateStatus("Loading", "Loading configuration and connecting to servers...")
 
 	// Load configured servers from storage and add to upstream manager
@@ -585,34 +619,31 @@ func (s *Server) loadConfiguredServers() error {
 			continue
 		}
 
-		// Sync to upstream manager based on enabled status - parallel
-		if serverCfg.Enabled {
-			wg.Add(1)
-			go func(cfg *config.ServerConfig) {
-				defer wg.Done()
+		// Sync to upstream manager - always add servers to track state, even if disabled
+		// The upstream manager will handle disabled servers internally by not connecting to them
+		wg.Add(1)
+		go func(cfg *config.ServerConfig) {
+			defer wg.Done()
 
-				// Acquire semaphore
-				semaphore <- struct{}{}
-				defer func() { <-semaphore }() // Release
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }() // Release
 
-				// Add server to upstream manager regardless of quarantine status
-				// Quarantined servers are kept connected for inspection but blocked for execution
-				if err := s.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
-					mu.Lock()
-					errorCount++
-					mu.Unlock()
-					s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
-				}
+			// Add server to upstream manager regardless of enabled/quarantine status
+			// This ensures disabled and auto-disabled servers can have their state tracked
+			if err := s.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
+			}
 
-				if cfg.Quarantined {
-					s.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", cfg.Name))
-				}
-			}(serverCfg)
-		} else {
-			// Remove from upstream manager only if disabled (not quarantined)
-			s.upstreamManager.RemoveServer(serverCfg.Name)
-			s.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
-		}
+			if cfg.Quarantined {
+				s.logger.Info("Server is quarantined but kept for security inspection", zap.String("server", cfg.Name))
+			} else if !cfg.Enabled {
+				s.logger.Info("Server is disabled, added for state tracking but not connected", zap.String("server", cfg.Name))
+			}
+		}(serverCfg)
 	}
 
 	// Wait for all parallel operations to complete
@@ -914,7 +945,70 @@ func (s *Server) setupEventBridge() {
 	// It will then publish events for all state changes
 	s.upstreamManager.SetEventBus(s.eventBus)
 
+	// Set up auto-disable callback to persist server configuration when auto-disabled
+	s.upstreamManager.SetServerAutoDisableCallback(func(serverName string, reason string) {
+		s.logger.Info("Server auto-disabled callback triggered",
+			zap.String("server", serverName),
+			zap.String("reason", reason))
+
+		// Update the server configuration to set enabled: false
+		if err := s.updateServerConfigEnabled(serverName, false); err != nil {
+			s.logger.Error("Failed to disable server in configuration after auto-disable",
+				zap.String("server", serverName),
+				zap.Error(err))
+		} else {
+			s.logger.Info("Server configuration updated after auto-disable",
+				zap.String("server", serverName),
+				zap.Bool("enabled", false))
+		}
+	})
+
 	s.logger.Info("Event bridge ready - state changes will be published to event bus")
+}
+
+// updateServerConfigEnabled updates the enabled state of a server in both storage and config file
+// This is used internally (e.g., by auto-disable callback) to persist server state changes
+func (s *Server) updateServerConfigEnabled(serverName string, enabled bool) error {
+	// Get server config from memory (s.config.Servers) to preserve auto-disable fields
+	// that may have been set by the callback before this function is called
+	s.mu.Lock()
+	var serverConfig *config.ServerConfig
+	for i := range s.config.Servers {
+		if s.config.Servers[i].Name == serverName {
+			serverConfig = s.config.Servers[i]
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if serverConfig == nil {
+		return fmt.Errorf("server not found: %s", serverName)
+	}
+
+	// Update enabled field and timestamp
+	serverConfig.Enabled = enabled
+	serverConfig.Updated = time.Now()
+
+	// Save to storage (this will preserve AutoDisabled and AutoDisableReason)
+	if err := s.storageManager.SaveUpstreamServer(serverConfig); err != nil {
+		return fmt.Errorf("failed to save server configuration to storage: %w", err)
+	}
+
+	// Save to config file (this will preserve AutoDisabled and AutoDisableReason)
+	if err := s.SaveConfiguration(); err != nil {
+		return fmt.Errorf("failed to save configuration file: %w", err)
+	}
+
+	// Publish config change event
+	s.eventBus.Publish(events.Event{
+		Type:       events.EventConfigChange,
+		ServerName: serverName,
+		Data: events.ConfigChangeData{
+			Action: "auto-disabled",
+		},
+	})
+
+	return nil
 }
 
 // GetListenAddress returns the address the server is listening on
@@ -982,6 +1076,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		var connectionState string
 		var lastError string
 		var toolCount int
+		var autoDisabled bool
+		var autoDisableReason string
 
 		if s.upstreamManager != nil {
 			if client, exists := s.upstreamManager.GetClient(server.Name); exists {
@@ -999,6 +1095,12 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				if e, ok := connectionStatus["last_error"].(string); ok {
 					lastError = e
 				}
+				if ad, ok := connectionStatus["auto_disabled"].(bool); ok {
+					autoDisabled = ad
+				}
+				if adr, ok := connectionStatus["auto_disable_reason"].(string); ok {
+					autoDisableReason = adr
+				}
 
 				if connected {
 					toolCount = s.getServerToolCount(server.Name)
@@ -1012,38 +1114,43 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			groupID = cfg.GroupID
 		}
 
-		// Get description, start_on_boot, health_check from config
+		// Get description, start_on_boot, health_check, stopped from config
 		var description string
 		var startOnBoot bool
 		var healthCheck bool
+		var stopped bool
 		if cfg, ok := configByName[server.Name]; ok && cfg != nil {
 			description = cfg.Description
 			startOnBoot = cfg.StartOnBoot
 			healthCheck = cfg.HealthCheck
+			stopped = cfg.Stopped
 		}
 
 		result = append(result, map[string]interface{}{
-			"name":            server.Name,
-			"description":     description,
-			"url":             server.URL,
-			"command":         server.Command,
-			"args":            server.Args,
-			"working_dir":     server.WorkingDir,
-			"env":             server.Env,
-			"protocol":        server.Protocol,
-			"repository_url":  server.RepositoryURL,
-			"enabled":         server.Enabled,
-			"quarantined":     server.Quarantined,
-			"created":         server.Created,
-			"connected":       connected,
-			"connecting":      connecting,
-			"sleeping":        sleeping,
-			"connection_state": connectionState,
-			"tool_count":      toolCount,
-			"last_error":      lastError,
-			"group_id":        groupID,
-			"start_on_boot":   startOnBoot,
-			"health_check":    healthCheck,
+			"name":               server.Name,
+			"description":        description,
+			"url":                server.URL,
+			"command":            server.Command,
+			"args":               server.Args,
+			"working_dir":        server.WorkingDir,
+			"env":                server.Env,
+			"protocol":           server.Protocol,
+			"repository_url":     server.RepositoryURL,
+			"enabled":            server.Enabled,
+			"quarantined":        server.Quarantined,
+			"stopped":            stopped,
+			"created":            server.Created,
+			"connected":          connected,
+			"connecting":         connecting,
+			"sleeping":           sleeping,
+			"connection_state":   connectionState,
+			"tool_count":         toolCount,
+			"last_error":         lastError,
+			"auto_disabled":      autoDisabled,
+			"auto_disable_reason": autoDisableReason,
+			"group_id":           groupID,
+			"start_on_boot":      startOnBoot,
+			"health_check":       healthCheck,
 		})
 	}
 
@@ -1238,6 +1345,98 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
+	return nil
+}
+
+// StopUpstreamServer temporarily stops a server (sets Stopped=true, keeps Enabled=true)
+// This is used by the "Stop All Servers" tray button to pause servers without disabling them
+func (s *Server) StopUpstreamServer(serverName string) error {
+	s.logger.Info("Request to stop server",
+		zap.String("server", serverName))
+
+	// Update configuration in memory
+	s.mu.Lock()
+	for _, serverConfig := range s.config.Servers {
+		if serverConfig.Name == serverName {
+			serverConfig.Stopped = true
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	// Save configuration to disk
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after stopping server", zap.Error(err))
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	// Disconnect the server
+	if client, exists := s.upstreamManager.GetClient(serverName); exists {
+		if err := client.Disconnect(); err != nil {
+			s.logger.Warn("Failed to disconnect server during stop",
+				zap.String("server", serverName),
+				zap.Error(err))
+		}
+	}
+
+	// Publish config change event for tray to react
+	s.eventBus.Publish(events.Event{
+		Type:       events.EventConfigChange,
+		ServerName: serverName,
+		Data: events.ConfigChangeData{
+			Action: "stopped",
+		},
+	})
+
+	s.logger.Info("Successfully stopped server", zap.String("server", serverName))
+	return nil
+}
+
+// UnstopUpstreamServer restarts a stopped server (sets Stopped=false)
+// This is used by the "Start All Servers" tray button to resume stopped servers
+func (s *Server) UnstopUpstreamServer(serverName string) error {
+	s.logger.Info("Request to unstop server",
+		zap.String("server", serverName))
+
+	// Update configuration in memory
+	s.mu.Lock()
+	for _, serverConfig := range s.config.Servers {
+		if serverConfig.Name == serverName {
+			serverConfig.Stopped = false
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	// Save configuration to disk
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after unst stopping server", zap.Error(err))
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	// Reconnect the server
+	if client, exists := s.upstreamManager.GetClient(serverName); exists {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := client.Connect(ctx); err != nil {
+			s.logger.Warn("Failed to reconnect server during unstop",
+				zap.String("server", serverName),
+				zap.Error(err))
+			// Don't return error - the server is now unstopped, connection will be retried
+		}
+	}
+
+	// Publish config change event for tray to react
+	s.eventBus.Publish(events.Event{
+		Type:       events.EventConfigChange,
+		ServerName: serverName,
+		Data: events.ConfigChangeData{
+			Action: "unstopped",
+		},
+	})
+
+	s.logger.Info("Successfully unstopped server", zap.String("server", serverName))
 	return nil
 }
 
@@ -1547,6 +1746,9 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	// Root dashboard handler
 	mux.HandleFunc("/", s.handleDashboard)
 
+	// API Documentation
+	mux.HandleFunc("/docs", s.handleDocs)
+
 	// Metrics web interface
 	mux.HandleFunc("/metrics", s.handleMetricsWeb)
 	mux.HandleFunc("/api/metrics/current", s.handleMetricsAPI)
@@ -1727,13 +1929,8 @@ func (s *Server) SaveConfiguration() error {
 
 	s.logger.Debug("Saving configuration to file (merged)", zap.String("path", configPath))
 
-	// Ensure we have the latest server list from the storage manager
-	latestServers, err := s.storageManager.ListUpstreamServers()
-	if err != nil {
-		s.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
-		return err
-	}
-	s.config.Servers = latestServers
+	// Use in-memory s.config.Servers as authoritative source
+	// (already updated by callbacks and operations)
 
 	// Sync groups from in-memory storage to config (structure only)
 	s.syncGroupsToConfig()
@@ -1908,6 +2105,8 @@ func (s *Server) SaveConfiguration() error {
 			m["created"] = sc.Created
 			m["updated"] = sc.Updated
 			m["isolation"] = sc.Isolation
+			m["auto_disabled"] = sc.AutoDisabled
+			m["auto_disable_reason"] = sc.AutoDisableReason
 		}
 		// Compute final group fields using current values as base
 		prevID := 0
@@ -1945,6 +2144,8 @@ func (s *Server) SaveConfiguration() error {
 			"created":        sc.Created,
 			"updated":        sc.Updated,
 			"isolation":      sc.Isolation,
+			"auto_disabled":      sc.AutoDisabled,
+			"auto_disable_reason": sc.AutoDisableReason,
 		}
 		// Group fields for new server: compute from assignment (if any) else 0/""
 		finalID, _ := computeGroupFields(name, sc.GroupID, "")
