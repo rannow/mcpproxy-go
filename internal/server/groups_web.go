@@ -614,6 +614,22 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             });
         }
 
+        // Helper function to escape strings for use in HTML attributes
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Helper function to escape strings for use in JavaScript
+        function escapeJs(str) {
+            return str.replace(/\\/g, '\\\\')
+                      .replace(/'/g, "\\'")
+                      .replace(/"/g, '\\"')
+                      .replace(/\n/g, '\\n')
+                      .replace(/\r/g, '\\r');
+        }
+
         // Render groups table
         function renderGroups() {
             const tbody = document.getElementById('groupsTable');
@@ -632,19 +648,62 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
                 const serverCount = servers.length;
                 const description = group.description || '';
 
+                // Escape group name for safe use in onclick handlers
+                const escapedGroupName = escapeJs(group.name);
+
                 const row = document.createElement('tr');
+
+                // Create buttons with proper event listeners instead of inline onclick
+                const enableBtn = document.createElement('button');
+                enableBtn.className = 'btn btn-success btn-sm';
+                enableBtn.textContent = '✓ Enable All';
+                enableBtn.title = 'Enable all servers in this group';
+                enableBtn.disabled = serverCount === 0;
+                if (serverCount > 0) {
+                    enableBtn.addEventListener('click', () => {
+                        console.log('Enable button clicked for group:', group.name, 'Server count:', serverCount);
+                        toggleGroupServers(group.name, true);
+                    });
+                }
+
+                const disableBtn = document.createElement('button');
+                disableBtn.className = 'btn btn-warning btn-sm';
+                disableBtn.textContent = '✗ Disable All';
+                disableBtn.title = 'Disable all servers in this group';
+                disableBtn.disabled = serverCount === 0;
+                if (serverCount > 0) {
+                    disableBtn.addEventListener('click', () => {
+                        console.log('Disable button clicked for group:', group.name, 'Server count:', serverCount);
+                        toggleGroupServers(group.name, false);
+                    });
+                }
+
+                const editBtn = document.createElement('button');
+                editBtn.className = 'btn btn-primary btn-sm';
+                editBtn.textContent = 'Edit';
+                editBtn.addEventListener('click', () => editGroup(group.name));
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'btn btn-danger btn-sm';
+                deleteBtn.textContent = 'Delete';
+                deleteBtn.addEventListener('click', () => deleteGroup(group.name));
+
+                // Build the row structure
                 row.innerHTML = ` + "`" + `
-                    <td class="group-icon-cell">${icon}</td>
-                    <td class="group-name-cell">${group.name}</td>
+                    <td class="group-icon-cell">${escapeHtml(icon)}</td>
+                    <td class="group-name-cell">${escapeHtml(group.name)}</td>
                     <td><span class="server-count ${serverCount > 0 ? 'has-servers' : ''}">${serverCount}</span></td>
-                    <td>${description}</td>
-                    <td class="actions-cell">
-                        <button class="btn btn-success btn-sm" onclick="toggleGroupServers('${group.name}', true)" ${serverCount === 0 ? 'disabled' : ''} title="Enable all servers in this group">✓ Enable All</button>
-                        <button class="btn btn-warning btn-sm" onclick="toggleGroupServers('${group.name}', false)" ${serverCount === 0 ? 'disabled' : ''} title="Disable all servers in this group">✗ Disable All</button>
-                        <button class="btn btn-primary btn-sm" onclick="editGroup('${group.name}')">Edit</button>
-                        <button class="btn btn-danger btn-sm" onclick="deleteGroup('${group.name}')">Delete</button>
-                    </td>
+                    <td>${escapeHtml(description)}</td>
+                    <td class="actions-cell"></td>
                 ` + "`" + `;
+
+                // Append buttons to actions cell
+                const actionsCell = row.querySelector('.actions-cell');
+                actionsCell.appendChild(enableBtn);
+                actionsCell.appendChild(disableBtn);
+                actionsCell.appendChild(editBtn);
+                actionsCell.appendChild(deleteBtn);
+
                 tbody.appendChild(row);
             });
 
@@ -825,7 +884,8 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             .then(data => {
                 if (data.success) {
                     alert(data.message || ` + "`" + `Servers ${action}d successfully` + "`" + `);
-                    // Optionally reload the page or update UI
+                    // Reload the page to show updated server states
+                    window.location.reload();
                 } else {
                     alert('Failed to ' + action + ' servers: ' + (data.error || 'Unknown error'));
                 }

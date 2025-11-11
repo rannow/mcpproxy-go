@@ -118,6 +118,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
         <div class="dashboard-grid">
             <div class="card">
+                <h3>📚 API Documentation</h3>
+                <p>Browse comprehensive documentation for all MCP server tools and parameters</p>
+                <a href="/docs" class="card-button">View Documentation</a>
+            </div>
+
+            <div class="card">
                 <h3>📊 Server Groups</h3>
                 <p>Organize and manage your MCP servers into logical groups</p>
                 <a href="/groups" class="card-button">Manage Groups</a>
@@ -127,12 +133,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
                 <h3>🔧 Server Overview</h3>
                 <p>Monitor server connections, status, and performance metrics</p>
                 <a href="/servers" class="card-button">View Servers</a>
-            </div>
-
-            <div class="card" style="border-left-color: #6f42c1;">
-                <h3 style="color: #6f42c1;">🤖 AI Diagnostic Agent</h3>
-                <p>Chat with AI to diagnose and troubleshoot server issues</p>
-                <a href="/servers" class="card-button" style="background: #6f42c1;">Access Chat</a>
             </div>
 
             <div class="card" style="border-left-color: #dc3545;">

@@ -119,6 +119,10 @@ func (mc *Client) Connect(ctx context.Context) error {
 				zap.String("server", mc.Config.Name))
 			// Don't apply backoff for OAuth authorization requirement
 			mc.StateManager.SetError(err)
+
+			// Check if server should be auto-disabled immediately after failure
+			mc.checkAndHandleAutoDisable()
+
 			return fmt.Errorf("OAuth authorization during MCP init failed: %w", err)
 		} else if mc.isOAuthError(err) {
 			mc.logger.Warn("OAuth authentication failed, applying extended backoff",
@@ -128,6 +132,10 @@ func (mc *Client) Connect(ctx context.Context) error {
 		} else {
 			mc.StateManager.SetError(err)
 		}
+
+		// Check if server should be auto-disabled immediately after failure
+		mc.checkAndHandleAutoDisable()
+
 		return fmt.Errorf("core client connection failed: %w", err)
 	}
 
@@ -169,6 +177,9 @@ func (mc *Client) Connect(ctx context.Context) error {
 			EverConnected:            mc.Config.EverConnected,
 			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
 			ToolCount:                mc.Config.ToolCount,
+			AutoDisabled:             mc.Config.AutoDisabled,
+			AutoDisableReason:        mc.Config.AutoDisableReason,
+			AutoDisableThreshold:     mc.Config.AutoDisableThreshold,
 		}); err != nil {
 			mc.logger.Warn("Failed to persist connection history to storage",
 				zap.String("server", mc.Config.Name),
@@ -385,6 +396,9 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			EverConnected:            mc.Config.EverConnected,
 			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
 			ToolCount:                mc.Config.ToolCount,
+			AutoDisabled:             mc.Config.AutoDisabled,
+			AutoDisableReason:        mc.Config.AutoDisableReason,
+			AutoDisableThreshold:     mc.Config.AutoDisableThreshold,
 		}); err != nil {
 			mc.logger.Warn("Failed to persist tool count to storage",
 				zap.String("server", mc.Config.Name),
@@ -491,57 +505,68 @@ func (mc *Client) backgroundHealthCheck() {
 	}
 }
 
+// checkAndHandleAutoDisable checks if server should be auto-disabled and handles it immediately
+// This is called after each connection failure to prevent excessive retries
+func (mc *Client) checkAndHandleAutoDisable() {
+	// Check if server should be auto-disabled due to consecutive failures
+	if !mc.StateManager.ShouldAutoDisable() {
+		return
+	}
+
+	info := mc.StateManager.GetConnectionInfo()
+	reason := fmt.Sprintf("Server automatically disabled after %d consecutive failures (threshold: %d)",
+		info.ConsecutiveFailures, info.AutoDisableThreshold)
+
+	mc.StateManager.SetAutoDisabled(reason)
+
+	// Persist auto-disable state to config (so it survives restarts)
+	mc.Config.AutoDisabled = true
+	mc.Config.AutoDisableReason = reason
+
+	mc.logger.Warn("Server auto-disabled due to consecutive failures",
+		zap.String("server", mc.Config.Name),
+		zap.Int("consecutive_failures", info.ConsecutiveFailures),
+		zap.Int("threshold", info.AutoDisableThreshold),
+		zap.String("reason", reason))
+
+	// Write detailed failure information to failed_servers.log for web UI display
+	dataDir := mc.globalConfig.DataDir
+	errorMsg := "Unknown error"
+	if info.LastError != nil {
+		errorMsg = info.LastError.Error()
+	}
+
+	// Use detailed logging with error categorization
+	if err := logs.LogServerFailureDetailed(
+		dataDir,
+		mc.Config.Name,
+		errorMsg,
+		info.ConsecutiveFailures,
+		info.FirstAttemptTime,
+	); err != nil {
+		mc.logger.Error("Failed to write detailed failure to failed_servers.log",
+			zap.String("server", mc.Config.Name),
+			zap.Error(err))
+		// Fallback to simple logging
+		if fallbackErr := logs.LogServerFailure(dataDir, mc.Config.Name, reason); fallbackErr != nil {
+			mc.logger.Error("Failed to write simple failure log as fallback",
+				zap.String("server", mc.Config.Name),
+				zap.Error(fallbackErr))
+		}
+	}
+
+	// Trigger configuration update callback to persist auto-disable state
+	if mc.onAutoDisable != nil {
+		mc.onAutoDisable(mc.Config.Name, reason)
+	}
+}
+
 // performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
-	// Check if server should be auto-disabled due to consecutive failures
-	if mc.StateManager.ShouldAutoDisable() {
-		info := mc.StateManager.GetConnectionInfo()
-		reason := fmt.Sprintf("Server automatically disabled after %d consecutive failures (threshold: %d)",
-			info.ConsecutiveFailures, info.AutoDisableThreshold)
+	// Check if server should be auto-disabled (using shared helper)
+	mc.checkAndHandleAutoDisable()
 
-		mc.StateManager.SetAutoDisabled(reason)
-
-		// Persist auto-disable state to config (so it survives restarts)
-		mc.Config.AutoDisabled = true
-		mc.Config.AutoDisableReason = reason
-
-		mc.logger.Warn("Server auto-disabled due to consecutive failures",
-			zap.String("server", mc.Config.Name),
-			zap.Int("consecutive_failures", info.ConsecutiveFailures),
-			zap.Int("threshold", info.AutoDisableThreshold),
-			zap.String("reason", reason))
-
-		// Write detailed failure information to failed_servers.log for web UI display
-		dataDir := mc.globalConfig.DataDir
-		errorMsg := "Unknown error"
-		if info.LastError != nil {
-			errorMsg = info.LastError.Error()
-		}
-
-		// Use detailed logging with error categorization
-		if err := logs.LogServerFailureDetailed(
-			dataDir,
-			mc.Config.Name,
-			errorMsg,
-			info.ConsecutiveFailures,
-			info.FirstAttemptTime,
-		); err != nil {
-			mc.logger.Error("Failed to write detailed failure to failed_servers.log",
-				zap.String("server", mc.Config.Name),
-				zap.Error(err))
-			// Fallback to simple logging
-			if fallbackErr := logs.LogServerFailure(dataDir, mc.Config.Name, reason); fallbackErr != nil {
-				mc.logger.Error("Failed to write simple failure log as fallback",
-					zap.String("server", mc.Config.Name),
-					zap.Error(fallbackErr))
-			}
-		}
-
-		// Trigger configuration update callback to persist auto-disable state
-		if mc.onAutoDisable != nil {
-			mc.onAutoDisable(mc.Config.Name, reason)
-		}
-
+	if mc.StateManager.IsAutoDisabled() {
 		return
 	}
 

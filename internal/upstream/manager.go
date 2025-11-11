@@ -11,6 +11,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/events"
+	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
@@ -34,6 +35,9 @@ type Manager struct {
 	// newly available OAuth tokens without explicit DB events (e.g., when CLI
 	// cannot write due to DB lock). Prevents rapid retrigger loops.
 	tokenReconnect map[string]time.Time
+
+	// onServerAutoDisable callback to notify server when a server is auto-disabled
+	onServerAutoDisable func(serverName string, reason string)
 }
 
 // NewManager creates a new upstream manager
@@ -90,6 +94,13 @@ func (m *Manager) SetEventBus(eventBus *events.EventBus) {
 	m.logger.Info("Event bus configured for upstream manager")
 }
 
+// SetServerAutoDisableCallback sets the callback to be invoked when a server is auto-disabled
+func (m *Manager) SetServerAutoDisableCallback(callback func(serverName string, reason string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onServerAutoDisable = callback
+}
+
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
@@ -125,6 +136,15 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 				zap.Bool("is_connected", existingClient.IsConnected()))
 			// Update the client's config reference to the new config but don't recreate the client
 			existingClient.Config = serverConfig
+
+			// Restore auto-disabled state from updated config (fix for config reload bug)
+			if serverConfig.AutoDisabled {
+				existingClient.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+				m.logger.Info("Restored auto-disabled state during config update",
+					zap.String("server", serverConfig.Name),
+					zap.String("reason", serverConfig.AutoDisableReason))
+			}
+
 			return nil
 		}
 	}
@@ -133,6 +153,29 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
+	}
+
+	// Configure auto-disable threshold (per-server or global default)
+	threshold := serverConfig.AutoDisableThreshold
+	if threshold == 0 {
+		// Use global default if per-server not specified
+		threshold = m.globalConfig.AutoDisableThreshold
+		if threshold == 0 {
+			// Final fallback to 3 (user-friendly default)
+			threshold = 3
+		}
+	}
+	client.StateManager.SetAutoDisableThreshold(threshold)
+	m.logger.Debug("Configured auto-disable threshold",
+		zap.String("server", serverConfig.Name),
+		zap.Int("threshold", threshold))
+
+	// Restore auto-disable state from config (if server was previously auto-disabled)
+	if serverConfig.AutoDisabled {
+		client.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+		m.logger.Info("Restored auto-disabled state from config",
+			zap.String("server", serverConfig.Name),
+			zap.String("reason", serverConfig.AutoDisableReason))
 	}
 
 	// Set up notification callback for state changes
@@ -165,6 +208,14 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 					Timestamp: time.Now(),
 				})
 			}
+		})
+	}
+
+	// Set up auto-disable callback to persist config changes
+	if m.onServerAutoDisable != nil {
+		client.SetAutoDisableCallback(func(serverName string, reason string) {
+			// Call the manager's callback which will trigger server config save
+			m.onServerAutoDisable(serverName, reason)
 		})
 	}
 
@@ -211,6 +262,21 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		m.logger.Debug("Skipping connection for disabled server",
 			zap.String("id", id),
 			zap.String("name", serverConfig.Name))
+		return nil
+	}
+
+	if serverConfig.Quarantined {
+		m.logger.Debug("Skipping connection for quarantined server",
+			zap.String("id", id),
+			zap.String("name", serverConfig.Name))
+		return nil
+	}
+
+	if serverConfig.AutoDisabled {
+		m.logger.Debug("Skipping connection for auto-disabled server",
+			zap.String("id", id),
+			zap.String("name", serverConfig.Name),
+			zap.String("reason", serverConfig.AutoDisableReason))
 		return nil
 	}
 
@@ -499,6 +565,19 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		// Check if server is stopped - don't auto-connect stopped servers
+		if client.Config.Stopped {
+			m.logger.Debug("Skipping stopped server (user manually stopped)",
+				zap.String("id", id),
+				zap.String("name", client.Config.Name))
+
+			if client.IsConnected() {
+				m.logger.Info("Disconnecting stopped server", zap.String("id", id), zap.String("name", client.Config.Name))
+				_ = client.Disconnect()
+			}
+			continue
+		}
+
 		// Lazy loading check: Set servers to Sleeping if they have tools in DB and don't have StartOnBoot flag
 		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && !client.Config.StartOnBoot && client.Config.EverConnected {
 			m.logger.Debug("Setting server to Sleeping state (lazy loading enabled, tools in DB)",
@@ -659,13 +738,52 @@ func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob
 
 // handlePersistentFailure disables or quarantines a server after max retries
 func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
+	// Get connection info for detailed logging
+	info := client.StateManager.GetConnectionInfo()
+	errorMsg := "Unknown error"
+	if info.LastError != nil {
+		errorMsg = info.LastError.Error()
+	}
+
 	m.logger.Error("🚫 Server persistently failing after max retries",
 		zap.String("id", id),
 		zap.String("name", client.Config.Name),
-		zap.String("final_state", client.GetState().String()))
+		zap.String("final_state", client.GetState().String()),
+		zap.Int("consecutive_failures", info.ConsecutiveFailures),
+		zap.String("error", errorMsg))
 
 	// Update config to disabled
 	client.Config.Enabled = false
+
+	// Mark as auto-disabled in StateManager (for tray UI and status)
+	reason := fmt.Sprintf("Server automatically disabled after %d startup failures", info.ConsecutiveFailures)
+	client.StateManager.SetAutoDisabled(reason)
+
+	// Persist auto-disable state to config (so it survives restarts)
+	client.Config.AutoDisabled = true
+	client.Config.AutoDisableReason = reason
+
+	// Write detailed failure information to failed_servers.log for web UI display
+	dataDir := m.globalConfig.DataDir
+
+	// Use detailed logging with error categorization
+	if err := logs.LogServerFailureDetailed(
+		dataDir,
+		client.Config.Name,
+		errorMsg,
+		info.ConsecutiveFailures,
+		info.FirstAttemptTime,
+	); err != nil {
+		m.logger.Error("Failed to write detailed failure to failed_servers.log",
+			zap.String("server", client.Config.Name),
+			zap.Error(err))
+		// Fallback to simple logging
+		if fallbackErr := logs.LogServerFailure(dataDir, client.Config.Name, reason); fallbackErr != nil {
+			m.logger.Error("Failed to write simple failure log as fallback",
+				zap.String("server", client.Config.Name),
+				zap.Error(fallbackErr))
+		}
+	}
 
 	// Persist to storage
 	if m.storage != nil {
@@ -691,6 +809,9 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 			EverConnected:            client.Config.EverConnected,
 			LastSuccessfulConnection: client.Config.LastSuccessfulConnection,
 			ToolCount:                client.Config.ToolCount,
+			AutoDisabled:             client.Config.AutoDisabled,
+			AutoDisableReason:        client.Config.AutoDisableReason,
+			AutoDisableThreshold:     client.Config.AutoDisableThreshold,
 		}); err != nil {
 			m.logger.Error("Failed to persist disabled server state",
 				zap.String("server", client.Config.Name),
@@ -701,8 +822,14 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 	// Disconnect client
 	_ = client.Disconnect()
 
+	// Trigger auto-disable callback to persist config changes
+	if m.onServerAutoDisable != nil {
+		m.onServerAutoDisable(client.Config.Name, reason)
+	}
+
 	m.logger.Warn("Server has been disabled due to persistent connection failures. Enable manually after fixing the issue.",
-		zap.String("name", client.Config.Name))
+		zap.String("name", client.Config.Name),
+		zap.String("reason", reason))
 }
 
 // DisconnectAll disconnects from all servers

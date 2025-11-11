@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"hash/fnv"
 	"strconv"
@@ -103,6 +104,8 @@ type ServerInterface interface {
 	// Server management methods for tray menu
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
+	StopUpstreamServer(serverName string) error   // Stop individual upstream server (sets Stopped=true)
+	UnstopUpstreamServer(serverName string) error // Unstop individual upstream server (sets Stopped=false)
 	GetAllServers() ([]map[string]interface{}, error)
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
 
@@ -135,16 +138,18 @@ type App struct {
 	shutdown  func()
 
 	// Menu items for dynamic updates
-	statusItem          *systray.MenuItem
-	startStopItem       *systray.MenuItem
-	serverCountItem     *systray.MenuItem
+	statusItem        *systray.MenuItem
+	startStopItem     *systray.MenuItem
+	stopStartAllItem  *systray.MenuItem
+	serverCountItem   *systray.MenuItem
 
 	// Status-based server menus
 	connectedServersMenu    *systray.MenuItem
 	disconnectedServersMenu *systray.MenuItem
 	sleepingServersMenu     *systray.MenuItem
-	stoppedServersMenu      *systray.MenuItem
+	idleServersMenu         *systray.MenuItem // Renamed from stoppedServersMenu
 	disabledServersMenu     *systray.MenuItem
+	autoDisabledServersMenu *systray.MenuItem
 	quarantineMenu          *systray.MenuItem
 
 	// Legacy upstream menu (for backward compatibility if needed)
@@ -442,6 +447,7 @@ func (a *App) onReady() {
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "")
 	a.statusItem.Disable() // Initially disabled as it's just for display
 	a.startStopItem = systray.AddMenuItem("Start Server", "")
+	a.stopStartAllItem = systray.AddMenuItem("⏸️ Stop All Servers", "Stop all running servers (keeps MCPProxy running)")
 	a.serverCountItem = systray.AddMenuItem("📊 Servers: Loading...", "")
 	a.serverCountItem.Disable() // Display only
 
@@ -454,8 +460,9 @@ func (a *App) onReady() {
 	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "")
 	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "")
 	a.sleepingServersMenu = systray.AddMenuItem("💤 Sleeping Servers", "Servers with lazy loading enabled")
-	a.stoppedServersMenu = systray.AddMenuItem("⏹️ Stopped Servers", "")
-	a.disabledServersMenu = systray.AddMenuItem("⏸️ Disabled Servers", "")
+	a.idleServersMenu = systray.AddMenuItem("⏸️ Idle Servers", "Enabled but not connected")
+	a.disabledServersMenu = systray.AddMenuItem("⏹️ Disabled Servers", "Manually disabled servers")
+	a.autoDisabledServersMenu = systray.AddMenuItem("🚫 Auto-Disabled Servers", "Servers automatically disabled due to failures")
 	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "")
 	systray.AddSeparator()
 
@@ -467,7 +474,7 @@ func (a *App) onReady() {
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.stoppedServersMenu, a.disabledServersMenu, a.quarantineMenu, nil, a.logger)
+	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.idleServersMenu, a.disabledServersMenu, a.autoDisabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
 	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig())
 
@@ -583,6 +590,8 @@ func (a *App) onReady() {
 			select {
 			case <-a.startStopItem.ClickedCh:
 				a.handleStartStop()
+			case <-a.stopStartAllItem.ClickedCh:
+				a.handleStopStartAll()
 			case <-openConfigItem.ClickedCh:
 				a.openConfigDir()
 			case <-editConfigItem.ClickedCh:
@@ -628,34 +637,46 @@ func (a *App) onReady() {
 				a.handleServerMenuClick("connected")
 			case <-a.disconnectedServersMenu.ClickedCh:
 				a.handleServerMenuClick("disconnected")
-			case <-a.stoppedServersMenu.ClickedCh:
-				a.handleServerMenuClick("stopped")
+			case <-a.idleServersMenu.ClickedCh:
+				a.handleServerMenuClick("idle")
 			case <-a.disabledServersMenu.ClickedCh:
 				a.handleServerMenuClick("disabled")
 			case <-a.quarantineMenu.ClickedCh:
 				a.handleServerMenuClick("quarantine")
 			case <-quitItem.ClickedCh:
 				a.logger.Info("Quit item clicked, shutting down")
-				
+
 				// Force quit with timeout to prevent hanging
 				go func() {
 					// Set a maximum time for graceful shutdown
 					timeout := time.After(3 * time.Second)
+					killTimeout := time.After(5 * time.Second)
 					done := make(chan bool, 1)
-					
+
 					go func() {
 						if a.shutdown != nil {
 							a.shutdown()
 						}
 						done <- true
 					}()
-					
+
 					select {
 					case <-done:
 						a.logger.Info("Graceful shutdown completed")
+						os.Exit(0)
 					case <-timeout:
-						a.logger.Warn("Graceful shutdown timed out, forcing exit")
+						a.logger.Warn("Graceful shutdown timed out after 3s, forcing exit with os.Exit(0)")
 						os.Exit(0) // Force exit if graceful shutdown hangs
+
+						// If os.Exit(0) doesn't work (should never happen), wait for kill timeout
+						select {
+						case <-killTimeout:
+							a.logger.Error("os.Exit(0) failed, sending SIGKILL to self")
+							// Last resort: kill -9 self
+							pid := os.Getpid()
+							killCmd := exec.Command("kill", "-9", fmt.Sprintf("%d", pid))
+							_ = killCmd.Run()
+						}
 					}
 				}()
 				return
@@ -783,6 +804,9 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 			// a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
 		}
 	}
+
+	// Update the stop/start all button based on server states
+	a.updateStopStartButton()
 }
 
 
@@ -977,6 +1001,303 @@ func (a *App) handleStartStop() {
 			a.updateStatus()
 		}()
 	}
+}
+
+// getStoppableServerCount counts servers that can be stopped (enabled, not quarantined, not auto-disabled, not already stopped)
+func (a *App) getStoppableServerCount() int {
+	servers, err := a.server.GetAllServers()
+	if err != nil {
+		return 0
+	}
+
+	count := 0
+	for _, serverMap := range servers {
+		enabled, _ := serverMap["enabled"].(bool)
+		quarantined, _ := serverMap["quarantined"].(bool)
+		autoDisabled, _ := serverMap["auto_disabled"].(bool)
+		stopped, _ := serverMap["stopped"].(bool)
+
+		// Count servers that are enabled, not quarantined, not auto-disabled, and not already stopped
+		if enabled && !quarantined && !autoDisabled && !stopped {
+			count++
+		}
+	}
+	return count
+}
+
+// getStoppedServerCount counts currently stopped servers
+func (a *App) getStoppedServerCount() int {
+	servers, err := a.server.GetAllServers()
+	if err != nil {
+		return 0
+	}
+
+	count := 0
+	for _, serverMap := range servers {
+		stopped, _ := serverMap["stopped"].(bool)
+		if stopped {
+			count++
+		}
+	}
+	return count
+}
+
+// updateStopStartButton updates the stop/start all button based on current server states
+func (a *App) updateStopStartButton() {
+	if a.stopStartAllItem == nil {
+		return
+	}
+
+	stoppedCount := a.getStoppedServerCount()
+	stoppableCount := a.getStoppableServerCount()
+
+	if stoppableCount == 0 && stoppedCount > 0 {
+		// All stoppable servers are stopped - show "Start All Servers"
+		a.stopStartAllItem.SetTitle("▶️ Start All Servers")
+		a.stopStartAllItem.SetTooltip("Start all stopped servers")
+		a.stopStartAllItem.Enable()
+	} else if stoppedCount > 0 {
+		// Some servers stopped, some running - show "Start All Servers"
+		a.stopStartAllItem.SetTitle("▶️ Start All Servers")
+		a.stopStartAllItem.SetTooltip("Start all stopped servers")
+		a.stopStartAllItem.Enable()
+	} else {
+		// No stopped servers - show "Stop All Servers"
+		a.stopStartAllItem.SetTitle("⏸️ Stop All Servers")
+		a.stopStartAllItem.SetTooltip("Stop all running servers (keeps MCPProxy running)")
+		a.stopStartAllItem.Enable()
+	}
+}
+
+// handleStopStartAll handles both stop and start operations based on current state
+func (a *App) handleStopStartAll() {
+	stoppedCount := a.getStoppedServerCount()
+
+	// Determine operation based on current state
+	if stoppedCount > 0 {
+		// Start all stopped servers
+		a.handleStartAllServersNew()
+	} else {
+		// Stop all servers
+		a.handleStopAllServersNew()
+	}
+}
+
+// handleStopAllServersNew stops all running servers (sets Stopped=true, keeps Enabled=true)
+func (a *App) handleStopAllServersNew() {
+	a.logger.Info("Stopping all upstream servers from tray")
+
+	// Get all servers
+	servers, err := a.server.GetAllServers()
+	if err != nil {
+		a.logger.Error("Failed to get all servers", zap.Error(err))
+		return
+	}
+
+	// Count stoppable servers
+	total := a.getStoppableServerCount()
+	if total == 0 {
+		a.logger.Info("No servers to stop")
+		return
+	}
+
+	// Disable button during operation
+	if a.stopStartAllItem != nil {
+		a.stopStartAllItem.Disable()
+	}
+
+	// Stop each stoppable server with progress updates
+	stopped := 0
+	var mu sync.Mutex
+
+	for _, serverMap := range servers {
+		name, ok := serverMap["name"].(string)
+		if !ok {
+			continue
+		}
+
+		enabled, _ := serverMap["enabled"].(bool)
+		quarantined, _ := serverMap["quarantined"].(bool)
+		autoDisabled, _ := serverMap["auto_disabled"].(bool)
+		alreadyStopped, _ := serverMap["stopped"].(bool)
+
+		// Skip servers that can't be stopped
+		if !enabled || quarantined || autoDisabled || alreadyStopped {
+			continue
+		}
+
+		// Stop the server
+		go func(serverName string) {
+			if err := a.server.StopUpstreamServer(serverName); err != nil {
+				a.logger.Error("Failed to stop server", zap.String("server", serverName), zap.Error(err))
+			} else {
+				mu.Lock()
+				stopped++
+				current := stopped
+				mu.Unlock()
+
+				// Update button with progress
+				if a.stopStartAllItem != nil {
+					a.stopStartAllItem.SetTitle(fmt.Sprintf("⏸️ Stopping (%d/%d)...", current, total))
+				}
+				a.logger.Info("Stopped server", zap.String("server", serverName), zap.Int("progress", current), zap.Int("total", total))
+			}
+		}(name)
+	}
+
+	// Wait for all operations to complete (with timeout)
+	go func() {
+		timeout := time.After(30 * time.Second)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-timeout:
+				a.logger.Warn("Stop all servers operation timed out")
+
+				// Sync and update button after sync completes
+				if a.syncManager != nil {
+					go func() {
+						// Wait for SyncDelayed() to complete (1 second + buffer)
+						time.Sleep(1200 * time.Millisecond)
+						a.updateStopStartButton()
+					}()
+					a.syncManager.SyncDelayed()
+				} else {
+					a.updateStopStartButton()
+				}
+				return
+			case <-ticker.C:
+				mu.Lock()
+				current := stopped
+				mu.Unlock()
+
+				if current >= total {
+					a.logger.Info("All servers stopped", zap.Int("count", stopped))
+
+					// Sync and update button after sync completes
+					if a.syncManager != nil {
+						go func() {
+							// Wait for SyncDelayed() to complete (1 second + buffer)
+							time.Sleep(1200 * time.Millisecond)
+							a.updateStopStartButton()
+						}()
+						a.syncManager.SyncDelayed()
+					} else {
+						a.updateStopStartButton()
+					}
+					return
+				}
+			}
+		}
+	}()
+}
+
+// handleStartAllServersNew starts all stopped servers (sets Stopped=false)
+func (a *App) handleStartAllServersNew() {
+	a.logger.Info("Starting all stopped servers from tray")
+
+	// Get all servers
+	servers, err := a.server.GetAllServers()
+	if err != nil {
+		a.logger.Error("Failed to get all servers", zap.Error(err))
+		return
+	}
+
+	// Count stopped servers
+	total := a.getStoppedServerCount()
+	if total == 0 {
+		a.logger.Info("No stopped servers to start")
+		return
+	}
+
+	// Disable button during operation
+	if a.stopStartAllItem != nil {
+		a.stopStartAllItem.Disable()
+	}
+
+	// Start each stopped server with progress updates
+	started := 0
+	var mu sync.Mutex
+
+	for _, serverMap := range servers {
+		name, ok := serverMap["name"].(string)
+		if !ok {
+			continue
+		}
+
+		stopped, _ := serverMap["stopped"].(bool)
+		if !stopped {
+			continue
+		}
+
+		// Start the server
+		go func(serverName string) {
+			if err := a.server.UnstopUpstreamServer(serverName); err != nil {
+				a.logger.Error("Failed to start server", zap.String("server", serverName), zap.Error(err))
+			} else {
+				mu.Lock()
+				started++
+				current := started
+				mu.Unlock()
+
+				// Update button with progress
+				if a.stopStartAllItem != nil {
+					a.stopStartAllItem.SetTitle(fmt.Sprintf("▶️ Starting (%d/%d)...", current, total))
+				}
+				a.logger.Info("Started server", zap.String("server", serverName), zap.Int("progress", current), zap.Int("total", total))
+			}
+		}(name)
+	}
+
+	// Wait for all operations to complete (with timeout)
+	go func() {
+		timeout := time.After(30 * time.Second)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-timeout:
+				a.logger.Warn("Start all servers operation timed out")
+
+				// Sync and update button after sync completes
+				if a.syncManager != nil {
+					go func() {
+						// Wait for SyncDelayed() to complete (1 second + buffer)
+						time.Sleep(1200 * time.Millisecond)
+						a.updateStopStartButton()
+					}()
+					a.syncManager.SyncDelayed()
+				} else {
+					a.updateStopStartButton()
+				}
+				return
+			case <-ticker.C:
+				mu.Lock()
+				current := started
+				mu.Unlock()
+
+				if current >= total {
+					a.logger.Info("All stopped servers started", zap.Int("count", started))
+
+					// Sync and update button after sync completes
+					if a.syncManager != nil {
+						go func() {
+							// Wait for SyncDelayed() to complete (1 second + buffer)
+							time.Sleep(1200 * time.Millisecond)
+							a.updateStopStartButton()
+						}()
+						a.syncManager.SyncDelayed()
+					} else {
+						a.updateStopStartButton()
+					}
+					return
+				}
+			}
+		}
+	}()
 }
 
 // onExit is called when the application is quitting
@@ -3058,6 +3379,22 @@ func (a *App) updateGroupManagementSubmenus() {
 
 			// Add separator before group actions
 			groupItem.AddSubMenuItem("───── Actions ─────", "").Disable()
+
+			// Add Enable All Servers button
+			enableAllItem := groupItem.AddSubMenuItem("✅ Enable All Servers", "Enable all servers in this group")
+			go func(gName string, sNames []string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					a.handleEnableAllServersInGroup(gName, sNames)
+				}
+			}(groupName, assignedServers, enableAllItem)
+
+			// Add Disable All Servers button
+			disableAllItem := groupItem.AddSubMenuItem("🚫 Disable All Servers", "Disable all servers in this group")
+			go func(gName string, sNames []string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					a.handleDisableAllServersInGroup(gName, sNames)
+				}
+			}(groupName, assignedServers, disableAllItem)
 		} else {
 			// No servers assigned to this group
 			noServersItem := groupItem.AddSubMenuItem("📭 No servers assigned", "Assign servers to this group")
@@ -3071,6 +3408,76 @@ func (a *App) updateGroupManagementSubmenus() {
 	a.logger.Info("Group Management submenus updated",
 		zap.Int("groups_count", len(a.serverGroups)),
 		zap.Int("assignments_count", len(assignments)))
+}
+
+// handleEnableAllServersInGroup enables all servers assigned to a group
+func (a *App) handleEnableAllServersInGroup(groupName string, serverNames []string) {
+	if len(serverNames) == 0 {
+		a.logger.Warn("No servers to enable in group", zap.String("group", groupName))
+		return
+	}
+
+	a.logger.Info("Enabling all servers in group",
+		zap.String("group", groupName),
+		zap.Int("server_count", len(serverNames)))
+
+	successCount := 0
+	for _, serverName := range serverNames {
+		// Use the server manager to enable the server (updates config + storage)
+		if err := a.server.EnableServer(serverName, true); err != nil {
+			a.logger.Error("Failed to enable server in group",
+				zap.String("server", serverName),
+				zap.String("group", groupName),
+				zap.Error(err))
+		} else {
+			successCount++
+		}
+	}
+
+	a.logger.Info("Completed enabling servers in group",
+		zap.String("group", groupName),
+		zap.Int("success_count", successCount),
+		zap.Int("total_count", len(serverNames)))
+
+	// Trigger menu refresh
+	if a.syncManager != nil {
+		a.syncManager.SyncDelayed()
+	}
+}
+
+// handleDisableAllServersInGroup disables all servers assigned to a group
+func (a *App) handleDisableAllServersInGroup(groupName string, serverNames []string) {
+	if len(serverNames) == 0 {
+		a.logger.Warn("No servers to disable in group", zap.String("group", groupName))
+		return
+	}
+
+	a.logger.Info("Disabling all servers in group",
+		zap.String("group", groupName),
+		zap.Int("server_count", len(serverNames)))
+
+	successCount := 0
+	for _, serverName := range serverNames {
+		// Use the server manager to disable the server (updates config + storage)
+		if err := a.server.EnableServer(serverName, false); err != nil {
+			a.logger.Error("Failed to disable server in group",
+				zap.String("server", serverName),
+				zap.String("group", groupName),
+				zap.Error(err))
+		} else {
+			successCount++
+		}
+	}
+
+	a.logger.Info("Completed disabling servers in group",
+		zap.String("group", groupName),
+		zap.Int("success_count", successCount),
+		zap.Int("total_count", len(serverNames)))
+
+	// Trigger menu refresh
+	if a.syncManager != nil {
+		a.syncManager.SyncDelayed()
+	}
 }
 
 // generateColorForGroup creates a deterministic vibrant color from group name
