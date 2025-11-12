@@ -64,10 +64,69 @@ func NewDiagnosticAgent(logger *zap.Logger, llmConfig *config.LLMConfig) *Diagno
 	}
 }
 
+// LoadMemory reads the diagnostic memory file on startup
+func (d *DiagnosticAgent) LoadMemory() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	memoryPath := filepath.Join(homeDir, ".mcpproxy", "memory.md")
+	content, err := os.ReadFile(memoryPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			d.logger.Info("Memory file does not exist yet", zap.String("path", memoryPath))
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read memory file: %w", err)
+	}
+
+	d.logger.Info("Loaded diagnostic memory", zap.String("path", memoryPath), zap.Int("size", len(content)))
+	return string(content), nil
+}
+
+// AddMemory appends a new finding to the diagnostic memory file
+func (d *DiagnosticAgent) AddMemory(finding string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	memoryPath := filepath.Join(homeDir, ".mcpproxy", "memory.md")
+
+	// Read existing content
+	content, err := os.ReadFile(memoryPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read memory file: %w", err)
+	}
+
+	// Append new finding with timestamp
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	newEntry := fmt.Sprintf("\n### %s\n%s\n", timestamp, finding)
+
+	updatedContent := string(content) + newEntry
+
+	// Write back to file
+	if err := os.WriteFile(memoryPath, []byte(updatedContent), 0644); err != nil {
+		return fmt.Errorf("failed to write memory file: %w", err)
+	}
+
+	d.logger.Info("Added new memory entry", zap.String("timestamp", timestamp))
+	return nil
+}
+
 // DiagnoseServer analyzes connection issues for a specific server
 func (d *DiagnosticAgent) DiagnoseServer(serverName string) (*DiagnosticReport, error) {
 	d.logger.Info("Starting diagnostic analysis", zap.String("server", serverName))
-	
+
+	// Load memory at the start of diagnosis
+	memory, err := d.LoadMemory()
+	if err != nil {
+		d.logger.Warn("Failed to load diagnostic memory", zap.Error(err))
+	} else if memory != "" {
+		d.logger.Info("Using diagnostic memory for analysis")
+	}
+
 	report := &DiagnosticReport{
 		ServerName: serverName,
 		Timestamp:  time.Now(),

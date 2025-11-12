@@ -158,6 +158,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
                 <p>Advanced resource monitoring and system diagnostics</p>
                 <a href="/resources" class="card-button">Open Monitor</a>
             </div>
+
+            <div class="card" style="border-left-color: #17a2b8;">
+                <h3 style="color: #17a2b8;">🧠 Diagnostic Memory</h3>
+                <p>View and edit persistent memory for AI Diagnostic Agent findings</p>
+                <a href="/memory" class="card-button" style="background: #17a2b8;">Manage Memory</a>
+            </div>
         </div>
 
         <div class="footer">
