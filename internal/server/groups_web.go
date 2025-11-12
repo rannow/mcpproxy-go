@@ -883,9 +883,11 @@ func (s *Server) handleGroupsWeb(w http.ResponseWriter, r *http.Request) {
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    alert(data.message || ` + "`" + `Servers ${action}d successfully` + "`" + `);
+                    // Show success message with updated count
+                    const message = data.message || ` + "`" + `${data.updated || 0} servers ${action}d successfully` + "`" + `;
+                    alert(message);
                     // Reload the page to show updated server states
-                    window.location.reload();
+                    setTimeout(() => window.location.reload(), 100);
                 } else {
                     alert('Failed to ' + action + ' servers: ' + (data.error || 'Unknown error'));
                 }
@@ -1467,6 +1469,10 @@ func (s *Server) handleToggleGroupServers(w http.ResponseWriter, r *http.Request
 
 		if isInGroup {
 			srv.Enabled = payload.Enabled
+			// Clear auto-disabled state when enabling OR disabling servers
+			// This ensures users can manually control servers later without auto-disable interference
+			srv.AutoDisabled = false
+			srv.AutoDisableReason = ""
 			if err := s.storageManager.UpdateUpstream(srv.Name, srv); err != nil {
 				s.logger.Error("Failed to update server in storage",
 					zap.String("server", srv.Name),
@@ -1474,6 +1480,21 @@ func (s *Server) handleToggleGroupServers(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			updatedCount++
+
+			// CRITICAL FIX: Update s.config.Servers in memory so SaveConfiguration() persists changes
+			// SaveConfiguration() uses s.config.Servers as the authoritative source
+			for i := range s.config.Servers {
+				if s.config.Servers[i].Name == srv.Name {
+					s.config.Servers[i].Enabled = srv.Enabled
+					s.config.Servers[i].AutoDisabled = srv.AutoDisabled
+					s.config.Servers[i].AutoDisableReason = srv.AutoDisableReason
+					s.logger.Debug("Updated server in s.config.Servers for SaveConfiguration",
+						zap.String("server", srv.Name),
+						zap.Bool("enabled", srv.Enabled),
+						zap.Bool("auto_disabled", srv.AutoDisabled))
+					break
+				}
+			}
 
 			// Update upstream manager if server exists
 			if payload.Enabled {
