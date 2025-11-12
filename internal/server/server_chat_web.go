@@ -481,14 +481,24 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
 
     <div class="container">
         <div class="sidebar">
-            <div class="info-section">
+            <!-- Always visible MCP Inspector button -->
+            <div style="padding: 15px; background: #f8f9fa; border-bottom: 2px solid #e0e0e0; margin-bottom: 10px;">
+                <button class="fast-action-btn" onclick="launchInspector()"
+                        title="Launch MCP Inspector to debug this server in real-time"
+                        id="inspector-btn"
+                        style="width: 100%; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-weight: 600;">
+                    🔬 Launch MCP Inspector
+                </button>
+            </div>
+
+            <div class="info-section collapsed">
                 <h3 onclick="toggleSection(this)">📊 Server Status</h3>
                 <div class="info-section-content">
                     <div id="server-info">Loading...</div>
                 </div>
             </div>
 
-            <div class="info-section">
+            <div class="info-section collapsed">
                 <h3 onclick="toggleSection(this)">⚙️ Configuration</h3>
                 <div class="info-section-content">
                     <div id="config-info">Loading...</div>
@@ -496,14 +506,14 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 </div>
             </div>
 
-            <div class="info-section">
+            <div class="info-section collapsed">
                 <h3 onclick="toggleSection(this)">🔧 Available Tools</h3>
                 <div class="info-section-content">
                     <div id="tools-info">Loading...</div>
                 </div>
             </div>
 
-            <div class="info-section">
+            <div class="info-section collapsed">
                 <h3 onclick="toggleSection(this)">⚡ Quick Actions</h3>
                 <div class="info-section-content">
                     <div id="quick-actions" style="font-size: 0.85em; line-height: 1.8;">
@@ -512,7 +522,7 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 </div>
             </div>
 
-            <div class="info-section">
+            <div class="info-section collapsed">
                 <h3 onclick="toggleSection(this)">🚀 Fast Actions</h3>
                 <div class="info-section-content">
                     <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -535,7 +545,7 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 </div>
             </div>
 
-            <div class="info-section">
+            <div class="info-section collapsed">
                 <h3 onclick="toggleSection(this)">💭 Conversation Context</h3>
                 <div class="info-section-content">
                     <div id="contextInfo" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #f8f9fa; border-radius: 6px; font-size: 13px;">
@@ -559,7 +569,7 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 </div>
             </div>
 
-            <div class="info-section">
+            <div class="info-section collapsed">
                 <h3 onclick="toggleSection(this)">🔌 MCP Communication</h3>
                 <div class="info-section-content">
                     <div id="mcpCommunications" style="max-height: 400px; overflow-y: auto;">
@@ -1302,6 +1312,50 @@ func (s *Server) handleServerChat(w http.ResponseWriter, r *http.Request) {
                 document.querySelectorAll('.fast-action-btn').forEach(btn => {
                     btn.disabled = false;
                 });
+            }
+        }
+
+        // Inspector launch function
+        async function launchInspector() {
+            const btn = document.getElementById('inspector-btn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Starting Inspector...';
+
+            try {
+                // Start the inspector WITH server configuration
+                const response = await fetch('/api/inspector/start', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        server_name: serverName  // Pass the current server name
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success && data.url) {
+                    // Open inspector in new tab
+                    window.open(data.url, '_blank');
+                    btn.textContent = '✅ Inspector Opened!';
+                    addMessage('agent', '🔬 MCP Inspector launched successfully! Opening in new tab: ' + data.url);
+
+                    // Reset button text after 2 seconds
+                    setTimeout(() => {
+                        btn.textContent = '🔬 Launch MCP Inspector';
+                        btn.disabled = false;
+                    }, 2000);
+                } else {
+                    throw new Error(data.message || 'Failed to start inspector');
+                }
+            } catch (error) {
+                addMessage('agent', '❌ Failed to launch inspector: ' + error.message, true);
+                btn.textContent = '❌ Inspector Failed';
+                setTimeout(() => {
+                    btn.textContent = '🔬 Launch MCP Inspector';
+                    btn.disabled = false;
+                }, 2000);
             }
         }
     </script>

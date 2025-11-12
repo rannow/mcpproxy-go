@@ -301,6 +301,11 @@ func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 	}
 
 	record.Enabled = enabled
+	// When enabling a server, also clear auto-disabled state
+	if enabled {
+		record.AutoDisabled = false
+		record.AutoDisableReason = ""
+	}
 	return m.db.SaveUpstream(record)
 }
 

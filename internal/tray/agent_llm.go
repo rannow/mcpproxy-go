@@ -326,7 +326,7 @@ func (a *LLMAgent) compressMessage(msg ChatMessage) ChatMessage {
 			for _, tc := range toolCalls {
 				compressedCalls = append(compressedCalls, map[string]interface{}{
 					"tool_name": tc.ToolName,
-					"status":    func() string {
+					"status": func() string {
 						if tc.Error != "" {
 							return "error"
 						}
@@ -402,7 +402,7 @@ func (a *LLMAgent) createConversationSummary(messages []ChatMessage) ChatMessage
 		AgentType: "system",
 		Timestamp: time.Now(),
 		Metadata: map[string]interface{}{
-			"is_summary":      true,
+			"is_summary":       true,
 			"summarized_count": len(messages),
 		},
 	}
@@ -675,6 +675,7 @@ Please provide a clear, actionable response that:
 - Suggests tool tests with example parameters if testing is needed
 - References GitHub repository documentation when available
 - Recommends next steps or follow-up actions
+- Ask for configuration if there are missing fields, environment variables or invalid values
 
 IMPORTANT: You have direct access to the following tools that you can call autonomously:
 

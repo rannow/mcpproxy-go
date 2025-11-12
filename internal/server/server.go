@@ -1820,6 +1820,10 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.HandleFunc("/api/inspector/stop", s.handleInspectorStop)
 	mux.HandleFunc("/api/inspector/status", s.handleInspectorStatus)
 
+	// Memory page endpoints
+	mux.HandleFunc("/memory", s.handleMemoryPage)
+	mux.HandleFunc("/api/memory", s.handleMemoryAPI)
+
 	// Fast action endpoints for diagnostic agent
 	mux.HandleFunc("/api/fast-action", s.handleFastAction)
 

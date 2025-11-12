@@ -187,10 +187,10 @@ func (s *Server) renderServerSection(serverConfig *config.ServerConfig, state st
 			</div>
 			<div class="server-meta">
 				<span class="tool-count">%d tools</span>
-				<span class="toggle-icon" id="toggle-%s">▼</span>
+				<span class="toggle-icon rotated" id="toggle-%s">▼</span>
 			</div>
 		</div>
-		<div class="server-content" id="content-%s">
+		<div class="server-content collapsed" id="content-%s">
 `,
 		html.EscapeString(serverConfig.Name),
 		html.EscapeString(serverConfig.Name),
