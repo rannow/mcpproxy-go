@@ -12,19 +12,21 @@ import (
 
 // ServerStatusData represents comprehensive server connection status
 type ServerStatusData struct {
-	Name              string    `json:"name"`
-	Status            string    `json:"status"` // Ready, Connecting, Error, Disconnected
-	Connected         bool      `json:"connected"`
-	Connecting        bool      `json:"connecting"`
-	RetryCount        int       `json:"retry_count"`
-	LastRetryTime     time.Time `json:"last_retry_time,omitempty"`
-	LastError         string    `json:"last_error,omitempty"`
-	TimeSinceLastTry  string    `json:"time_since_last_try"`
-	TimeToConnection  string    `json:"time_to_connection"`
-	Protocol          string    `json:"protocol"`
-	URL               string    `json:"url"`
-	Command           string    `json:"command"`
-	ToolCount         int       `json:"tool_count"`
+	Name               string    `json:"name"`
+	Status             string    `json:"status"` // Ready, Connecting, Error, Disconnected
+	Connected          bool      `json:"connected"`
+	Connecting         bool      `json:"connecting"`
+	RetryCount         int       `json:"retry_count"`
+	LastRetryTime      time.Time `json:"last_retry_time,omitempty"`
+	LastError          string    `json:"last_error,omitempty"`
+	TimeSinceLastTry   string    `json:"time_since_last_try"`
+	TimeToConnection   string    `json:"time_to_connection"`
+	Protocol           string    `json:"protocol"`
+	URL                string    `json:"url"`
+	Command            string    `json:"command"`
+	ToolCount          int       `json:"tool_count"`
+	AutoDisabled       bool      `json:"auto_disabled"`
+	AutoDisableReason  string    `json:"auto_disable_reason,omitempty"`
 }
 
 // handleServersWeb serves the servers overview page with connection statistics
@@ -717,17 +719,19 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 		}
 
 		serverData := ServerStatusData{
-			Name:             server.Name,
-			Protocol:         server.Protocol,
-			URL:              server.URL,
-			Command:          server.Command,
-			Status:           "Disconnected",
-			Connected:        false,
-			Connecting:       false,
-			RetryCount:       0,
-			TimeSinceLastTry: "-",
-			TimeToConnection: "-",
-			ToolCount:        0,
+			Name:              server.Name,
+			Protocol:          server.Protocol,
+			URL:               server.URL,
+			Command:           server.Command,
+			Status:            "Disconnected",
+			Connected:         false,
+			Connecting:        false,
+			RetryCount:        0,
+			TimeSinceLastTry:  "-",
+			TimeToConnection:  "-",
+			ToolCount:         0,
+			AutoDisabled:      server.AutoDisabled,
+			AutoDisableReason: server.AutoDisableReason,
 		}
 
 		// Show special status for disabled and quarantined servers

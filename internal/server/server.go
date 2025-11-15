@@ -72,9 +72,6 @@ type Server struct {
 	// Startup script manager
 	startupManager *startup.Manager
 
-	// MCP Inspector manager
-	inspectorManager *InspectorManager
-
 	// Semantic search service
 	semanticSearchService *SemanticSearchService
 
@@ -113,8 +110,8 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
 
-	// Initialize index manager
-	indexManager, err := index.NewManager(cfg.DataDir, logger)
+	// Initialize index manager with semantic search config
+	indexManager, err := index.NewManager(cfg.DataDir, logger, cfg.SemanticSearch)
 	if err != nil {
 		storageManager.Close()
 		return nil, fmt.Errorf("failed to initialize index manager: %w", err)
@@ -168,9 +165,6 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 	// Initialize startup script manager
 	server.startupManager = startup.NewManager(cfg.StartupScript, logger.Sugar())
-
-	// Initialize MCP Inspector manager
-	server.inspectorManager = NewInspectorManager(logger.Sugar())
 
 	// Initialize semantic search service
 	semanticSearchURL := os.Getenv("SEMANTIC_SEARCH_URL")
@@ -870,14 +864,6 @@ func (s *Server) Shutdown() error {
         s.logger.Info("Stopping startup script")
         if err := s.startupManager.Stop(); err != nil {
             s.logger.Warn("Failed to stop startup script", zap.Error(err))
-        }
-    }
-
-    // Stop MCP Inspector if running
-    if s.inspectorManager != nil {
-        s.logger.Info("Stopping MCP Inspector")
-        if err := s.inspectorManager.Stop(); err != nil {
-            s.logger.Warn("Failed to stop MCP Inspector", zap.Error(err))
         }
     }
 
@@ -1817,8 +1803,7 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 
 	// MCP Inspector endpoints
 	mux.HandleFunc("/api/inspector/start", s.handleInspectorStart)
-	mux.HandleFunc("/api/inspector/stop", s.handleInspectorStop)
-	mux.HandleFunc("/api/inspector/status", s.handleInspectorStatus)
+	mux.HandleFunc("/api/launch-inspector", s.handleLaunchInspector)
 
 	// Memory page endpoints
 	mux.HandleFunc("/memory", s.handleMemoryPage)
@@ -1826,9 +1811,6 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 
 	// Fast action endpoints for diagnostic agent
 	mux.HandleFunc("/api/fast-action", s.handleFastAction)
-
-	// File/path opening endpoint
-	mux.HandleFunc("/api/open-path", s.handleOpenPath)
 
 	// Agent API endpoints for Python MCP agent integration
 	mux.HandleFunc("/api/v1/agent/servers", s.handleAgentListServers)
@@ -2413,7 +2395,13 @@ func (s *Server) deleteGroup(name string) {
 
 // ReloadConfiguration reloads the configuration from disk
 func (s *Server) ReloadConfiguration() error {
-	s.logger.Info("Reloading configuration from disk")
+	s.logger.Info("Reloading configuration from disk - full restart of all servers")
+
+	// Step 1: Disconnect all upstream servers cleanly before reloading
+	s.logger.Info("Disconnecting all upstream servers before config reload")
+	if err := s.upstreamManager.DisconnectAll(); err != nil {
+		s.logger.Warn("Some servers failed to disconnect cleanly before reload", zap.Error(err))
+	}
 
 	// Store old config for comparison
 	oldServerCount := len(s.config.Servers)
@@ -2426,7 +2414,7 @@ func (s *Server) ReloadConfiguration() error {
 	}
 	assignmentsMutex.RUnlock()
 
-	// Load configuration from file
+	// Step 2: Load fresh configuration from file
 	s.mu.RLock()
 	dataDir := s.config.DataDir
 	s.mu.RUnlock()
@@ -2462,8 +2450,8 @@ func (s *Server) ReloadConfiguration() error {
 	}
 	s.logger.Debug("loadConfiguredServers completed successfully")
 
-	// Trigger immediate reconnection for servers that were disconnected during config reload
-	s.logger.Debug("Starting goroutine for immediate reconnection after config reload")
+	// Step 3: Trigger immediate reconnection for all servers with fresh configuration
+	s.logger.Debug("Starting goroutine for full server restart after config reload")
 	go func() {
 		s.mu.RLock()
 		ctx := s.appCtx // Use application context instead of server context
@@ -2475,14 +2463,16 @@ func (s *Server) ReloadConfiguration() error {
 			return
 		}
 
-		s.logger.Info("Triggering immediate reconnection after config reload")
+		s.logger.Info("Starting fresh connections for all servers after config reload")
 
-		// Connect all servers that should be connected
+		// Connect all servers that should be connected with fresh state
 		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
 		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
 			s.logger.Warn("Some servers failed to reconnect after config reload", zap.Error(err))
+		} else {
+			s.logger.Info("All servers successfully restarted with fresh configuration")
 		}
 
 		// NOTE: Removed automatic tool re-indexing after config reload

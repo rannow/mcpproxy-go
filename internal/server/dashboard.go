@@ -164,12 +164,56 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
                 <p>View and edit persistent memory for AI Diagnostic Agent findings</p>
                 <a href="/memory" class="card-button" style="background: #17a2b8;">Manage Memory</a>
             </div>
+
+            <div class="card" style="border-left-color: #6f42c1;">
+                <h3 style="color: #6f42c1;">🔍 MCP Inspector</h3>
+                <p>Launch the MCP Inspector to test and debug server tools interactively</p>
+                <button onclick="launchInspector()" class="card-button" style="background: #6f42c1; border: none; cursor: pointer;">Launch Inspector</button>
+                <div id="inspector-status" style="margin-top: 10px; font-size: 0.9em;"></div>
+            </div>
         </div>
 
         <div class="footer">
             <p>MCPProxy %s | Running on %s</p>
         </div>
     </div>
+
+    <script>
+        async function launchInspector() {
+            const statusDiv = document.getElementById('inspector-status');
+            const button = event.target;
+
+            button.disabled = true;
+            button.textContent = 'Launching...';
+            statusDiv.innerHTML = '<span style="color: #6f42c1;">⏳ Starting MCP Inspector...</span>';
+
+            try {
+                const response = await fetch('/api/launch-inspector', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    statusDiv.innerHTML = '<span style="color: #28a745;">✅ ' + data.message + '</span>';
+                    if (data.url) {
+                        setTimeout(() => {
+                            window.open(data.url, '_blank');
+                        }, 1000);
+                    }
+                } else {
+                    statusDiv.innerHTML = '<span style="color: #dc3545;">❌ ' + data.error + '</span>';
+                    button.disabled = false;
+                    button.textContent = 'Launch Inspector';
+                }
+            } catch (error) {
+                statusDiv.innerHTML = '<span style="color: #dc3545;">❌ Error: ' + error.message + '</span>';
+                button.disabled = false;
+                button.textContent = 'Launch Inspector';
+            }
+        }
+    </script>
 </body>
 </html>`
 

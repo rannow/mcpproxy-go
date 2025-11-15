@@ -104,6 +104,17 @@ type Config struct {
 
 	// Auto-disable threshold - number of consecutive failures before auto-disabling (default: 3)
 	AutoDisableThreshold int `json:"auto_disable_threshold,omitempty" mapstructure:"auto-disable-threshold"`
+
+	// Semantic search configuration
+	SemanticSearch *SemanticSearchConfig `json:"semantic_search,omitempty" mapstructure:"semantic-search"`
+}
+
+// SemanticSearchConfig represents semantic search configuration
+type SemanticSearchConfig struct {
+	Enabled       bool    `json:"enabled" mapstructure:"enabled"`               // Enable semantic search
+	HybridMode    bool    `json:"hybrid_mode" mapstructure:"hybrid-mode"`       // Combine BM25 and semantic search
+	HybridWeight  float64 `json:"hybrid_weight" mapstructure:"hybrid-weight"`   // Weight for semantic search in hybrid mode (0.0-1.0)
+	MinSimilarity float32 `json:"min_similarity" mapstructure:"min-similarity"` // Minimum similarity threshold (0.0-1.0)
 }
 
 // LLMConfig represents LLM provider configuration for AI Diagnostic Agent
@@ -576,6 +587,14 @@ func DefaultConfig() *Config {
 			MaxTokens:   2000,
 			OllamaURL:   "http://localhost:11434", // Default Ollama endpoint
 		},
+
+		// Default semantic search configuration
+		SemanticSearch: &SemanticSearchConfig{
+			Enabled:       false, // Disabled by default (opt-in)
+			HybridMode:    true,  // When enabled, use hybrid mode by default
+			HybridWeight:  0.5,   // Equal weight between BM25 and semantic (0.0-1.0)
+			MinSimilarity: 0.1,   // Minimum similarity threshold (0.0-1.0)
+		},
 	}
 }
 
@@ -702,6 +721,30 @@ func (c *Config) Validate() error {
 	}
 	if c.LLM.OllamaURL == "" {
 		c.LLM.OllamaURL = "http://localhost:11434"
+	}
+
+	// Ensure SemanticSearch config is not nil
+	if c.SemanticSearch == nil {
+		c.SemanticSearch = &SemanticSearchConfig{
+			Enabled:       false,
+			HybridMode:    true,
+			HybridWeight:  0.5,
+			MinSimilarity: 0.1,
+		}
+	}
+
+	// Validate semantic search configuration
+	if c.SemanticSearch.HybridWeight < 0 {
+		c.SemanticSearch.HybridWeight = 0
+	}
+	if c.SemanticSearch.HybridWeight > 1 {
+		c.SemanticSearch.HybridWeight = 1
+	}
+	if c.SemanticSearch.MinSimilarity < 0 {
+		c.SemanticSearch.MinSimilarity = 0
+	}
+	if c.SemanticSearch.MinSimilarity > 1 {
+		c.SemanticSearch.MinSimilarity = 1
 	}
 
 	return nil

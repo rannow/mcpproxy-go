@@ -1,0 +1,22 @@
+{
+  "listen": ":8080",
+  "data_dir": "~/.mcpproxy",
+  "enable_tray": true,
+  "tools_limit": 15,
+
+  "semantic_search": {
+    "enabled": true,
+    "hybrid_mode": true,
+    "hybrid_weight": 0.5,
+    "min_similarity": 0.1
+  },
+
+  "mcpServers": [
+    {
+      "name": "github",
+      "url": "https://api.github.com/mcp",
+      "protocol": "http",
+      "enabled": true
+    }
+  ]
+}

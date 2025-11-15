@@ -351,6 +351,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                                 <th class="sortable" data-sort="name">Server Name</th>
                                 <th class="sortable" data-sort="status">Status</th>
                                 <th class="sortable" data-sort="protocol">Protocol</th>
+                                <th class="sortable" data-sort="autoDisabled">Auto-Disabled</th>
                                 <th>Current Groups</th>
                             </tr>
                             <tr class="filter-row">
@@ -358,6 +359,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                                 <th><input type="text" class="filter-input" id="filter-name" placeholder="Filter by name..." onkeyup="applyFilters()"></th>
                                 <th><input type="text" class="filter-input" id="filter-status" placeholder="Filter status..." onkeyup="applyFilters()"></th>
                                 <th><input type="text" class="filter-input" id="filter-protocol" placeholder="Filter protocol..." onkeyup="applyFilters()"></th>
+                                <th><input type="text" class="filter-input" id="filter-autodisabled" placeholder="Filter auto-disabled..." onkeyup="applyFilters()"></th>
                                 <th><input type="text" class="filter-input" id="filter-groups" placeholder="Filter groups..." onkeyup="applyFilters()"></th>
                             </tr>
                         </thead>
@@ -415,6 +417,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             const nameFilter = document.getElementById('filter-name').value.toLowerCase();
             const statusFilter = document.getElementById('filter-status').value.toLowerCase();
             const protocolFilter = document.getElementById('filter-protocol').value.toLowerCase();
+            const autoDisabledFilter = document.getElementById('filter-autodisabled').value.toLowerCase();
             const groupsFilter = document.getElementById('filter-groups').value.toLowerCase();
 
             return allServers.filter(server => {
@@ -434,6 +437,14 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                 // Protocol filter
                 if (protocolFilter && !(server.protocol || '').toLowerCase().includes(protocolFilter)) {
                     return false;
+                }
+
+                // Auto-disabled filter
+                if (autoDisabledFilter) {
+                    const autoDisabledText = server.auto_disabled ? 'yes' : 'no';
+                    if (!autoDisabledText.includes(autoDisabledFilter)) {
+                        return false;
+                    }
                 }
 
                 // Groups filter
@@ -467,6 +478,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             document.getElementById('filter-name').value = '';
             document.getElementById('filter-status').value = '';
             document.getElementById('filter-protocol').value = '';
+            document.getElementById('filter-autodisabled').value = '';
             document.getElementById('filter-groups').value = '';
             applyFilters();
         }
@@ -476,6 +488,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
             return document.getElementById('filter-name').value !== '' ||
                    document.getElementById('filter-status').value !== '' ||
                    document.getElementById('filter-protocol').value !== '' ||
+                   document.getElementById('filter-autodisabled').value !== '' ||
                    document.getElementById('filter-groups').value !== '';
         }
 
@@ -599,6 +612,10 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                         valA = (a.protocol || '').toLowerCase();
                         valB = (b.protocol || '').toLowerCase();
                         break;
+                    case 'autoDisabled':
+                        valA = a.auto_disabled ? 1 : 0;
+                        valB = b.auto_disabled ? 1 : 0;
+                        break;
                     default:
                         return 0;
                 }
@@ -682,6 +699,15 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                 const protocolCell = document.createElement('td');
                 protocolCell.textContent = server.protocol || '-';
 
+                // Auto-disabled cell
+                const autoDisabledCell = document.createElement('td');
+                if (server.auto_disabled) {
+                    autoDisabledCell.innerHTML = '<span class="status-badge status-error">Yes</span>' +
+                        (server.auto_disable_reason ? '<br><small style="color: #666;">' + server.auto_disable_reason + '</small>' : '');
+                } else {
+                    autoDisabledCell.innerHTML = '<span class="status-badge status-ready">No</span>';
+                }
+
                 // Groups cell
                 const groupsCell = document.createElement('td');
                 const serverGroups = currentAssignments[server.name] || [];
@@ -697,6 +723,7 @@ func (s *Server) handleAssignmentWeb(w http.ResponseWriter, r *http.Request) {
                 row.appendChild(nameCell);
                 row.appendChild(statusCell);
                 row.appendChild(protocolCell);
+                row.appendChild(autoDisabledCell);
                 row.appendChild(groupsCell);
 
                 tbody.appendChild(row);
