@@ -37,8 +37,8 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 	}
 	defer storageManager.Close()
 
-	// Create index manager
-	indexManager, err := index.NewManager(tempDir, zap.NewNop())
+	// Create index manager (semantic search disabled for tests)
+	indexManager, err := index.NewManager(tempDir, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("Failed to create index manager: %v", err)
 	}
@@ -136,8 +136,8 @@ func TestUpstreamServersListOperation(t *testing.T) {
 	}
 	defer storageManager.Close()
 
-	// Create index manager
-	indexManager, err := index.NewManager(tempDir, zap.NewNop())
+	// Create index manager (semantic search disabled for tests)
+	indexManager, err := index.NewManager(tempDir, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("Failed to create index manager: %v", err)
 	}

@@ -577,11 +577,21 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 
 	// Add debug information if requested
 	if debugMode {
+		searchBackend := "BM25"
+		if p.config.SemanticSearch != nil && p.config.SemanticSearch.Enabled {
+			if p.config.SemanticSearch.HybridMode {
+				searchBackend = fmt.Sprintf("Hybrid (BM25 + Semantic, weight: %.2f)", p.config.SemanticSearch.HybridWeight)
+			} else {
+				searchBackend = "Semantic"
+			}
+		}
+
 		response["debug"] = map[string]interface{}{
 			"total_indexed_tools": p.getIndexedToolCount(),
-			"search_backend":      "BM25",
+			"search_backend":      searchBackend,
 			"query_analysis":      p.analyzeQuery(query),
 			"limit_applied":       limit,
+			"semantic_enabled":    p.config.SemanticSearch != nil && p.config.SemanticSearch.Enabled,
 		}
 
 		if explainTool != "" {
@@ -1743,6 +1753,12 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		if err := p.mainServer.SaveConfiguration(); err != nil {
 			p.logger.Error("Failed to save configuration after updating server", zap.Error(err))
 		}
+
+		// Reload configuration to ensure full restart of all servers
+		if err := p.mainServer.ReloadConfiguration(); err != nil {
+			p.logger.Error("Failed to reload configuration after updating server", zap.Error(err))
+		}
+
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -1830,6 +1846,12 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		if err := p.mainServer.SaveConfiguration(); err != nil {
 			p.logger.Error("Failed to save configuration after patching server", zap.Error(err))
 		}
+
+		// Reload configuration to ensure full restart of all servers
+		if err := p.mainServer.ReloadConfiguration(); err != nil {
+			p.logger.Error("Failed to reload configuration after patching server", zap.Error(err))
+		}
+
 		p.mainServer.OnUpstreamServerChange()
 	}
 

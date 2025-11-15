@@ -302,8 +302,8 @@ func runBuiltInTool(ctx context.Context, toolName string, args map[string]interf
 	}
 	defer storageManager.Close()
 
-	// Create index manager
-	indexManager, err := index.NewManager(globalConfig.DataDir, logger)
+	// Create index manager (semantic search disabled for CLI)
+	indexManager, err := index.NewManager(globalConfig.DataDir, logger, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create index manager: %w", err)
 	}
