@@ -136,11 +136,11 @@ func TestConnectStdioWithWorkingDir(t *testing.T) {
 	t.Run("invalid working directory prevents connection", func(t *testing.T) {
 		// Create a test config with non-existent working directory
 		serverConfig := &config.ServerConfig{
-			Name:       "test-server",
-			Command:    "echo",
-			Args:       []string{"hello"},
-			WorkingDir: "/path/that/definitely/does/not/exist",
-			Enabled:    true,
+			Name:        "test-server",
+			Command:     "echo",
+			Args:        []string{"hello"},
+			WorkingDir:  "/path/that/definitely/does/not/exist",
+			StartupMode: "active",
 		}
 
 		// Create a minimal client for testing
@@ -159,11 +159,11 @@ func TestConnectStdioWithWorkingDir(t *testing.T) {
 		defer os.RemoveAll(tmpDir)
 
 		serverConfig := &config.ServerConfig{
-			Name:       "test-server",
-			Command:    "echo",
-			Args:       []string{"hello"},
-			WorkingDir: tmpDir,
-			Enabled:    true,
+			Name:        "test-server",
+			Command:     "echo",
+			Args:        []string{"hello"},
+			WorkingDir:  tmpDir,
+			StartupMode: "active",
 		}
 
 		err = validateWorkingDir(serverConfig.WorkingDir)
@@ -181,15 +181,15 @@ func TestWorkingDirIntegrationWithDockerIsolation(t *testing.T) {
 		defer os.RemoveAll(tmpDir)
 
 		serverConfig := &config.ServerConfig{
-			Name:       "test-docker-server",
-			Command:    "python",
-			Args:       []string{"-c", "print('hello')"},
-			WorkingDir: tmpDir, // This should be used in combination with Docker isolation
+			Name:        "test-docker-server",
+			Command:     "python",
+			Args:        []string{"-c", "print('hello')"},
+			WorkingDir:  tmpDir, // This should be used in combination with Docker isolation
 			Isolation: &config.IsolationConfig{
 				Enabled:    true,
 				WorkingDir: "/workspace", // Docker container working dir
 			},
-			Enabled: true,
+			StartupMode: "active",
 		}
 
 		// Test that both working directories can coexist
@@ -214,12 +214,12 @@ func TestServerConfigWithWorkingDir(t *testing.T) {
 		defer os.RemoveAll(tmpDir)
 
 		serverConfig := &config.ServerConfig{
-			Name:       "test-server",
-			Command:    "echo",
-			Args:       []string{"test"},
-			WorkingDir: tmpDir,
-			Env:        map[string]string{"TEST": "value"},
-			Enabled:    true,
+			Name:        "test-server",
+			Command:     "echo",
+			Args:        []string{"test"},
+			WorkingDir:  tmpDir,
+			Env:         map[string]string{"TEST": "value"},
+			StartupMode: "active",
 		}
 
 		// Test that working directory is properly set
@@ -230,15 +230,15 @@ func TestServerConfigWithWorkingDir(t *testing.T) {
 		assert.Equal(t, "echo", serverConfig.Command)
 		assert.Equal(t, []string{"test"}, serverConfig.Args)
 		assert.Equal(t, map[string]string{"TEST": "value"}, serverConfig.Env)
-		assert.True(t, serverConfig.Enabled)
+		assert.Equal(t, "active", serverConfig.StartupMode)
 	})
 
 	t.Run("empty working directory", func(t *testing.T) {
 		serverConfig := &config.ServerConfig{
-			Name:       "test-server",
-			Command:    "echo",
-			WorkingDir: "", // Empty should be valid
-			Enabled:    true,
+			Name:        "test-server",
+			Command:     "echo",
+			WorkingDir:  "", // Empty should be valid
+			StartupMode: "active",
 		}
 
 		assert.Equal(t, "", serverConfig.WorkingDir)

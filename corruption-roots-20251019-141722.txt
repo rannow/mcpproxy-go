@@ -1,7 +1,0 @@
-OneDrive Corruption Root Directory Report
-Generated: So 19 Okt 2025 14:17:22 CEST
-Search Root: /Users/hrannow/OneDrive/Obsidian
-========================================
-
-Format: DIRECTORY_PATH|CORRUPT_FILE_COUNT
-

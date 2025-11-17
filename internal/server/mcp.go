@@ -741,7 +741,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Check if server is quarantined before calling tool
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig.Quarantined {
+	if err == nil && serverConfig.StartupMode == "quarantined" {
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
 	}
@@ -1067,8 +1067,7 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 			"url":         server.URL,
 			"env":         server.Env,
 			"headers":     server.Headers,
-			"enabled":     server.Enabled,
-			"quarantined": server.Quarantined,
+			"startup_mode": server.StartupMode,
 			"created":     server.Created,
 			"updated":     server.Updated,
 		}
@@ -1260,7 +1259,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found: %v", serverName, err)), nil
 	}
 
-	if !serverConfig.Quarantined {
+	if serverConfig.StartupMode != "quarantined" {
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not quarantined", serverName)), nil
 	}
 
@@ -1417,7 +1416,7 @@ func (p *MCPProxyServer) handleQuarantineUpstream(_ context.Context, request mcp
 	}
 
 	// Update in storage
-	existingServer.Quarantined = true
+	existingServer.StartupMode = "quarantined"
 	if err := p.storage.UpdateUpstream(serverID, existingServer); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to quarantine upstream: %v", err)), nil
 	}
@@ -1553,8 +1552,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		Env:         env,
 		Headers:     headers,
 		Protocol:    protocol,
-		Enabled:     enabled,
-		Quarantined: true, // Default to quarantined for security - newly added servers via LLIs are quarantined by default
+		StartupMode: "quarantined", // All new servers are automatically quarantined for security
 		Created:     time.Now(),
 	}
 
@@ -1592,12 +1590,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	jsonResult, err := json.Marshal(map[string]interface{}{
 		"name":               name,
 		"protocol":           protocol,
-		"enabled":            enabled,
+		"startup_mode":       "quarantined", // New servers are automatically quarantined for security
 		"added":              true,
 		"status":             "configured",
 		"connection_status":  connectionStatus,
 		"connection_message": connectionMessage,
-		"quarantined":        true,
 		"security_status":    "QUARANTINED_FOR_REVIEW",
 		"message":            fmt.Sprintf("🔒 SECURITY: Server '%s' has been added but is automatically quarantined for security review. Tool calls are blocked to prevent potential Tool Poisoning Attacks (TPAs).", name),
 		"next_steps":         "To use tools from this server, please: 1) Review the server and its tools for malicious content, 2) Use the 'upstream_servers' tool with operation 'list_quarantined' to inspect tools, 3) Use the tray menu or manual config editing to remove from quarantine if verified safe",
@@ -1714,13 +1711,15 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	}
 
 	// Handle enabled state change
-	wasEnabled := updatedServer.Enabled
-	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
+	wasEnabled := (updatedServer.StartupMode == "active" || updatedServer.StartupMode == "lazy_loading")
+	previousMode := updatedServer.StartupMode
+	startupMode := "active"; 
+	//if !request.GetBool("enabled", wasEnabled) { startupMode = "disabled" }; 
+	updatedServer.StartupMode = startupMode
 
 	// If re-enabling a previously auto-disabled server, clear the auto-disable state
-	if !wasEnabled && updatedServer.Enabled && updatedServer.AutoDisabled {
-		updatedServer.AutoDisabled = false
-		updatedServer.AutoDisableReason = ""
+	if !wasEnabled && updatedServer.StartupMode == "active" && previousMode == "auto_disabled" {
+		updatedServer.StartupMode = "active"
 		p.logger.Info("Cleared auto-disable state on manual re-enable",
 			zap.String("server", name))
 	}
@@ -1733,7 +1732,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	// Update in upstream manager with connection monitoring
 	p.upstreamManager.RemoveServer(serverID)
 	var connectionStatus, connectionMessage string
-	if updatedServer.Enabled {
+	if updatedServer.StartupMode == "active" || updatedServer.StartupMode == "lazy_loading" {
 		if err := p.upstreamManager.AddServer(serverID, &updatedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 			connectionStatus = statusError
@@ -1766,7 +1765,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		"id":                 serverID,
 		"name":               name,
 		"updated":            true,
-		"enabled":            updatedServer.Enabled,
+		"startup_mode":      updatedServer.StartupMode,
 		"connection_status":  connectionStatus,
 		"connection_message": connectionMessage,
 	})
@@ -1816,13 +1815,15 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	}
 
 	// Handle enabled state change
-	wasEnabled := updatedServer.Enabled
-	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
+	wasEnabled := (updatedServer.StartupMode == "active" || updatedServer.StartupMode == "lazy_loading")
+	previousMode := updatedServer.StartupMode
+	startupMode := "active"; 
+	//if !request.GetBool("enabled", wasEnabled) { startupMode = "disabled" }; 
+	updatedServer.StartupMode = startupMode
 
 	// If re-enabling a previously auto-disabled server, clear the auto-disable state
-	if !wasEnabled && updatedServer.Enabled && updatedServer.AutoDisabled {
-		updatedServer.AutoDisabled = false
-		updatedServer.AutoDisableReason = ""
+	if !wasEnabled && updatedServer.StartupMode == "active" && previousMode == "auto_disabled" {
+		updatedServer.StartupMode = "active"
 		p.logger.Info("Cleared auto-disable state on manual re-enable",
 			zap.String("server", name))
 	}
@@ -1834,7 +1835,7 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 
 	// Update in upstream manager
 	p.upstreamManager.RemoveServer(serverID)
-	if updatedServer.Enabled {
+	if updatedServer.StartupMode == "active" || updatedServer.StartupMode == "lazy_loading" {
 		if err := p.upstreamManager.AddServer(serverID, &updatedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 		}
@@ -1859,7 +1860,7 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		"id":      serverID,
 		"name":    name,
 		"updated": true,
-		"enabled": updatedServer.Enabled,
+		"startup_mode": updatedServer.StartupMode,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
@@ -2050,8 +2051,8 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 		"lines_returned":  len(logLines),
 		"log_lines":       logLines,
 		"server_status": map[string]interface{}{
-			"enabled":     serverConfig.Enabled,
-			"quarantined": serverConfig.Quarantined,
+			"startup_mode": serverConfig.StartupMode,
+			"quarantined": "quarantined",
 		},
 	}
 
@@ -2276,7 +2277,7 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 
 			// Check if server is disabled first
 			for _, serverConfig := range p.config.Servers {
-				if serverConfig.Name == serverName && !serverConfig.Enabled {
+				if serverConfig.Name == serverName && serverConfig.StartupMode == "disabled" || serverConfig.StartupMode == "quarantined" {
 					return statusDisabled, messageServerDisabled
 				}
 			}
@@ -2292,7 +2293,7 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 				case types.StateDisconnected:
 					// If server is explicitly disconnected and enabled is false, return disabled
 					for _, serverConfig := range p.config.Servers {
-						if serverConfig.Name == serverName && !serverConfig.Enabled {
+						if serverConfig.Name == serverName && serverConfig.StartupMode == "disabled" || serverConfig.StartupMode == "quarantined" {
 							return statusDisabled, messageServerDisabled
 						}
 					}
@@ -2309,7 +2310,7 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 			} else {
 				// Client doesn't exist yet, continue monitoring (unless disabled)
 				for _, serverConfig := range p.config.Servers {
-					if serverConfig.Name == serverName && !serverConfig.Enabled {
+					if serverConfig.Name == serverName && serverConfig.StartupMode == "disabled" || serverConfig.StartupMode == "quarantined" {
 						return statusDisabled, messageServerDisabled
 					}
 				}

@@ -25,7 +25,7 @@ type ServerStatusData struct {
 	URL                string    `json:"url"`
 	Command            string    `json:"command"`
 	ToolCount          int       `json:"tool_count"`
-	AutoDisabled       bool      `json:"auto_disabled"`
+	StartupMode        string    `json:"startup_mode"`          // Replaces AutoDisabled boolean
 	AutoDisableReason  string    `json:"auto_disable_reason,omitempty"`
 }
 
@@ -661,13 +661,82 @@ func (s *Server) handleServersWeb(w http.ResponseWriter, r *http.Request) {
                 });
         }
 
+        // WebSocket connection for real-time updates
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectDelay = 2000; // 2 seconds
+
+        function connectWebSocket() {
+            const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') +
+                         window.location.host + '/ws/events';
+
+            console.log('Connecting to WebSocket:', wsUrl);
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function() {
+                console.log('WebSocket connected');
+                reconnectAttempts = 0;
+                // Initial load
+                refreshServers();
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const eventData = JSON.parse(event.data);
+                    console.log('WebSocket event received:', eventData.type, eventData);
+
+                    // Handle different event types
+                    switch(eventData.type) {
+                        case 'server_state_changed':
+                        case 'state_change':
+                        case 'server_config_changed':
+                        case 'config_change':
+                        case 'server_auto_disabled':
+                        case 'connection_established':
+                        case 'connection_lost':
+                        case 'tools_updated':
+                            // Refresh server list on any server-related event
+                            console.log('Server event detected, refreshing list');
+                            refreshServers();
+                            break;
+                    }
+                } catch (e) {
+                    console.error('Error processing WebSocket message:', e);
+                }
+            };
+
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = function() {
+                console.log('WebSocket disconnected');
+                ws = null;
+
+                // Attempt reconnection with exponential backoff
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    const delay = reconnectDelay * Math.pow(2, reconnectAttempts - 1);
+                    console.log('Reconnecting in ' + delay + 'ms (attempt ' + reconnectAttempts + '/' + maxReconnectAttempts + ')');
+                    setTimeout(connectWebSocket, delay);
+                } else {
+                    console.error('Max reconnection attempts reached, falling back to polling');
+                    // Fallback to polling if WebSocket fails
+                    setInterval(refreshServers, 5000);
+                }
+            };
+        }
+
         // Initialize page (like groups page)
         loadSortPreference();
         initSorting();
-        refreshServers();
 
-        // Auto-refresh every 5 seconds
-        setInterval(refreshServers, 5000);
+        // Connect to WebSocket for real-time updates
+        connectWebSocket();
+
+        // Fallback polling every 30 seconds (less aggressive with WebSocket)
+        setInterval(refreshServers, 30000);
     </script>
 </body>
 </html>`
@@ -730,20 +799,34 @@ func (s *Server) handleServersStatusAPI(w http.ResponseWriter, r *http.Request) 
 			TimeSinceLastTry:  "-",
 			TimeToConnection:  "-",
 			ToolCount:         0,
-			AutoDisabled:      server.AutoDisabled,
+			StartupMode:       server.StartupMode,       // Use startup_mode instead of auto_disabled boolean
 			AutoDisableReason: server.AutoDisableReason,
 		}
 
-		// Show special status for disabled and quarantined servers
-		if !server.Enabled {
-			serverData.Status = "Disabled"
-		} else if server.Quarantined {
+		// DEBUG: Log what we got from storage
+		s.logger.Debug("API handler received server data",
+			zap.String("server", server.Name),
+			zap.String("startup_mode", server.StartupMode),
+			zap.String("auto_disable_reason", server.AutoDisableReason))
+
+		// Show special status for disabled, quarantined, and auto_disabled servers
+		if server.StartupMode == "quarantined" {
 			serverData.Status = "Quarantined"
+		} else if server.StartupMode == "disabled" {
+			serverData.Status = "Disabled"
+		} else if server.StartupMode == "auto_disabled" {
+			serverData.Status = "Auto-Disabled"
+		} else if server.StartupMode == "lazy_loading" {
+			serverData.Status = "Lazy Loading"
 		}
 
 		// Get connection status from upstream manager
-		// Only update status for enabled, non-quarantined servers
-		if s.upstreamManager != nil && server.Enabled && !server.Quarantined {
+		// Check status for all servers EXCEPT explicitly disabled, quarantined, or auto-disabled
+		// This includes servers with startup_mode="active", "lazy_loading", or empty string
+		if s.upstreamManager != nil &&
+			server.StartupMode != "disabled" &&
+			server.StartupMode != "quarantined" &&
+			server.StartupMode != "auto_disabled" {
 			if client, exists := s.upstreamManager.GetClient(server.Name); exists {
 				connectionStatus := client.GetConnectionStatus()
 

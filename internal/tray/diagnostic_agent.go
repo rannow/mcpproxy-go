@@ -618,7 +618,7 @@ Focus on actionable solutions that can be implemented immediately.
 		server.Command,
 		server.Args,
 		server.URL,
-		server.Enabled,
+		server.StartupMode == "active",
 		fmt.Sprintf("%v", report.Issues),
 		report.LogAnalysis.ErrorCount,
 		report.LogAnalysis.CommonErrors,

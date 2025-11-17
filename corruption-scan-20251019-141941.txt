@@ -1,9 +1,0 @@
-OneDrive Corruption Scan Report
-Generated: So 19 Okt 2025 14:19:41 CEST
-Search Root: /Users/hrannow/OneDrive/Obsidian/My Obsidian Vault/
-========================================
-
-Corrupted Directories:
-
-
-No corruption detected.

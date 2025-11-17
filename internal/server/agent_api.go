@@ -42,15 +42,14 @@ func (s *Server) handleAgentListServers(w http.ResponseWriter, r *http.Request) 
 		}
 
 		serverInfo := map[string]interface{}{
-			"name":        serverConfig.Name,
-			"url":         serverConfig.URL,
-			"command":     serverConfig.Command,
-			"args":        serverConfig.Args,
-			"protocol":    serverConfig.Protocol,
-			"enabled":     serverConfig.Enabled,
-			"quarantined": serverConfig.Quarantined,
-			"working_dir": serverConfig.WorkingDir,
-			"status":      statusInfo,
+			"name":         serverConfig.Name,
+			"url":          serverConfig.URL,
+			"command":      serverConfig.Command,
+			"args":         serverConfig.Args,
+			"protocol":     serverConfig.Protocol,
+			"startup_mode": serverConfig.StartupMode,
+			"working_dir":  serverConfig.WorkingDir,
+			"status":       statusInfo,
 		}
 
 		servers = append(servers, serverInfo)
@@ -119,8 +118,8 @@ func (s *Server) handleAgentServerDetails(w http.ResponseWriter, r *http.Request
 		"args":        serverConfig.Args,
 		"env":         serverConfig.Env,
 		"protocol":    serverConfig.Protocol,
-		"enabled":     serverConfig.Enabled,
-		"quarantined": serverConfig.Quarantined,
+		"startup_mode": serverConfig.StartupMode,
+		
 		"working_dir": serverConfig.WorkingDir,
 		"status":      statusInfo,
 		"tools": map[string]interface{}{
@@ -272,8 +271,8 @@ func (s *Server) handleAgentGetServerConfig(w http.ResponseWriter, r *http.Reque
 		"args":        serverConfig.Args,
 		"env":         serverConfig.Env,
 		"protocol":    serverConfig.Protocol,
-		"enabled":     serverConfig.Enabled,
-		"quarantined": serverConfig.Quarantined,
+		"startup_mode": serverConfig.StartupMode,
+		
 		"working_dir": serverConfig.WorkingDir,
 	}
 
@@ -338,12 +337,9 @@ func (s *Server) handleAgentPatchServerConfig(w http.ResponseWriter, r *http.Req
 		serverConfig.Protocol = protocol
 		needsRestart = true
 	}
-	if enabled, ok := updates["enabled"].(bool); ok {
-		serverConfig.Enabled = enabled
+	if startupMode, ok := updates["startup_mode"].(string); ok {
+		serverConfig.StartupMode = startupMode
 		needsRestart = true
-	}
-	if quarantined, ok := updates["quarantined"].(bool); ok {
-		serverConfig.Quarantined = quarantined
 	}
 	if workingDir, ok := updates["working_dir"].(string); ok {
 		serverConfig.WorkingDir = workingDir
@@ -362,8 +358,8 @@ func (s *Server) handleAgentPatchServerConfig(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// If needs restart and server is enabled, restart it
-	if needsRestart && serverConfig.Enabled {
+	// If needs restart and server is in active mode, restart it
+	if needsRestart && serverConfig.StartupMode == "active" {
 		s.logger.Info("Restarting server after configuration update",
 			zap.String("server", serverName))
 		// This would trigger a server restart
@@ -372,10 +368,10 @@ func (s *Server) handleAgentPatchServerConfig(w http.ResponseWriter, r *http.Req
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":        true,
-		"message":        "Configuration updated successfully",
-		"needs_restart":  needsRestart,
-		"server_enabled": serverConfig.Enabled,
+		"success":       true,
+		"message":       "Configuration updated successfully",
+		"needs_restart": needsRestart,
+		"startup_mode":  serverConfig.StartupMode,
 	})
 }
 

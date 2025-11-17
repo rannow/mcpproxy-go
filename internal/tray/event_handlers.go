@@ -18,6 +18,11 @@ type EventManager struct {
 	menuManager *MenuManager
 	logger      *zap.SugaredLogger
 
+	// Event channels
+	stateChangeChan     <-chan events.Event
+	configChangeChan    <-chan events.Event
+	toolsDiscoveredChan <-chan events.Event
+
 	// Debouncing for menu updates
 	menuUpdateChan     chan string // serverName or empty for full sync
 	menuUpdateDebounce time.Duration
@@ -58,86 +63,141 @@ func (em *EventManager) Stop() {
 // subscribeToEvents subscribes to all relevant events
 func (em *EventManager) subscribeToEvents() {
 	// State change events (server connected/disconnected)
-	em.eventBus.Subscribe(events.EventStateChange, em.handleStateChange)
+	em.stateChangeChan = em.eventBus.Subscribe(events.EventStateChange)
 
 	// Config change events (enabled/disabled/quarantined)
-	em.eventBus.Subscribe(events.EventConfigChange, em.handleConfigChange)
+	em.configChangeChan = em.eventBus.Subscribe(events.EventConfigChange)
 
-	// Tools discovered events (update counts)
-	em.eventBus.Subscribe(events.EventToolsDiscovered, em.handleToolsDiscovered)
+	// Tools updated events (update counts)
+	em.toolsDiscoveredChan = em.eventBus.Subscribe(events.ToolsUpdated)
+
+	// Start goroutines to handle events from channels
+	go em.handleStateChangeEvents()
+	go em.handleConfigChangeEvents()
+	go em.handleToolsDiscoveredEvents()
 
 	em.logger.Info("Event subscriptions initialized",
 		zap.Int("state_change_subscribers", em.eventBus.SubscriberCount(events.EventStateChange)),
 		zap.Int("config_change_subscribers", em.eventBus.SubscriberCount(events.EventConfigChange)),
-		zap.Int("tools_discovered_subscribers", em.eventBus.SubscriberCount(events.EventToolsDiscovered)))
+		zap.Int("tools_updated_subscribers", em.eventBus.SubscriberCount(events.ToolsUpdated)))
 }
 
-// handleStateChange handles server state changes
-func (em *EventManager) handleStateChange(event events.Event) {
-	data, ok := event.Data.(events.StateChangeData)
-	if !ok {
-		em.logger.Error("Invalid state change data")
-		return
-	}
+// handleStateChangeEvents listens for state change events and processes them
+func (em *EventManager) handleStateChangeEvents() {
+	for {
+		select {
+		case event, ok := <-em.stateChangeChan:
+			if !ok {
+				em.logger.Info("State change channel closed")
+				return
+			}
 
-	em.logger.Info("State change event received",
-		zap.String("server", event.ServerName),
-		zap.String("old_state", data.OldState.String()),
-		zap.String("new_state", data.NewState.String()))
+			data, ok := event.Data.(events.StateChangeData)
+			if !ok {
+				em.logger.Error("Invalid state change data")
+				continue
+			}
 
-	// Trigger menu update only for significant state changes
-	if em.isSignificantStateChange(data.OldState, data.NewState) {
-		em.triggerMenuUpdate(event.ServerName)
+			em.logger.Info("State change event received",
+				zap.String("server", event.ServerName),
+				zap.Any("old_state", data.OldState),
+				zap.Any("new_state", data.NewState))
+
+			// Trigger menu update only for significant state changes
+			if em.isSignificantStateChange(data.OldState, data.NewState) {
+				em.triggerMenuUpdate(event.ServerName)
+			}
+
+		case <-em.stopChan:
+			em.logger.Info("State change event handler stopped")
+			return
+		}
 	}
 }
 
-// handleConfigChange handles configuration changes
-func (em *EventManager) handleConfigChange(event events.Event) {
-	data, ok := event.Data.(events.ConfigChangeData)
-	if !ok {
-		em.logger.Error("Invalid config change data")
-		return
+// handleConfigChangeEvents listens for config change events and processes them
+func (em *EventManager) handleConfigChangeEvents() {
+	for {
+		select {
+		case event, ok := <-em.configChangeChan:
+			if !ok {
+				em.logger.Info("Config change channel closed")
+				return
+			}
+
+			data, ok := event.Data.(events.ConfigChangeData)
+			if !ok {
+				em.logger.Error("Invalid config change data")
+				continue
+			}
+
+			em.logger.Info("Config change event received",
+				zap.String("server", event.ServerName),
+				zap.String("action", data.Action))
+
+			// Always trigger menu update for config changes
+			em.triggerMenuUpdate(event.ServerName)
+
+		case <-em.stopChan:
+			em.logger.Info("Config change event handler stopped")
+			return
+		}
 	}
-
-	em.logger.Info("Config change event received",
-		zap.String("server", event.ServerName),
-		zap.String("action", data.Action))
-
-	// Always trigger menu update for config changes
-	em.triggerMenuUpdate(event.ServerName)
 }
 
-// handleToolsDiscovered handles tools discovery completion
-func (em *EventManager) handleToolsDiscovered(event events.Event) {
-	data, ok := event.Data.(events.ToolsDiscoveredData)
-	if !ok {
-		em.logger.Error("Invalid tools discovered data")
-		return
+// handleToolsDiscoveredEvents listens for tools discovered events and processes them
+func (em *EventManager) handleToolsDiscoveredEvents() {
+	for {
+		select {
+		case event, ok := <-em.toolsDiscoveredChan:
+			if !ok {
+				em.logger.Info("Tools discovered channel closed")
+				return
+			}
+
+			// ToolsUpdated event data is typically map[string]interface{} with count
+			if dataMap, ok := event.Data.(map[string]interface{}); ok {
+				if count, ok := dataMap["count"].(int); ok {
+					em.logger.Debug("Tools discovered event received",
+						zap.String("server", event.ServerName),
+						zap.Int("count", count))
+
+					// Trigger menu update to show tool count
+					em.triggerMenuUpdate(event.ServerName)
+				}
+			}
+
+		case <-em.stopChan:
+			em.logger.Info("Tools discovered event handler stopped")
+			return
+		}
 	}
-
-	em.logger.Debug("Tools discovered event received",
-		zap.String("server", event.ServerName),
-		zap.Int("count", data.Count))
-
-	// Trigger menu update to show tool count
-	em.triggerMenuUpdate(event.ServerName)
 }
 
 // isSignificantStateChange checks if state change requires menu update
-func (em *EventManager) isSignificantStateChange(oldState, newState types.ConnectionState) bool {
+func (em *EventManager) isSignificantStateChange(oldState, newState interface{}) bool {
+	// Try to convert to ConnectionState for comparison
+	oldConnState, oldOk := oldState.(types.ConnectionState)
+	newConnState, newOk := newState.(types.ConnectionState)
+
+	// If we can't convert, assume it's significant (be conservative)
+	if !oldOk || !newOk {
+		return true
+	}
+
 	// Only update menu if:
 	// - Connected/Disconnected status changes
 	// - Error state changes
 	// - Connecting state changes (for visual feedback)
 
-	oldConnected := oldState == types.StateReady
-	newConnected := newState == types.StateReady
+	oldConnected := oldConnState == types.StateReady
+	newConnected := newConnState == types.StateReady
 
-	oldError := oldState == types.StateError
-	newError := newState == types.StateError
+	oldError := oldConnState == types.StateError
+	newError := newConnState == types.StateError
 
-	oldConnecting := oldState == types.StateConnecting || oldState == types.StateAuthenticating || oldState == types.StateDiscovering
-	newConnecting := newState == types.StateConnecting || newState == types.StateAuthenticating || newState == types.StateDiscovering
+	oldConnecting := oldConnState == types.StateConnecting || oldConnState == types.StateAuthenticating || oldConnState == types.StateDiscovering
+	newConnecting := newConnState == types.StateConnecting || newConnState == types.StateAuthenticating || newConnState == types.StateDiscovering
 
 	return oldConnected != newConnected || oldError != newError || oldConnecting != newConnecting
 }

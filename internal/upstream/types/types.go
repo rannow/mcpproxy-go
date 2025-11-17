@@ -4,9 +4,100 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"mcpproxy-go/internal/events"
 )
 
-// ConnectionState represents the state of an upstream connection
+// ServerState represents the persisted configuration state of a server
+// This aligns with the startup_mode field in ServerConfig and is stored in the database
+//
+// State Transitions:
+//
+// Normal flow (user-initiated):
+//   active ←→ disabled        (user enable/disable via UI/API)
+//   active ←→ lazy_loading    (user changes startup mode)
+//   lazy_loading ←→ disabled  (user enable/disable)
+//
+// Quarantine flow (security-triggered):
+//   [any state] → quarantined (automatic on security detection)
+//   quarantined → [original]  (manual approval via UI only)
+//
+// Auto-disable flow (failure-triggered):
+//   active → auto_disabled    (automatic after connection failures)
+//   auto_disabled → active    (manual re-enable or group enable)
+//   lazy_loading → auto_disabled (automatic after connection failures)
+//   auto_disabled → lazy_loading (manual re-enable with lazy mode)
+//
+// Group operations:
+//   Group enable: clears auto_disabled for all servers in group → attempts reconnection
+//   Group disable: sets all servers to disabled state
+//
+// Stability guarantees:
+//   - Stable states (active, disabled, lazy_loading): Won't change automatically
+//   - Unstable states (quarantined, auto_disabled): Can be cleared or changed
+//
+type ServerState string
+
+const (
+	// StateActive - server starts immediately on boot
+	StateActive ServerState = "active"
+	// StateDisabledConfig - server is disabled by user configuration
+	StateDisabledConfig ServerState = "disabled"
+	// StateQuarantined - server is quarantined for security reasons
+	StateQuarantined ServerState = "quarantined"
+	// StateAutoDisabled - server was automatically disabled after repeated failures
+	StateAutoDisabled ServerState = "auto_disabled"
+	// StateLazyLoading - server enabled but doesn't start on boot (lazy loaded)
+	StateLazyLoading ServerState = "lazy_loading"
+)
+
+// String returns the string representation of the server state
+func (s ServerState) String() string {
+	return string(s)
+}
+
+// IsStable returns true if the state represents a stable configuration state
+// Stable states don't change automatically - they require user or system intervention
+func (s ServerState) IsStable() bool {
+	switch s {
+	case StateActive, StateDisabledConfig, StateLazyLoading:
+		return true
+	case StateQuarantined, StateAutoDisabled:
+		return false // These can be cleared/changed
+	default:
+		return false
+	}
+}
+
+// IsEnabled returns true if the server is enabled (active or lazy loading)
+func (s ServerState) IsEnabled() bool {
+	return s == StateActive || s == StateLazyLoading
+}
+
+// IsDisabled returns true if the server is disabled in any form
+func (s ServerState) IsDisabled() bool {
+	return s == StateDisabledConfig || s == StateQuarantined || s == StateAutoDisabled
+}
+
+// ValidateServerState validates that a server state string is valid
+func ValidateServerState(state string) error {
+	validStates := map[string]bool{
+		string(StateActive):         true,
+		string(StateDisabledConfig): true,
+		string(StateQuarantined):    true,
+		string(StateAutoDisabled):   true,
+		string(StateLazyLoading):    true,
+	}
+
+	if !validStates[state] {
+		return fmt.Errorf("invalid server state: %s (must be one of: active, disabled, quarantined, auto_disabled, lazy_loading)", state)
+	}
+
+	return nil
+}
+
+// ConnectionState represents the runtime state of an upstream connection (in-memory only)
+// This is separate from ServerState which is persisted configuration
 type ConnectionState int
 
 const (
@@ -20,8 +111,6 @@ const (
 	StateDiscovering
 	// StateReady indicates the upstream is connected and ready for requests
 	StateReady
-	// StateSleeping indicates the upstream has tools in DB and is waiting for lazy loading
-	StateSleeping
 	// StateError indicates the upstream encountered an error
 	StateError
 )
@@ -39,8 +128,6 @@ func (s ConnectionState) String() string {
 		return "Discovering"
 	case StateReady:
 		return "Ready"
-	case StateSleeping:
-		return "Sleeping"
 	case StateError:
 		return "Error"
 	default:
@@ -71,6 +158,8 @@ type ConnectionInfo struct {
 // StateManager manages the state transitions for an upstream connection
 type StateManager struct {
 	mu                   sync.RWMutex
+
+	// Runtime connection state (in-memory only)
 	currentState         ConnectionState
 	lastError            error
 	retryCount           int
@@ -88,6 +177,17 @@ type StateManager struct {
 	autoDisableThreshold int       // Threshold for auto-disable (default: 10)
 	lastSuccessTime      time.Time // Last successful connection time
 
+	// Runtime-only UI state (NOT persisted)
+	// IMPORTANT: This field should NEVER be saved to config or database
+	// When app restarts, all userStopped flags are cleared and servers return to their original startup_mode
+	userStopped          bool      // User manually stopped via tray UI (runtime-only, never persisted)
+
+	// Persisted configuration state (stored in database)
+	serverState          ServerState // Current server state (active, disabled, quarantined, etc.)
+
+	// Event bus for publishing state changes
+	eventBus             *events.Bus
+
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
 }
@@ -96,7 +196,8 @@ type StateManager struct {
 func NewStateManager() *StateManager {
 	return &StateManager{
 		currentState:         StateDisconnected,
-		autoDisableThreshold: 3, // Default threshold (user-friendly, overridden by config)
+		serverState:          StateActive, // Default to active until config loaded
+		autoDisableThreshold: 3,           // Default threshold (user-friendly, overridden by config)
 	}
 }
 
@@ -197,6 +298,9 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 	callback := sm.onStateChange
 	sm.mu.Unlock()
 
+	// Publish event to event bus (non-blocking)
+	sm.publishConnectionStateChange(oldState, newState, &info)
+
 	// Call the callback outside the lock to avoid deadlocks
 	if callback != nil {
 		callback(oldState, newState, &info)
@@ -206,7 +310,6 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 // SetError sets an error and transitions to error state
 func (sm *StateManager) SetError(err error) {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	oldState := sm.currentState
 	sm.currentState = StateError
@@ -235,45 +338,14 @@ func (sm *StateManager) SetError(err error) {
 	}
 
 	callback := sm.onStateChange
+	sm.mu.Unlock()
+
+	// Publish event to event bus (non-blocking)
+	sm.publishConnectionStateChange(oldState, StateError, &info)
 
 	// Call the callback outside the lock to avoid deadlocks
 	if callback != nil {
 		go callback(oldState, StateError, &info)
-	}
-}
-
-// SetSleeping transitions to sleeping state (for lazy loading)
-func (sm *StateManager) SetSleeping() {
-	sm.mu.Lock()
-	oldState := sm.currentState
-	sm.currentState = StateSleeping
-	sm.lastError = nil
-
-	info := ConnectionInfo{
-		State:                sm.currentState,
-		LastError:            sm.lastError,
-		RetryCount:           sm.retryCount,
-		LastRetryTime:        sm.lastRetryTime,
-		ServerName:           sm.serverName,
-		ServerVersion:        sm.serverVersion,
-		LastOAuthAttempt:     sm.lastOAuthAttempt,
-		OAuthRetryCount:      sm.oauthRetryCount,
-		IsOAuthError:         sm.isOAuthError,
-		FirstAttemptTime:     sm.firstAttemptTime,
-		ConnectedAt:          sm.connectedAt,
-		ConsecutiveFailures:  sm.consecutiveFailures,
-		AutoDisabled:         sm.autoDisabled,
-		AutoDisableReason:    sm.autoDisableReason,
-		AutoDisableThreshold: sm.autoDisableThreshold,
-		LastSuccessTime:      sm.lastSuccessTime,
-	}
-
-	callback := sm.onStateChange
-	sm.mu.Unlock()
-
-	// Call the callback outside the lock to avoid deadlocks
-	if callback != nil {
-		callback(oldState, StateSleeping, &info)
 	}
 }
 
@@ -544,4 +616,110 @@ func (sm *StateManager) ResetAutoDisable() {
 	sm.autoDisabled = false
 	sm.autoDisableReason = ""
 	sm.consecutiveFailures = 0
+}
+
+// ============================================================================
+// Runtime-Only UI State Methods (NOT Persisted)
+// ============================================================================
+
+// IsUserStopped returns whether the user manually stopped this server via tray UI
+// IMPORTANT: This is runtime-only state, never persisted to config or database
+// When app restarts, all userStopped flags are cleared
+func (sm *StateManager) IsUserStopped() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.userStopped
+}
+
+// SetUserStopped sets whether the user manually stopped this server via tray UI
+// IMPORTANT: This is runtime-only state, never persisted to config or database
+// When app restarts, all userStopped flags are cleared
+func (sm *StateManager) SetUserStopped(stopped bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.userStopped = stopped
+}
+
+// ============================================================================
+// ServerState Management Methods (Persisted Configuration State)
+// ============================================================================
+
+// GetServerState returns the current server state (persisted configuration state)
+func (sm *StateManager) GetServerState() ServerState {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.serverState
+}
+
+// SetServerState sets the server state and publishes an event if event bus is configured
+func (sm *StateManager) SetServerState(newState ServerState) {
+	sm.mu.Lock()
+	oldState := sm.serverState
+	sm.serverState = newState
+	eventBus := sm.eventBus
+	serverName := sm.serverName
+	sm.mu.Unlock()
+
+	// Publish event if state changed and event bus is configured
+	if oldState != newState && eventBus != nil && serverName != "" {
+		event := events.Event{
+			Type: events.ServerStateChanged,
+			Data: map[string]interface{}{
+				"server_name": serverName,
+				"old_state":   string(oldState),
+				"new_state":   string(newState),
+				"timestamp":   time.Now(),
+			},
+		}
+		eventBus.Publish(event)
+	}
+}
+
+// TransitionServerState validates and transitions to a new server state
+// Returns error if transition is invalid
+func (sm *StateManager) TransitionServerState(newState ServerState) error {
+	// Validate the new state
+	if err := ValidateServerState(string(newState)); err != nil {
+		return err
+	}
+
+	// All transitions are allowed for now (business logic enforced at higher level)
+	// Later we can add specific transition validation rules here
+
+	sm.SetServerState(newState)
+
+	return nil
+}
+
+// SetEventBus configures the event bus for publishing state changes
+func (sm *StateManager) SetEventBus(eventBus *events.Bus) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.eventBus = eventBus
+}
+
+// ============================================================================
+// Enhanced State Change Publishing (ConnectionState + Events)
+// ============================================================================
+
+// publishConnectionStateChange publishes connection state change events
+func (sm *StateManager) publishConnectionStateChange(oldState, newState ConnectionState, info *ConnectionInfo) {
+	sm.mu.RLock()
+	eventBus := sm.eventBus
+	serverName := sm.serverName
+	sm.mu.RUnlock()
+
+	if eventBus != nil && serverName != "" {
+		event := events.Event{
+			Type: events.ServerStateChanged,
+			Data: map[string]interface{}{
+				"server_name":       serverName,
+				"old_conn_state":    oldState.String(),
+				"new_conn_state":    newState.String(),
+				"timestamp":         time.Now(),
+				"connection_info":   info,
+			},
+		}
+		eventBus.Publish(event)
+	}
 }

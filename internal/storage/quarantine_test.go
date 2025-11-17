@@ -29,8 +29,7 @@ func TestQuarantineFunctionality(t *testing.T) {
 		Name:        "test-server",
 		URL:         "http://localhost:3001",
 		Protocol:    "http",
-		Enabled:     true,
-		Quarantined: true, // This server should be quarantined
+		StartupMode: "quarantined", // This server should be quarantined
 		Created:     time.Now(),
 	}
 
@@ -41,7 +40,7 @@ func TestQuarantineFunctionality(t *testing.T) {
 	retrievedServer, err := manager.GetUpstreamServer("test-server")
 	require.NoError(t, err)
 	assert.Equal(t, "test-server", retrievedServer.Name)
-	assert.True(t, retrievedServer.Quarantined, "Server should be quarantined")
+	assert.Equal(t, "quarantined", retrievedServer.StartupMode, "Server should be quarantined")
 
 	// Test 3: List quarantined servers
 	quarantinedServers, err := manager.ListQuarantinedUpstreamServers()
@@ -56,7 +55,7 @@ func TestQuarantineFunctionality(t *testing.T) {
 	// Verify the server is no longer quarantined
 	updatedServer, err := manager.GetUpstreamServer("test-server")
 	require.NoError(t, err)
-	assert.False(t, updatedServer.Quarantined, "Server should no longer be quarantined")
+	assert.NotEqual(t, "quarantined", updatedServer.StartupMode, "Server should no longer be quarantined")
 
 	// Test 5: List quarantined servers again (should be empty)
 	quarantinedServers2, err := manager.ListQuarantinedUpstreamServers()
