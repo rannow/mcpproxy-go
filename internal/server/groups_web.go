@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"os"
-	
+
+	"mcpproxy-go/internal/events"
+
 	"go.uber.org/zap"
 )
 
@@ -1447,76 +1449,148 @@ func (s *Server) handleToggleGroupServers(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Get current server configurations
-	servers, err := s.storageManager.ListUpstreamServers()
-	if err != nil {
-		s.logger.Error("Failed to get servers from storage", zap.Error(err))
-		http.Error(w, "Failed to load server configuration", http.StatusInternalServerError)
-		return
-	}
-
-	// Update enabled status for all servers in the group
+	// Track results for partial failure handling
+	var successfulUpdates []string
+	var failedUpdates []map[string]string
 	updatedCount := 0
-	for _, srv := range servers {
-		// Check if this server is in the group
-		isInGroup := false
-		for _, serverName := range serversInGroup {
-			if srv.Name == serverName {
-				isInGroup = true
-				break
-			}
-		}
 
-		if isInGroup {
-			srv.Enabled = payload.Enabled
-			// Clear auto-disabled state when enabling OR disabling servers
-			// This ensures users can manually control servers later without auto-disable interference
-			srv.AutoDisabled = false
-			srv.AutoDisableReason = ""
-			if err := s.storageManager.UpdateUpstream(srv.Name, srv); err != nil {
-				s.logger.Error("Failed to update server in storage",
-					zap.String("server", srv.Name),
-					zap.Error(err))
+	// Process each server in the group
+	for _, serverName := range serversInGroup {
+		var updateErr error
+
+		if payload.Enabled {
+			// Enable server: Use EnableUpstreamServer which clears auto-disable automatically
+			updateErr = s.storageManager.EnableUpstreamServer(serverName, true)
+			if updateErr != nil {
+				s.logger.Error("Failed to enable server via storage API",
+					zap.String("server", serverName),
+					zap.Error(updateErr))
+				failedUpdates = append(failedUpdates, map[string]string{
+					"server": serverName,
+					"error":  updateErr.Error(),
+				})
 				continue
 			}
-			updatedCount++
 
-			// CRITICAL FIX: Update s.config.Servers in memory so SaveConfiguration() persists changes
-			// SaveConfiguration() uses s.config.Servers as the authoritative source
+			// Update upstream manager to trigger reconnection
+			srv, err := s.storageManager.GetUpstreamServer(serverName)
+			if err != nil {
+				s.logger.Error("Failed to get server config after enabling",
+					zap.String("server", serverName),
+					zap.Error(err))
+				failedUpdates = append(failedUpdates, map[string]string{
+					"server": serverName,
+					"error":  "failed to get config after enable",
+				})
+				continue
+			}
+
+			// Re-add server to upstream manager to trigger connection
+			if err := s.upstreamManager.AddServerConfig(srv.Name, srv); err != nil {
+				s.logger.Warn("Failed to add server to upstream manager",
+					zap.String("server", srv.Name),
+					zap.Error(err))
+				// Don't fail the operation, just log warning
+			}
+
+			// Update s.config.Servers in memory for SaveConfiguration
 			for i := range s.config.Servers {
 				if s.config.Servers[i].Name == srv.Name {
-					s.config.Servers[i].Enabled = srv.Enabled
-					s.config.Servers[i].AutoDisabled = srv.AutoDisabled
-					s.config.Servers[i].AutoDisableReason = srv.AutoDisableReason
-					s.logger.Debug("Updated server in s.config.Servers for SaveConfiguration",
-						zap.String("server", srv.Name),
-						zap.Bool("enabled", srv.Enabled),
-						zap.Bool("auto_disabled", srv.AutoDisabled))
+					s.config.Servers[i].StartupMode = srv.StartupMode
 					break
 				}
 			}
 
-			// Update upstream manager if server exists
-			if payload.Enabled {
-				// Re-add server to manager with updated config
-				if err := s.upstreamManager.AddServerConfig(srv.Name, srv); err != nil {
-					s.logger.Warn("Failed to add server to upstream manager",
-						zap.String("server", srv.Name),
-						zap.Error(err))
+			// Emit ServerStateChanged event for tray update
+			if s.eventBus != nil {
+				s.eventBus.Publish(events.Event{
+					Type:       events.ServerStateChanged,
+					ServerName: serverName,
+					Data: map[string]interface{}{
+						"enabled":       true,
+						"auto_disabled": false,
+						"action":        "group_enable",
+						"group":         payload.GroupName,
+					},
+				})
+			}
+
+		} else {
+			// Disable server: Stop it first, then update storage
+			s.upstreamManager.RemoveServer(serverName)
+
+			// Use EnableUpstreamServer(name, false) to disable with two-phase commit
+			updateErr = s.storageManager.EnableUpstreamServer(serverName, false)
+			if updateErr != nil {
+				s.logger.Error("Failed to disable server via storage API",
+					zap.String("server", serverName),
+					zap.Error(updateErr))
+				failedUpdates = append(failedUpdates, map[string]string{
+					"server": serverName,
+					"error":  updateErr.Error(),
+				})
+				continue
+			}
+
+			// Get updated config for s.config.Servers sync
+			srv, err := s.storageManager.GetUpstreamServer(serverName)
+			if err != nil {
+				s.logger.Error("Failed to get server config after disabling",
+					zap.String("server", serverName),
+					zap.Error(err))
+				failedUpdates = append(failedUpdates, map[string]string{
+					"server": serverName,
+					"error":  "failed to get config after disable",
+				})
+				continue
+			}
+
+			// Update s.config.Servers in memory for SaveConfiguration
+			for i := range s.config.Servers {
+				if s.config.Servers[i].Name == srv.Name {
+					s.config.Servers[i].StartupMode = srv.StartupMode
+					break
 				}
-			} else {
-				// Disconnect and stop the server
-				s.upstreamManager.RemoveServer(srv.Name)
+			}
+
+			// Emit ServerStateChanged event for tray update
+			if s.eventBus != nil {
+				s.eventBus.Publish(events.Event{
+					Type:       events.ServerStateChanged,
+					ServerName: serverName,
+					Data: map[string]interface{}{
+						"enabled": false,
+						"action":  "group_disable",
+						"group":   payload.GroupName,
+					},
+				})
 			}
 		}
+
+		successfulUpdates = append(successfulUpdates, serverName)
+		updatedCount++
 	}
 
-	// Save configuration to disk
+	// Save configuration to disk (already done by storage APIs, but ensures s.config is persisted)
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Error("Failed to save configuration after toggling group servers", zap.Error(err))
 	}
 
-	// Trigger upstream server change event
+	// Emit ServerGroupUpdated event to notify tray of group-level change
+	if s.eventBus != nil {
+		s.eventBus.Publish(events.Event{
+			Type: events.ServerGroupUpdated,
+			Data: map[string]interface{}{
+				"group":              payload.GroupName,
+				"action":             map[bool]string{true: "enable", false: "disable"}[payload.Enabled],
+				"successful_updates": successfulUpdates,
+				"failed_updates":     failedUpdates,
+				"total_updated":      updatedCount,
+			},
+		})
+	}
+
+	// Trigger upstream server change event for index rebuild
 	s.OnUpstreamServerChange()
 
 	action := "disabled"
@@ -1527,12 +1601,21 @@ func (s *Server) handleToggleGroupServers(w http.ResponseWriter, r *http.Request
 	s.logger.Info("Toggled servers in group",
 		zap.String("group", payload.GroupName),
 		zap.String("action", action),
-		zap.Int("count", updatedCount))
+		zap.Int("successful", updatedCount),
+		zap.Int("failed", len(failedUpdates)))
 
+	// Build response with detailed results
 	response := map[string]interface{}{
-		"success": true,
+		"success": len(failedUpdates) == 0,
 		"message": fmt.Sprintf("%d servers %s in group '%s'", updatedCount, action, payload.GroupName),
 		"updated": updatedCount,
+	}
+
+	if len(failedUpdates) > 0 {
+		response["partial_failure"] = true
+		response["failed_servers"] = failedUpdates
+		response["message"] = fmt.Sprintf("%d of %d servers %s in group '%s' (check failed_servers for details)",
+			updatedCount, len(serversInGroup), action, payload.GroupName)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

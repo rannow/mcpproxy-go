@@ -1,0 +1,348 @@
+package storage
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/config"
+)
+
+func TestManager_ClearAutoDisable(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create initial config with auto-disabled server
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.Servers = []*config.ServerConfig{
+		{
+			Name:               "test-server",
+			Protocol:           "http",
+			URL:                "http://localhost:8080",
+			Enabled:            false,
+			AutoDisabled:       true,
+			AutoDisableReason:  "Connection failed 3 times",
+			Created:            time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0644))
+
+	// Create manager and config loader
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Save server to database
+	require.NoError(t, manager.SaveUpstreamServer(cfg.Servers[0]))
+
+	// Create and set config loader
+	zapLogger := zap.NewNop()
+	loader, err := config.NewLoader(configPath, zapLogger)
+	require.NoError(t, err)
+	defer loader.Stop()
+
+	_, err = loader.Load()
+	require.NoError(t, err)
+
+	manager.SetConfigLoader(loader)
+
+	// Clear auto-disable
+	err = manager.ClearAutoDisable("test-server")
+	require.NoError(t, err)
+
+	// Verify database was updated
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.False(t, record.AutoDisabled, "Database auto-disabled should be cleared")
+	assert.Empty(t, record.AutoDisableReason, "Database auto-disable reason should be empty")
+
+	// Verify config file was updated
+	updatedCfg := loader.GetConfig()
+	found := false
+	for _, server := range updatedCfg.Servers {
+		if server.Name == "test-server" {
+			found = true
+			assert.False(t, server.AutoDisabled, "Config auto-disabled should be cleared")
+			assert.Empty(t, server.AutoDisableReason, "Config auto-disable reason should be empty")
+			break
+		}
+	}
+	assert.True(t, found, "Server should exist in config")
+}
+
+func TestManager_UpdateServerStartupMode(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create initial config
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.Servers = []*config.ServerConfig{
+		{
+			Name:     "test-server",
+			Protocol: "http",
+			URL:      "http://localhost:8080",
+			Enabled:  true,
+			Created:  time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0644))
+
+	// Create manager and config loader
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	require.NoError(t, manager.SaveUpstreamServer(cfg.Servers[0]))
+
+	zapLogger := zap.NewNop()
+	loader, err := config.NewLoader(configPath, zapLogger)
+	require.NoError(t, err)
+	defer loader.Stop()
+
+	_, err = loader.Load()
+	require.NoError(t, err)
+
+	manager.SetConfigLoader(loader)
+
+	// Update startup mode to disabled with reason
+	err = manager.UpdateServerStartupMode("test-server", false, "Too many failures")
+	require.NoError(t, err)
+
+	// Verify database was updated
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.False(t, record.Enabled, "Database enabled should be false")
+	assert.True(t, record.AutoDisabled, "Database auto-disabled should be true")
+	assert.Equal(t, "Too many failures", record.AutoDisableReason)
+
+	// Verify config file was updated
+	updatedCfg := loader.GetConfig()
+	found := false
+	for _, server := range updatedCfg.Servers {
+		if server.Name == "test-server" {
+			found = true
+			assert.False(t, server.Enabled, "Config enabled should be false")
+			assert.True(t, server.AutoDisabled, "Config auto-disabled should be true")
+			assert.Equal(t, "Too many failures", server.AutoDisableReason)
+			break
+		}
+	}
+	assert.True(t, found, "Server should exist in config")
+}
+
+func TestManager_UpdateServerStartupMode_Rollback(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create initial config
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.Servers = []*config.ServerConfig{
+		{
+			Name:     "test-server",
+			Protocol: "http",
+			URL:      "http://localhost:8080",
+			Enabled:  true,
+			Created:  time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0644))
+
+	// Create manager
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	require.NoError(t, manager.SaveUpstreamServer(cfg.Servers[0]))
+
+	// Create read-only directory for config to force failure
+	tempDir2 := t.TempDir()
+	readOnlyPath := filepath.Join(tempDir2, "config.json")
+	err = os.Chmod(tempDir2, 0444)
+	require.NoError(t, err)
+	defer os.Chmod(tempDir2, 0755)
+
+	zapLogger := zap.NewNop()
+	loader2, err := config.NewLoader(readOnlyPath, zapLogger)
+	require.NoError(t, err)
+	defer loader2.Stop()
+
+	manager.SetConfigLoader(loader2)
+
+	// Try to update - should fail on config file write
+	err = manager.UpdateServerStartupMode("test-server", false, "Test reason")
+	assert.Error(t, err, "Should fail to write config file")
+
+	// Verify database was rolled back
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.True(t, record.Enabled, "Database should be rolled back to enabled=true")
+	assert.False(t, record.AutoDisabled, "Database should be rolled back to auto-disabled=false")
+}
+
+func TestManager_EnableUpstreamServer_WithConfigLoader(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create initial config with disabled and auto-disabled server
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.Servers = []*config.ServerConfig{
+		{
+			Name:               "test-server",
+			Protocol:           "http",
+			URL:                "http://localhost:8080",
+			Enabled:            false,
+			AutoDisabled:       true,
+			AutoDisableReason:  "Connection failed",
+			Created:            time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0644))
+
+	// Create manager and config loader
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	require.NoError(t, manager.SaveUpstreamServer(cfg.Servers[0]))
+
+	zapLogger := zap.NewNop()
+	loader, err := config.NewLoader(configPath, zapLogger)
+	require.NoError(t, err)
+	defer loader.Stop()
+
+	_, err = loader.Load()
+	require.NoError(t, err)
+
+	manager.SetConfigLoader(loader)
+
+	// Enable server - should also clear auto-disable
+	err = manager.EnableUpstreamServer("test-server", true)
+	require.NoError(t, err)
+
+	// Verify database
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.True(t, record.Enabled, "Should be enabled")
+	assert.False(t, record.AutoDisabled, "Auto-disabled should be cleared")
+	assert.Empty(t, record.AutoDisableReason, "Auto-disable reason should be empty")
+
+	// Verify config file
+	updatedCfg := loader.GetConfig()
+	found := false
+	for _, server := range updatedCfg.Servers {
+		if server.Name == "test-server" {
+			found = true
+			assert.True(t, server.Enabled, "Config enabled should be true")
+			assert.False(t, server.AutoDisabled, "Config auto-disabled should be false")
+			assert.Empty(t, server.AutoDisableReason, "Config auto-disable reason should be empty")
+			break
+		}
+	}
+	assert.True(t, found, "Server should exist in config")
+}
+
+func TestManager_StopServer(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+
+	// Create manager
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Create test server
+	serverCfg := &config.ServerConfig{
+		Name:     "test-server",
+		Protocol: "http",
+		URL:      "http://localhost:8080",
+		Enabled:  true,
+		Created:  time.Now(),
+	}
+	require.NoError(t, manager.SaveUpstreamServer(serverCfg))
+
+	// Stop server
+	err = manager.StopServer("test-server")
+	require.NoError(t, err)
+
+	// Verify server still exists in database
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.NotNil(t, record)
+}
+
+func TestManager_StartServer(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+
+	// Create manager
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Create enabled server
+	serverCfg := &config.ServerConfig{
+		Name:     "test-server",
+		Protocol: "http",
+		URL:      "http://localhost:8080",
+		Enabled:  true,
+		Created:  time.Now(),
+	}
+	require.NoError(t, manager.SaveUpstreamServer(serverCfg))
+
+	// Start server
+	err = manager.StartServer("test-server")
+	require.NoError(t, err)
+
+	// Verify server exists
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.NotNil(t, record)
+	assert.True(t, record.Enabled)
+}
+
+func TestManager_StartServer_Disabled(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+
+	// Create manager
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Create disabled server
+	serverCfg := &config.ServerConfig{
+		Name:     "test-server",
+		Protocol: "http",
+		URL:      "http://localhost:8080",
+		Enabled:  false,
+		Created:  time.Now(),
+	}
+	require.NoError(t, manager.SaveUpstreamServer(serverCfg))
+
+	// Try to start disabled server - should fail
+	err = manager.StartServer("test-server")
+	assert.Error(t, err, "Should not be able to start disabled server")
+	assert.Contains(t, err.Error(), "disabled")
+}

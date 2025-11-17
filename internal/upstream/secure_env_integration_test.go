@@ -64,7 +64,7 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 		Env: map[string]string{
 			"CUSTOM_SERVER_VAR": "custom_value",
 		},
-		Enabled: true,
+		StartupMode: "active",
 	}
 
 	// Create upstream client
@@ -175,7 +175,7 @@ func TestServerSpecificEnvironmentVariables(t *testing.T) {
 			"SERVER_VAR":   "server_value",
 			"OVERRIDE_VAR": "server_override",
 		},
-		Enabled: true,
+		StartupMode: "active",
 	}
 
 	// Also add the override var to global config to test precedence
@@ -237,7 +237,7 @@ func TestEnvironmentInheritanceDisabled(t *testing.T) {
 		Name:    "test-server",
 		Command: "echo",
 		Args:    []string{"test"},
-		Enabled: true,
+		StartupMode: "active",
 	}
 
 	logger := zap.NewNop()
@@ -288,7 +288,7 @@ func TestRealWorldNpxScenario(t *testing.T) {
 		Name:    "npx-test-server",
 		Command: "npx",
 		Args:    []string{"--version"}, // Simple npx command
-		Enabled: true,
+		StartupMode: "active",
 	}
 
 	logger := zap.NewNop()
@@ -351,7 +351,7 @@ func TestSecurityCompliance(t *testing.T) {
 	serverConfig := &config.ServerConfig{
 		Name:    "security-test-server",
 		Command: "env",
-		Enabled: true,
+		StartupMode: "active",
 	}
 
 	logger := zap.NewNop()
@@ -404,7 +404,7 @@ func TestWildcardMatching(t *testing.T) {
 	serverConfig := &config.ServerConfig{
 		Name:    "locale-test-server",
 		Command: "locale",
-		Enabled: true,
+		StartupMode: "active",
 	}
 
 	logger := zap.NewNop()

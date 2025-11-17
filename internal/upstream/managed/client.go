@@ -25,9 +25,10 @@ type Client struct {
 	StateManager *types.StateManager // Public field for callback access
 
 	// Configuration for creating fresh connections
-	logConfig    *config.LogConfig
-	globalConfig *config.Config
-	storage      *storage.BoltDB
+	logConfig      *config.LogConfig
+	globalConfig   *config.Config
+	storage        *storage.BoltDB
+	storageManager *storage.Manager // For persisting state changes
 
 	// Connection state protection
 	mu sync.RWMutex
@@ -81,11 +82,11 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 
 	// Initialize StateManager from config to preserve auto-disable state across restarts
 	// This ensures the runtime state matches the persisted config file state
-	if serverConfig.AutoDisabled {
-		mc.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+	if serverConfig.StartupMode == "auto_disabled" {
+		mc.StateManager.SetAutoDisabled("Server was auto-disabled")
 		mc.logger.Info("Initialized StateManager with auto-disabled state from config",
 			zap.String("server", serverConfig.Name),
-			zap.String("reason", serverConfig.AutoDisableReason))
+			zap.String("startup_mode", serverConfig.StartupMode))
 	}
 
 	// Set up state change callback
@@ -167,8 +168,6 @@ func (mc *Client) Connect(ctx context.Context) error {
 			Headers:                  mc.Config.Headers,
 			OAuth:                    mc.Config.OAuth,
 			RepositoryURL:            mc.Config.RepositoryURL,
-			Enabled:                  mc.Config.Enabled,
-			Quarantined:              mc.Config.Quarantined,
 			Created:                  mc.Config.Created,
 			Updated:                  time.Now(),
 			Isolation:                mc.Config.Isolation,
@@ -177,8 +176,6 @@ func (mc *Client) Connect(ctx context.Context) error {
 			EverConnected:            mc.Config.EverConnected,
 			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
 			ToolCount:                mc.Config.ToolCount,
-			AutoDisabled:             mc.Config.AutoDisabled,
-			AutoDisableReason:        mc.Config.AutoDisableReason,
 			AutoDisableThreshold:     mc.Config.AutoDisableThreshold,
 		}); err != nil {
 			mc.logger.Warn("Failed to persist connection history to storage",
@@ -315,6 +312,11 @@ func (mc *Client) SetAutoDisableCallback(callback func(serverName string, reason
 	mc.onAutoDisable = callback
 }
 
+// SetStorageManager sets the storage manager for persisting state changes
+func (mc *Client) SetStorageManager(manager *storage.Manager) {
+	mc.storageManager = manager
+}
+
 // ListTools retrieves tools with concurrency control
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
@@ -386,18 +388,12 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			Headers:                  mc.Config.Headers,
 			OAuth:                    mc.Config.OAuth,
 			RepositoryURL:            mc.Config.RepositoryURL,
-			Enabled:                  mc.Config.Enabled,
-			Quarantined:              mc.Config.Quarantined,
 			Created:                  mc.Config.Created,
 			Updated:                  time.Now(),
 			Isolation:                mc.Config.Isolation,
 			GroupID:                  mc.Config.GroupID,
 			GroupName:                mc.Config.GroupName,
 			EverConnected:            mc.Config.EverConnected,
-			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
-			ToolCount:                mc.Config.ToolCount,
-			AutoDisabled:             mc.Config.AutoDisabled,
-			AutoDisableReason:        mc.Config.AutoDisableReason,
 			AutoDisableThreshold:     mc.Config.AutoDisableThreshold,
 		}); err != nil {
 			mc.logger.Warn("Failed to persist tool count to storage",
@@ -517,11 +513,23 @@ func (mc *Client) checkAndHandleAutoDisable() {
 	reason := fmt.Sprintf("Server automatically disabled after %d consecutive failures (threshold: %d)",
 		info.ConsecutiveFailures, info.AutoDisableThreshold)
 
-	mc.StateManager.SetAutoDisabled(reason)
+	// First, persist to storage before updating state machine
+	// This ensures the state survives application restart
+	if mc.storageManager != nil {
+		if err := mc.storageManager.UpdateServerState(mc.Config.Name, reason); err != nil {
+			mc.logger.Error("Failed to persist auto-disable state to storage",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+			// Don't continue if storage update fails - we want persistence or nothing
+			return
+		}
+		mc.logger.Info("Persisted auto-disable state to storage",
+			zap.String("server", mc.Config.Name),
+			zap.String("reason", reason))
+	}
 
-	// Persist auto-disable state to config (so it survives restarts)
-	mc.Config.AutoDisabled = true
-	mc.Config.AutoDisableReason = reason
+	// Now update state machine (after persistence succeeds)
+	mc.StateManager.SetAutoDisabled(reason)
 
 	mc.logger.Warn("Server auto-disabled due to consecutive failures",
 		zap.String("server", mc.Config.Name),
@@ -555,7 +563,7 @@ func (mc *Client) checkAndHandleAutoDisable() {
 		}
 	}
 
-	// Trigger configuration update callback to persist auto-disable state
+	// Trigger configuration update callback (for backward compatibility)
 	if mc.onAutoDisable != nil {
 		mc.onAutoDisable(mc.Config.Name, reason)
 	}

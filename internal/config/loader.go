@@ -222,6 +222,21 @@ func loadConfigFile(path string, cfg *Config) error {
 		}
 	}
 
+	// Migrate configuration from old format to new startup_mode format
+	result := MigrateConfig(cfg, nil)
+	if result.Migrated {
+		// Save the migrated configuration back to disk
+		if err := SaveConfig(cfg, path); err != nil {
+			fmt.Fprintf(os.Stderr, "[WARN] Config was migrated but failed to save: %v\n", err)
+			// Don't fail the load operation - migration happened in memory
+		} else {
+			fmt.Printf("[INFO] Configuration migrated successfully (%d servers updated)\n", result.ServersChanged)
+			if result.BackupPath != "" {
+				fmt.Printf("[INFO] Backup created at: %s\n", result.BackupPath)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -240,10 +255,10 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 	}
 
 	serverConfig := &ServerConfig{
-		Name:    name,
-		URL:     url,
-		Enabled: true,
-		Created: now(),
+		Name:        name,
+		URL:         url,
+		StartupMode: "active",
+		Created:     now(),
 	}
 
 	cfg.Servers = append(cfg.Servers, serverConfig)
@@ -347,10 +362,10 @@ func SaveConfig(cfg *Config, path string) error {
 	fmt.Printf("[DEBUG] SaveConfig called with path: %s\n", path)
 	fmt.Printf("[DEBUG] SaveConfig - server count: %d\n", len(cfg.Servers))
 
-	// Log server states for debugging
+	// Log server states for debugging (using new startup_mode field)
 	for _, server := range cfg.Servers {
-		fmt.Printf("[DEBUG] SaveConfig - server %s: enabled=%v, quarantined=%v\n",
-			server.Name, server.Enabled, server.Quarantined)
+		fmt.Printf("[DEBUG] SaveConfig - server %s: startup_mode=%s\n",
+			server.Name, server.StartupMode)
 	}
 
 	// Create backup of existing config file
@@ -427,18 +442,18 @@ func CreateSampleConfig(path string) error {
 	cfg := DefaultConfig()
 	cfg.Servers = []*ServerConfig{
 		{
-			Name:    "example",
-			URL:     "http://localhost:8000/mcp/",
-			Enabled: true,
-			Created: now(),
+			Name:        "example",
+			URL:         "http://localhost:8000/mcp/",
+			StartupMode: "active",
+			Created:     now(),
 		},
 		{
-			Name:    "local-command",
-			Command: "mcp-server-example",
-			Args:    []string{"--config", "example.json"},
-			Env:     map[string]string{"DEBUG": "true"},
-			Enabled: true,
-			Created: now(),
+			Name:        "local-command",
+			Command:     "mcp-server-example",
+			Args:        []string{"--config", "example.json"},
+			Env:         map[string]string{"DEBUG": "true"},
+			StartupMode: "active",
+			Created:     now(),
 		},
 	}
 

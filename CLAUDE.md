@@ -1,634 +1,352 @@
-# CLAUDE.md
+# Claude Code Configuration - SPARC Development Environment
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 🚨 CRITICAL: CONCURRENT EXECUTION & FILE MANAGEMENT
+
+**ABSOLUTE RULES**:
+1. ALL operations MUST be concurrent/parallel in a single message
+2. **NEVER save working files, text/mds and tests to the root folder**
+3. ALWAYS organize files in appropriate subdirectories
+4. **USE CLAUDE CODE'S TASK TOOL** for spawning agents concurrently, not just MCP
+
+### ⚡ GOLDEN RULE: "1 MESSAGE = ALL RELATED OPERATIONS"
+
+**MANDATORY PATTERNS:**
+- **TodoWrite**: ALWAYS batch ALL todos in ONE call (5-10+ todos minimum)
+- **Task tool (Claude Code)**: ALWAYS spawn ALL agents in ONE message with full instructions
+- **File operations**: ALWAYS batch ALL reads/writes/edits in ONE message
+- **Bash commands**: ALWAYS batch ALL terminal operations in ONE message
+- **Memory operations**: ALWAYS batch ALL memory store/retrieve in ONE message
+
+### 🎯 CRITICAL: Claude Code Task Tool for Agent Execution
+
+**Claude Code's Task tool is the PRIMARY way to spawn agents:**
+```javascript
+// ✅ CORRECT: Use Claude Code's Task tool for parallel agent execution
+[Single Message]:
+  Task("Research agent", "Analyze requirements and patterns...", "researcher")
+  Task("Coder agent", "Implement core features...", "coder")
+  Task("Tester agent", "Create comprehensive tests...", "tester")
+  Task("Reviewer agent", "Review code quality...", "reviewer")
+  Task("Architect agent", "Design system architecture...", "system-architect")
+```
+
+**MCP tools are ONLY for coordination setup:**
+- `mcp__claude-flow__swarm_init` - Initialize coordination topology
+- `mcp__claude-flow__agent_spawn` - Define agent types for coordination
+- `mcp__claude-flow__task_orchestrate` - Orchestrate high-level workflows
+
+### 📁 File Organization Rules
+
+**NEVER save to root folder. Use these directories:**
+- `/src` - Source code files
+- `/tests` - Test files
+- `/docs` - Documentation and markdown files
+- `/config` - Configuration files
+- `/scripts` - Utility scripts
+- `/examples` - Example code
 
 ## Project Overview
 
-MCPProxy is a Go-based desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
+This project uses SPARC (Specification, Pseudocode, Architecture, Refinement, Completion) methodology with Claude-Flow orchestration for systematic Test-Driven Development.
 
-## Development Commands
+## SPARC Commands
 
-### Build
+### Core Commands
+- `npx claude-flow sparc modes` - List available modes
+- `npx claude-flow sparc run <mode> "<task>"` - Execute specific mode
+- `npx claude-flow sparc tdd "<feature>"` - Run complete TDD workflow
+- `npx claude-flow sparc info <mode>` - Get mode details
+
+### Batchtools Commands
+- `npx claude-flow sparc batch <modes> "<task>"` - Parallel execution
+- `npx claude-flow sparc pipeline "<task>"` - Full pipeline processing
+- `npx claude-flow sparc concurrent <mode> "<tasks-file>"` - Multi-task processing
+
+### Build Commands
+- `npm run build` - Build project
+- `npm run test` - Run tests
+- `npm run lint` - Linting
+- `npm run typecheck` - Type checking
+
+## SPARC Workflow Phases
+
+1. **Specification** - Requirements analysis (`sparc run spec-pseudocode`)
+2. **Pseudocode** - Algorithm design (`sparc run spec-pseudocode`)
+3. **Architecture** - System design (`sparc run architect`)
+4. **Refinement** - TDD implementation (`sparc tdd`)
+5. **Completion** - Integration (`sparc run integration`)
+
+## Code Style & Best Practices
+
+- **Modular Design**: Files under 500 lines
+- **Environment Safety**: Never hardcode secrets
+- **Test-First**: Write tests before implementation
+- **Clean Architecture**: Separate concerns
+- **Documentation**: Keep updated
+
+## 🚀 Available Agents (54 Total)
+
+### Core Development
+`coder`, `reviewer`, `tester`, `planner`, `researcher`
+
+### Swarm Coordination
+`hierarchical-coordinator`, `mesh-coordinator`, `adaptive-coordinator`, `collective-intelligence-coordinator`, `swarm-memory-manager`
+
+### Consensus & Distributed
+`byzantine-coordinator`, `raft-manager`, `gossip-coordinator`, `consensus-builder`, `crdt-synchronizer`, `quorum-manager`, `security-manager`
+
+### Performance & Optimization
+`perf-analyzer`, `performance-benchmarker`, `task-orchestrator`, `memory-coordinator`, `smart-agent`
+
+### GitHub & Repository
+`github-modes`, `pr-manager`, `code-review-swarm`, `issue-tracker`, `release-manager`, `workflow-automation`, `project-board-sync`, `repo-architect`, `multi-repo-swarm`
+
+### SPARC Methodology
+`sparc-coord`, `sparc-coder`, `specification`, `pseudocode`, `architecture`, `refinement`
+
+### Specialized Development
+`backend-dev`, `mobile-dev`, `ml-developer`, `cicd-engineer`, `api-docs`, `system-architect`, `code-analyzer`, `base-template-generator`
+
+### Testing & Validation
+`tdd-london-swarm`, `production-validator`
+
+### Migration & Planning
+`migration-planner`, `swarm-init`
+
+## 🎯 Claude Code vs MCP Tools
+
+### Claude Code Handles ALL EXECUTION:
+- **Task tool**: Spawn and run agents concurrently for actual work
+- File operations (Read, Write, Edit, MultiEdit, Glob, Grep)
+- Code generation and programming
+- Bash commands and system operations
+- Implementation work
+- Project navigation and analysis
+- TodoWrite and task management
+- Git operations
+- Package management
+- Testing and debugging
+
+### MCP Tools ONLY COORDINATE:
+- Swarm initialization (topology setup)
+- Agent type definitions (coordination patterns)
+- Task orchestration (high-level planning)
+- Memory management
+- Neural features
+- Performance tracking
+- GitHub integration
+
+**KEY**: MCP coordinates the strategy, Claude Code's Task tool executes with real agents.
+
+## 🚀 Quick Setup
+
 ```bash
-# Build for current platform (ALWAYS use 'mcpproxy' as binary name)
-go build -o mcpproxy ./cmd/mcpproxy
-
-# Cross-platform build script (builds for multiple architectures)
-./scripts/build.sh
-
-# Quick local build
-scripts/build.sh
+# Add MCP servers (Claude Flow required, others optional)
+claude mcp add claude-flow npx claude-flow@alpha mcp start
+claude mcp add ruv-swarm npx ruv-swarm mcp start  # Optional: Enhanced coordination
+claude mcp add flow-nexus npx flow-nexus@latest mcp start  # Optional: Cloud features
 ```
 
-**Important**:
-- **Always use `mcpproxy` as the binary name** for consistency across all platforms and build configurations
-- Never use alternative names or variations
+## MCP Tool Categories
 
-### Testing
+### Coordination
+`swarm_init`, `agent_spawn`, `task_orchestrate`
+
+### Monitoring
+`swarm_status`, `agent_list`, `agent_metrics`, `task_status`, `task_results`
+
+### Memory & Neural
+`memory_usage`, `neural_status`, `neural_train`, `neural_patterns`
+
+### GitHub Integration
+`github_swarm`, `repo_analyze`, `pr_enhance`, `issue_triage`, `code_review`
+
+### System
+`benchmark_run`, `features_detect`, `swarm_monitor`
+
+### Flow-Nexus MCP Tools (Optional Advanced Features)
+Flow-Nexus extends MCP capabilities with 70+ cloud-based orchestration tools:
+
+**Key MCP Tool Categories:**
+- **Swarm & Agents**: `swarm_init`, `swarm_scale`, `agent_spawn`, `task_orchestrate`
+- **Sandboxes**: `sandbox_create`, `sandbox_execute`, `sandbox_upload` (cloud execution)
+- **Templates**: `template_list`, `template_deploy` (pre-built project templates)
+- **Neural AI**: `neural_train`, `neural_patterns`, `seraphina_chat` (AI assistant)
+- **GitHub**: `github_repo_analyze`, `github_pr_manage` (repository management)
+- **Real-time**: `execution_stream_subscribe`, `realtime_subscribe` (live monitoring)
+- **Storage**: `storage_upload`, `storage_list` (cloud file management)
+
+**Authentication Required:**
+- Register: `mcp__flow-nexus__user_register` or `npx flow-nexus@latest register`
+- Login: `mcp__flow-nexus__user_login` or `npx flow-nexus@latest login`
+- Access 70+ specialized MCP tools for advanced orchestration
+
+## 🚀 Agent Execution Flow with Claude Code
+
+### The Correct Pattern:
+
+1. **Optional**: Use MCP tools to set up coordination topology
+2. **REQUIRED**: Use Claude Code's Task tool to spawn agents that do actual work
+3. **REQUIRED**: Each agent runs hooks for coordination
+4. **REQUIRED**: Batch all operations in single messages
+
+### Example Full-Stack Development:
+
+```javascript
+// Single message with all agent spawning via Claude Code's Task tool
+[Parallel Agent Execution]:
+  Task("Backend Developer", "Build REST API with Express. Use hooks for coordination.", "backend-dev")
+  Task("Frontend Developer", "Create React UI. Coordinate with backend via memory.", "coder")
+  Task("Database Architect", "Design PostgreSQL schema. Store schema in memory.", "code-analyzer")
+  Task("Test Engineer", "Write Jest tests. Check memory for API contracts.", "tester")
+  Task("DevOps Engineer", "Setup Docker and CI/CD. Document in memory.", "cicd-engineer")
+  Task("Security Auditor", "Review authentication. Report findings via hooks.", "reviewer")
+  
+  // All todos batched together
+  TodoWrite { todos: [...8-10 todos...] }
+  
+  // All file operations together
+  Write "backend/server.js"
+  Write "frontend/App.jsx"
+  Write "database/schema.sql"
+```
+
+## 📋 Agent Coordination Protocol
+
+### Every Agent Spawned via Task Tool MUST:
+
+**1️⃣ BEFORE Work:**
 ```bash
-# Run unit tests
-go test ./internal/... -v
-
-# Run unit tests with race detection
-go test -race ./internal/... -v
-
-# Run E2E tests
-./scripts/run-e2e-tests.sh
-
-# Run specific test package
-go test ./internal/server -v
-
-# Run tests with coverage
-go test -coverprofile=coverage.out ./internal/...
-go tool cover -html=coverage.out
+npx claude-flow@alpha hooks pre-task --description "[task]"
+npx claude-flow@alpha hooks session-restore --session-id "swarm-[id]"
 ```
 
-### Linting
+**2️⃣ DURING Work:**
 ```bash
-# Run linter (requires golangci-lint v1.59.1+)
-./scripts/run-linter.sh
-
-# Or directly
-golangci-lint run ./...
+npx claude-flow@alpha hooks post-edit --file "[file]" --memory-key "swarm/[agent]/[step]"
+npx claude-flow@alpha hooks notify --message "[what was done]"
 ```
 
-### Running the Application
+**3️⃣ AFTER Work:**
 ```bash
-# Start server with system tray (ALWAYS use tray in production/development)
-./mcpproxy serve
-
-# Custom configuration
-./mcpproxy serve --config=/path/to/config.json
-
-# Debug mode with trace logging
-./mcpproxy serve --log-level=debug
-
-# Debug specific server tools
-./mcpproxy tools list --server=github-server --log-level=trace
-
-# ONLY for automated testing/CI: Start without tray
-./mcpproxy serve --tray=false
+npx claude-flow@alpha hooks post-task --task-id "[task]"
+npx claude-flow@alpha hooks session-end --export-metrics true
 ```
 
-**Important**:
-- **Always start with system tray enabled** (`./mcpproxy serve`) for normal development and production use
-- The tray provides essential UI for server management, status monitoring, and configuration
-- Only use `--tray=false` for automated testing, CI/CD pipelines, or headless environments
-- The application is designed to run with the tray interface as the primary user interaction method
+## 🎯 Concurrent Execution Examples
 
-## Architecture Overview
+### ✅ CORRECT WORKFLOW: MCP Coordinates, Claude Code Executes
 
-### Core Components
+```javascript
+// Step 1: MCP tools set up coordination (optional, for complex tasks)
+[Single Message - Coordination Setup]:
+  mcp__claude-flow__swarm_init { topology: "mesh", maxAgents: 6 }
+  mcp__claude-flow__agent_spawn { type: "researcher" }
+  mcp__claude-flow__agent_spawn { type: "coder" }
+  mcp__claude-flow__agent_spawn { type: "tester" }
 
-- **`cmd/mcpproxy/`** - Main CLI application entry point
-  - `main.go` - Cobra CLI setup and command routing
-  - `tools_cmd.go` - Tools debugging commands
-  - `call_cmd.go` - Tool execution commands
-  - `tray_gui.go`/`tray_stub.go` - System tray interface (build-tagged)
-
-- **`internal/server/`** - Core server implementation
-  - `server.go` - Main server lifecycle and HTTP server management
-  - `mcp.go` - MCP protocol implementation and tool routing
-
-- **`internal/upstream/`** - Modular client architecture (3-layer design)
-  - `core/` - Basic MCP client (stateless, transport-agnostic)
-  - `managed/` - Production client (state management, retry logic)
-  - `cli/` - Debug client (enhanced logging, single operations)
-
-- **`internal/config/`** - Configuration management
-  - `config.go` - Configuration structures and validation
-  - `loader.go` - File loading and environment variable handling
-
-- **`internal/index/`** - Full-text search using Bleve
-  - BM25 search index for tool discovery
-  - Automatic tool indexing and updates
-
-- **`internal/storage/`** - BBolt database for persistence
-  - Tool statistics and metadata
-  - Server configurations and quarantine status
-
-- **`internal/cache/`** - Response caching layer
-- **`internal/tray/`** - Cross-platform system tray UI
-- **`internal/logs/`** - Structured logging with per-server log files
-
-### Key Features
-
-1. **Tool Discovery** - BM25 search across all upstream MCP server tools
-2. **Security Quarantine** - Automatic quarantine of new servers to prevent Tool Poisoning Attacks
-3. **Docker Security Isolation** - Run stdio MCP servers in isolated Docker containers for enhanced security
-4. **OAuth 2.1 Support** - RFC 8252 compliant OAuth with PKCE for secure authentication
-5. **System Tray UI** - Native cross-platform tray interface for server management
-6. **Per-Server Logging** - Individual log files for each upstream server
-7. **Hot Configuration Reload** - Real-time config changes via file watching
-
-## Configuration
-
-### Default Locations
-- **Config**: `~/.mcpproxy/mcp_config.json`
-- **Data**: `~/.mcpproxy/config.db` (BBolt database)
-- **Index**: `~/.mcpproxy/index.bleve/` (search index)
-- **Logs**: `~/.mcpproxy/logs/` (main.log + per-server logs)
-
-### Example Configuration
-```json
-{
-  "listen": ":8080",
-  "data_dir": "~/.mcpproxy",
-  "enable_tray": true,
-  "top_k": 5,
-  "tools_limit": 15,
-  "tool_response_limit": 20000,
-  "docker_isolation": {
-    "enabled": true,
-    "memory_limit": "512m",
-    "cpu_limit": "1.0",
-    "timeout": "60s",
-    "default_images": {
-      "python": "python:3.11",
-      "uvx": "python:3.11",
-      "node": "node:20",
-      "npx": "node:20"
-    }
-  },
-  "mcpServers": [
-    {
-      "name": "github-server",
-      "url": "https://api.github.com/mcp",
-      "protocol": "http",
-      "enabled": true,
-      "quarantined": false
-    },
-    {
-      "name": "python-mcp-server",
-      "command": "uvx",
-      "args": ["some-python-package"],
-      "protocol": "stdio",
-      "env": {
-        "API_KEY": "your-api-key"
-      },
-      "enabled": true,
-      "quarantined": false
-    },
-    {
-      "name": "ast-grep-project-a",
-      "command": "npx",
-      "args": ["ast-grep-mcp"],
-      "working_dir": "/home/user/projects/project-a",
-      "protocol": "stdio",
-      "enabled": true,
-      "quarantined": false
-    },
-    {
-      "name": "filesystem-work",
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem"],
-      "working_dir": "/home/user/work/company-repo",
-      "protocol": "stdio",
-      "enabled": true,
-      "quarantined": false
-    }
-  ]
-}
+// Step 2: Claude Code Task tool spawns ACTUAL agents that do the work
+[Single Message - Parallel Agent Execution]:
+  // Claude Code's Task tool spawns real agents concurrently
+  Task("Research agent", "Analyze API requirements and best practices. Check memory for prior decisions.", "researcher")
+  Task("Coder agent", "Implement REST endpoints with authentication. Coordinate via hooks.", "coder")
+  Task("Database agent", "Design and implement database schema. Store decisions in memory.", "code-analyzer")
+  Task("Tester agent", "Create comprehensive test suite with 90% coverage.", "tester")
+  Task("Reviewer agent", "Review code quality and security. Document findings.", "reviewer")
+  
+  // Batch ALL todos in ONE call
+  TodoWrite { todos: [
+    {id: "1", content: "Research API patterns", status: "in_progress", priority: "high"},
+    {id: "2", content: "Design database schema", status: "in_progress", priority: "high"},
+    {id: "3", content: "Implement authentication", status: "pending", priority: "high"},
+    {id: "4", content: "Build REST endpoints", status: "pending", priority: "high"},
+    {id: "5", content: "Write unit tests", status: "pending", priority: "medium"},
+    {id: "6", content: "Integration tests", status: "pending", priority: "medium"},
+    {id: "7", content: "API documentation", status: "pending", priority: "low"},
+    {id: "8", content: "Performance optimization", status: "pending", priority: "low"}
+  ]}
+  
+  // Parallel file operations
+  Bash "mkdir -p app/{src,tests,docs,config}"
+  Write "app/package.json"
+  Write "app/src/server.js"
+  Write "app/tests/server.test.js"
+  Write "app/docs/API.md"
 ```
 
-### Working Directory Configuration
-
-The `working_dir` field allows you to specify the working directory for stdio MCP servers, solving the common problem where file-based servers operate on mcpproxy's directory instead of your project directories.
-
-#### Use Cases
-- **File-based MCP servers**: `ast-grep-mcp`, `filesystem-mcp`, `git-mcp`
-- **Project isolation**: Separate work and personal project contexts
-- **Multiple instances**: Same MCP server type for different projects
-
-#### Configuration Examples
-
-**Project-specific servers**:
-```json
-{
-  "mcpServers": [
-    {
-      "name": "ast-grep-project-a",
-      "command": "npx",
-      "args": ["ast-grep-mcp"],
-      "working_dir": "/home/user/projects/project-a",
-      "enabled": true
-    },
-    {
-      "name": "ast-grep-work-repo",
-      "command": "npx", 
-      "args": ["ast-grep-mcp"],
-      "working_dir": "/home/user/work/company-repo",
-      "enabled": true
-    }
-  ]
-}
+### ❌ WRONG (Multiple Messages):
+```javascript
+Message 1: mcp__claude-flow__swarm_init
+Message 2: Task("agent 1")
+Message 3: TodoWrite { todos: [single todo] }
+Message 4: Write "file.js"
+// This breaks parallel coordination!
 ```
 
-**Management via Tool Calls**:
-```bash
-# Add server with working directory
-mcpproxy call tool --tool-name=upstream_servers \
-  --json_args='{"operation":"add","name":"git-myproject","command":"npx","args_json":"[\"@modelcontextprotocol/server-git\"]","working_dir":"/home/user/projects/myproject","enabled":true}'
-
-# Update working directory for existing server
-mcpproxy call tool --tool-name=upstream_servers \
-  --json_args='{"operation":"update","name":"git-myproject","working_dir":"/home/user/projects/myproject-v2"}'
-
-# Add server via patch operation
-mcpproxy call tool --tool-name=upstream_servers \
-  --json_args='{"operation":"patch","name":"existing-server","patch_json":"{\"working_dir\":\"/new/project/path\"}"}'
-```
-
-#### Error Handling
-If a specified `working_dir` doesn't exist:
-- Server startup will fail with detailed error message
-- Error logged to both main log and server-specific log  
-- Server remains disabled until directory issue is resolved
-
-#### Backwards Compatibility
-- Empty or unspecified `working_dir` uses current directory (existing behavior)
-- All existing configurations continue to work unchanged
-
-#### Docker Integration
-Working directories are compatible with Docker isolation. When both are configured:
-- `working_dir` affects the host-side directory context
-- `isolation.working_dir` affects the container's internal working directory
-
-## MCP Protocol Implementation
-
-### Built-in Tools
-- **`retrieve_tools`** - BM25 keyword search across all upstream tools
-- **`call_tool`** - Proxy tool calls to upstream servers
-- **`upstream_servers`** - CRUD operations for server management
-- **`tools_stat`** - Usage statistics and analytics
-
-### Tool Name Format
-- Format: `<serverName>:<originalToolName>` (e.g., `github:create_issue`)
-- Tools are automatically prefixed with server names to prevent conflicts
-
-## Security Model
-
-### Quarantine System
-- **All new servers** added via LLM tools are automatically quarantined
-- **Quarantined servers** cannot execute tools until manually approved
-- **Tool calls** to quarantined servers return security analysis instead of executing
-- **Approval** requires manual action via system tray or config file editing
-
-### Tool Poisoning Attack (TPA) Protection
-- Automatic detection of malicious tool descriptions
-- Security analysis with comprehensive checklists
-- Protection against hidden instructions and data exfiltration attempts
-
-## Debugging Guide
-
-### Log Locations and Analysis
-
-#### Log File Structure
-- **Main log**: `~/Library/Logs/mcpproxy/main.log` (macOS) or `~/.mcpproxy/logs/main.log` (Linux/Windows)
-- **Per-server logs**: `~/Library/Logs/mcpproxy/server-{name}.log`
-- **Archived logs**: Compressed with timestamps (e.g., `main-2025-09-02T10-17-31.851.log.gz`)
-
-#### Essential Grep Commands
-```bash
-# Monitor real-time logs
-tail -f ~/Library/Logs/mcpproxy/main.log
-
-# Filter for specific issues
-tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(ERROR|WARN|oauth|OAuth|tool|Tool)"
-
-# Debug specific server
-tail -f ~/Library/Logs/mcpproxy/server-Sentry.log
-
-# Search for authentication issues
-grep -E "(auth|Auth|token|Token|401|invalid_token)" ~/Library/Logs/mcpproxy/main.log
-
-# Find tool indexing problems
-grep -E "(index|Index|tool.*list|list.*tool)" ~/Library/Logs/mcpproxy/main.log
-
-# Check OAuth flow details
-grep -E "(OAuth|oauth|browser|callback|authorization)" ~/Library/Logs/mcpproxy/main.log
-```
-
-### OAuth Debugging
-
-#### Manual Authentication Testing
-```bash
-# Test OAuth flow for specific server
-mcpproxy auth login --server=Sentry --log-level=debug
-
-# Check current authentication status
-mcpproxy auth status
-
-# Force re-authentication
-mcpproxy auth login --server=Sentry --force
-```
-
-#### OAuth Flow Diagnostics
-```bash
-# Debug OAuth with detailed logging
-tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(🔐|🌐|🚀|⏳|✅|❌|oauth|OAuth)"
-
-# Monitor callback server status
-grep -E "(callback|redirect_uri|127\.0\.0\.1)" ~/Library/Logs/mcpproxy/main.log
-
-# Check token store persistence
-grep -E "(token.*store|has_existing_token_store)" ~/Library/Logs/mcpproxy/main.log
-```
-
-#### Common OAuth Issues
-1. **Browser not opening**: Check environment variables (`DISPLAY`, `HEADLESS`, `CI`)
-2. **Token persistence**: Look for `"has_existing_token_store": false` on restart
-3. **Rate limiting**: Search for "rate limited" messages
-4. **Callback failures**: Monitor callback server logs
-
-### Tool Discovery and Indexing Debug
-
-#### Test Tool Availability
-```bash
-# List tools from specific server
-mcpproxy tools list --server=github-server --log-level=debug
-
-# Search for tools (uses BM25 index)
-mcpproxy tools search "create issue" --limit=10
-
-# Test direct tool calls
-mcpproxy call tool --tool-name=Sentry:whoami --json_args='{}'
-```
-
-#### Index Debugging
-```bash
-# Check index status and rebuilds
-grep -E "(index|Index|rebuild|BM25)" ~/Library/Logs/mcpproxy/main.log
-
-# Monitor tool discovery
-grep -E "(tool.*discovered|discovered.*tool)" ~/Library/Logs/mcpproxy/main.log
-
-# Check server connection states
-grep -E "(Ready|Connecting|Error|state.*transition)" ~/Library/Logs/mcpproxy/main.log
-```
-
-### Server Management Commands
-
-#### Upstream Server Operations
-```bash
-# List all upstream servers with status
-mcpproxy upstream list
-
-# Add new server
-mcpproxy upstream add --name="new-server" --url="https://api.example.com/mcp"
-
-# Remove server
-mcpproxy upstream remove --name="old-server"
-
-# Enable/disable server
-mcpproxy upstream update --name="test-server" --enabled=false
-```
-
-#### Quarantine Management
-```bash
-# List quarantined servers
-mcpproxy quarantine list
-
-# Review quarantined server details
-mcpproxy quarantine inspect --name="suspicious-server"
-
-# Manually quarantine server
-mcpproxy quarantine add --name="unsafe-server"
-```
-
-### Performance and Resource Debugging
-
-#### Docker Isolation Monitoring
-```bash
-# Check Docker container status
-docker ps | grep mcpproxy
-
-# Monitor container resource usage
-docker stats $(docker ps -q --filter "name=mcpproxy")
-
-# Debug isolation setup
-grep -E "(Docker|docker|isolation|container)" ~/Library/Logs/mcpproxy/main.log
-```
-
-#### Connection and Retry Analysis
-```bash
-# Monitor connection attempts and retries
-grep -E "(retry|Retry|connection.*attempt|backoff)" ~/Library/Logs/mcpproxy/main.log
-
-# Check connection state transitions
-grep -E "(state.*transition|Connecting|Ready|Error)" ~/Library/Logs/mcpproxy/main.log
-```
-
-### Running with Debug Mode
-
-#### Start mcpproxy with Enhanced Debugging
-```bash
-# Kill existing daemon
-pkill mcpproxy
-
-# Start with debug logging (with tray for production debugging)
-go build && ./mcpproxy serve --log-level=debug
-
-# Start with trace-level logging (very verbose)
-./mcpproxy serve --log-level=trace
-
-# For automated testing only: Debug without tray
-./mcpproxy serve --log-level=debug --tray=false
-
-# Debug specific operations
-./mcpproxy tools list --server=github-server --log-level=trace
-```
-
-#### Environment Variables for Debugging
-```bash
-# Disable OAuth for testing
-export MCPPROXY_DISABLE_OAUTH=true
-
-# Enable additional debugging
-export MCPPROXY_DEBUG=true
-
-# Test in headless environment
-export HEADLESS=true
-```
-
-### Troubleshooting Common Issues
-
-1. **Tools not appearing in search**:
-   - Check server authentication status: `mcpproxy auth status`
-   - Verify server can list tools: `mcpproxy tools list --server=<name>`
-   - Check index rebuild: `grep -E "index.*rebuild" ~/Library/Logs/mcpproxy/main.log`
-
-2. **OAuth servers failing**:
-   - Test manual login: `mcpproxy auth login --server=<name> --log-level=debug`
-   - Check browser opening: Look for "Opening browser" in logs
-   - Verify callback server: `grep "callback" ~/Library/Logs/mcpproxy/main.log`
-
-3. **Server connection issues**:
-   - Monitor retry attempts: `grep "retry" ~/Library/Logs/mcpproxy/main.log`
-   - Check Docker isolation: `grep "Docker" ~/Library/Logs/mcpproxy/main.log`
-   - Verify server configuration: `mcpproxy upstream list`
-
-## Development Guidelines
-
-### File Organization
-- Use the existing modular architecture with clear separation of concerns
-- Place new features in appropriate `internal/` subdirectories
-- Follow Go package naming conventions
-
-### Testing Patterns
-- Unit tests alongside source files (`*_test.go`)
-- E2E tests in `internal/server/e2e_test.go`
-- Use testify for assertions and mocking
-- Test files should be comprehensive and test both success and error cases
-
-### Error Handling
-- Use structured logging with zap
-- Wrap errors with context using `fmt.Errorf`
-- Handle context cancellation properly in long-running operations
-- Graceful degradation for non-critical failures
-
-### Build Tags
-- System tray functionality uses build tags (`tray_gui.go` vs `tray_stub.go`)
-- Platform-specific code should use appropriate build constraints
-
-### Configuration Management
-- Config changes should update both storage and file system
-- File watcher triggers automatic config reloads
-- Validate configuration on load and provide sensible defaults
-
-### System Tray Development Guidelines
-
-**CRITICAL**: System tray modifications require extremely careful review due to historical issues with incorrect assumptions about functionality.
-
-#### Common Pitfalls to Avoid
-
-1. **Process Overlap Issues**
-   - **ALWAYS verify** no overlapping processes are running before making tray changes
-   - Check for duplicate daemon instances that could cause state conflicts
-   - Use `pkill mcpproxy` before testing tray modifications
-   - Verify only ONE mcpproxy process is running: `ps aux | grep mcpproxy`
-
-2. **State Management Anti-Patterns**
-   - **NEVER store state in multiple locations** (memory AND disk without synchronization)
-   - **ALWAYS use a single source of truth** for application state
-   - Tray UI should **READ from disk** (config.db, mcp_config.json), not maintain separate state
-   - Server status should come from `internal/server/` state manager, not duplicated in tray
-
-3. **Disk Persistence Requirements**
-   - **ALL state changes MUST be persisted to disk immediately**
-   - Server enable/disable → Update both `config.db` AND `mcp_config.json`
-   - Quarantine changes → Update `config.db` with quarantine status
-   - Configuration updates → Write to `mcp_config.json` AND update storage
-   - **NEVER rely on in-memory state** that isn't backed by persistent storage
-
-4. **State Synchronization Checklist**
-   - [ ] Does the change update `config.db` (BBolt database)?
-   - [ ] Does the change update `mcp_config.json` (configuration file)?
-   - [ ] Does the tray read from the authoritative source (not cached state)?
-   - [ ] Is there proper error handling for disk write failures?
-   - [ ] Does the file watcher properly reload changes?
-   - [ ] Are all processes reading the same source of truth?
-
-5. **Verification Steps for Tray Changes**
-   ```bash
-   # Before making changes
-   pkill mcpproxy  # Kill all instances
-
-   # After making changes
-   ./mcpproxy serve  # Start fresh instance
-
-   # Verify single process
-   ps aux | grep mcpproxy | grep -v grep  # Should show only ONE process
-
-   # Test state persistence
-   # 1. Make change in tray UI (e.g., disable server)
-   # 2. Verify change written to disk:
-   cat ~/.mcpproxy/mcp_config.json | grep -A5 "server-name"
-
-   # 3. Restart application
-   pkill mcpproxy
-   ./mcpproxy serve
-
-   # 4. Verify change persisted (server still disabled)
-   ```
-
-6. **Data Flow Architecture**
-   ```
-   Tray UI (read-only view)
-       ↓ user action
-   Event Handler (internal/tray/handlers.go)
-       ↓ validation
-   Server Manager (internal/server/server.go)
-       ↓ update
-   Storage Manager (internal/storage/)
-       ↓ persist
-   Disk (config.db + mcp_config.json)
-       ↓ reload via file watcher
-   All Components (synchronized state)
-   ```
-
-7. **Testing Tray Modifications**
-   - **Test with fresh start**: Always test after killing and restarting
-   - **Test state persistence**: Verify changes survive restart
-   - **Test concurrent access**: Ensure no race conditions with multiple UI elements
-   - **Test error cases**: What happens if disk write fails?
-   - **Test file watcher**: Does config reload trigger properly?
-
-8. **Code Review Checklist for Tray PRs**
-   - [ ] No duplicate state storage (memory vs disk)
-   - [ ] All state changes persist to disk
-   - [ ] Tray reads from authoritative source (storage/config)
-   - [ ] No assumptions about in-memory state
-   - [ ] Proper error handling for disk operations
-   - [ ] File watcher integration tested
-   - [ ] No overlapping process scenarios
-   - [ ] State synchronization verified across restart
-
-**Remember**: The tray is a **VIEW** of the application state, not a **STORE** of application state. All state must live in persistent storage and be synchronized across all components.
-
-## Important Implementation Details
-
-### Docker Security Isolation
-- **Runtime Detection**: Automatically detects command type (uvx→Python, npx→Node.js, etc.)
-- **Image Selection**: Maps to appropriate Docker images with required tools and Git support
-- **Environment Passing**: API keys and config securely passed via `-e` flags
-- **Container Lifecycle**: Proper cleanup with cidfile tracking and health monitoring
-- **Conflict Avoidance**: Skips isolation for existing Docker commands to prevent nested containers
-- **Resource Limits**: Memory and CPU limits prevent resource exhaustion
-- **Full Image Support**: Uses `python:3.11` and `node:20` (not slim/alpine) for Git and build tools
-
-### OAuth Implementation
-- Uses dynamic port allocation for callback servers
-- RFC 8252 compliant with PKCE for security
-- Automatic browser launching for authentication flows
-- Global callback server manager prevents port conflicts
-
-### Connection Management
-- Background connection attempts with exponential backoff
-- Separate contexts for application vs server lifecycle
-- Connection state machine: Disconnected → Connecting → Authenticating → Ready
-
-### Tool Indexing
-- Full rebuild on server changes
-- Hash-based change detection to skip unchanged tools
-- Background indexing doesn't block server operations
-
-### Logging System
-- Main application log: `main.log`
-- Per-server logs: `server-{name}.log`
-- Docker container logs automatically captured and integrated
-- Automatic log rotation and compression
-- Configurable log levels and output formats
-
-### Signal Handling
-- Graceful shutdown with proper resource cleanup
-- Context cancellation for background operations
-- HTTP server shutdown with timeout
-- Docker container cleanup on shutdown
-- Double shutdown protection
-
-When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
-- to memory 
-if u want to test tool call in mcpproxy instead of curl call, use mcpproxy call. Example  `mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`
-- to memory
-Never use curl to interact with mcpproxy, it uses mcp protocol. USE DIRECT mcp server call
+## Performance Benefits
+
+- **84.8% SWE-Bench solve rate**
+- **32.3% token reduction**
+- **2.8-4.4x speed improvement**
+- **27+ neural models**
+
+## Hooks Integration
+
+### Pre-Operation
+- Auto-assign agents by file type
+- Validate commands for safety
+- Prepare resources automatically
+- Optimize topology by complexity
+- Cache searches
+
+### Post-Operation
+- Auto-format code
+- Train neural patterns
+- Update memory
+- Analyze performance
+- Track token usage
+
+### Session Management
+- Generate summaries
+- Persist state
+- Track metrics
+- Restore context
+- Export workflows
+
+## Advanced Features (v2.0.0)
+
+- 🚀 Automatic Topology Selection
+- ⚡ Parallel Execution (2.8-4.4x speed)
+- 🧠 Neural Training
+- 📊 Bottleneck Analysis
+- 🤖 Smart Auto-Spawning
+- 🛡️ Self-Healing Workflows
+- 💾 Cross-Session Memory
+- 🔗 GitHub Integration
+
+## Integration Tips
+
+1. Start with basic swarm init
+2. Scale agents gradually
+3. Use memory for context
+4. Monitor progress regularly
+5. Train patterns from success
+6. Enable hooks automation
+7. Use GitHub tools first
+
+## Support
+
+- Documentation: https://github.com/ruvnet/claude-flow
+- Issues: https://github.com/ruvnet/claude-flow/issues
+- Flow-Nexus Platform: https://flow-nexus.ruv.io (registration required for cloud features)
+
+---
+
+Remember: **Claude Flow coordinates, Claude Code creates!**
+
+# important-instruction-reminders
+Do what has been asked; nothing more, nothing less.
+NEVER create files unless they're absolutely necessary for achieving your goal.
+ALWAYS prefer editing an existing file to creating a new one.
+NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
+Never save working files, text/mds and tests to the root folder.

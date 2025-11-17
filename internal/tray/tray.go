@@ -138,16 +138,14 @@ type App struct {
 	shutdown  func()
 
 	// Menu items for dynamic updates
-	statusItem        *systray.MenuItem
-	startStopItem     *systray.MenuItem
-	stopStartAllItem  *systray.MenuItem
-	serverCountItem   *systray.MenuItem
+	statusItem       *systray.MenuItem
+	stopStartAllItem *systray.MenuItem
+	serverCountItem  *systray.MenuItem
 
 	// Status-based server menus
 	connectedServersMenu    *systray.MenuItem
 	disconnectedServersMenu *systray.MenuItem
 	sleepingServersMenu     *systray.MenuItem
-	idleServersMenu         *systray.MenuItem // Renamed from stoppedServersMenu
 	disabledServersMenu     *systray.MenuItem
 	autoDisabledServersMenu *systray.MenuItem
 	quarantineMenu          *systray.MenuItem
@@ -446,7 +444,6 @@ func (a *App) onReady() {
 	a.logger.Debug("Initializing tray menu items")
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "")
 	a.statusItem.Disable() // Initially disabled as it's just for display
-	a.startStopItem = systray.AddMenuItem("Start Server", "")
 	a.stopStartAllItem = systray.AddMenuItem("⏸️ Stop All Servers", "Stop all running servers (keeps MCPProxy running)")
 	a.serverCountItem = systray.AddMenuItem("📊 Servers: Loading...", "")
 	a.serverCountItem.Disable() // Display only
@@ -460,7 +457,6 @@ func (a *App) onReady() {
 	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "")
 	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "")
 	a.sleepingServersMenu = systray.AddMenuItem("💤 Sleeping Servers", "Servers with lazy loading enabled")
-	a.idleServersMenu = systray.AddMenuItem("⏸️ Idle Servers", "Enabled but not connected")
 	a.disabledServersMenu = systray.AddMenuItem("⏹️ Disabled Servers", "Manually disabled servers")
 	a.autoDisabledServersMenu = systray.AddMenuItem("🚫 Auto-Disabled Servers", "Servers automatically disabled due to failures")
 	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "")
@@ -474,7 +470,7 @@ func (a *App) onReady() {
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.idleServersMenu, a.disabledServersMenu, a.autoDisabledServersMenu, a.quarantineMenu, nil, a.logger)
+	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.disabledServersMenu, a.autoDisabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
 	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig())
 
@@ -588,8 +584,6 @@ func (a *App) onReady() {
 	go func() {
 		for {
 			select {
-			case <-a.startStopItem.ClickedCh:
-				a.handleStartStop()
 			case <-a.stopStartAllItem.ClickedCh:
 				a.handleStopStartAll()
 			case <-openConfigItem.ClickedCh:
@@ -637,8 +631,6 @@ func (a *App) onReady() {
 				a.handleServerMenuClick("connected")
 			case <-a.disconnectedServersMenu.ClickedCh:
 				a.handleServerMenuClick("disconnected")
-			case <-a.idleServersMenu.ClickedCh:
-				a.handleServerMenuClick("idle")
 			case <-a.disabledServersMenu.ClickedCh:
 				a.handleServerMenuClick("disabled")
 			case <-a.quarantineMenu.ClickedCh:
@@ -760,12 +752,14 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Debug logging to track status updates
 	running, _ := status["running"].(bool)
 	phase, _ := status["phase"].(string)
+	appState, _ := status["app_state"].(string)
 	serverRunning := a.server != nil && a.server.IsRunning()
 
 	a.logger.Debug("Updating tray status",
 		zap.Bool("status_running", running),
 		zap.Bool("server_is_running", serverRunning),
 		zap.String("phase", phase),
+		zap.String("app_state", appState),
 		zap.Any("status_data", status))
 
 	// Use the actual server running state as the authoritative source
@@ -774,16 +768,29 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Update running status and start/stop button
 	if actuallyRunning {
 		listenAddr, _ := status["listen_addr"].(string)
-		if listenAddr != "" {
-			a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
-		} else {
-			a.statusItem.SetTitle("Status: Running")
+
+		// Show app state in status message
+		switch appState {
+		case "starting":
+			a.statusItem.SetTitle("Status: Starting...")
+		case "degraded":
+			if listenAddr != "" {
+				a.statusItem.SetTitle(fmt.Sprintf("Status: Degraded (%s)", listenAddr))
+			} else {
+				a.statusItem.SetTitle("Status: Degraded")
+			}
+		case "stopping":
+			a.statusItem.SetTitle("Status: Stopping...")
+		default: // "running" or empty
+			if listenAddr != "" {
+				a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
+			} else {
+				a.statusItem.SetTitle("Status: Running")
+			}
 		}
-		a.startStopItem.SetTitle("Stop Server")
-		a.logger.Debug("Set tray to running state")
+		a.logger.Debug("Set tray to running state", zap.String("app_state", appState))
 	} else {
 		a.statusItem.SetTitle("Status: Stopped")
-		a.startStopItem.SetTitle("Start Server")
 		a.logger.Debug("Set tray to stopped state")
 	}
 
@@ -898,108 +905,6 @@ func (a *App) updateStatus() {
 func (a *App) updateServersMenu() {
 	if a.syncManager != nil {
 		a.syncManager.SyncDelayed()
-	}
-}
-
-// handleStartStop toggles the server's running state
-func (a *App) handleStartStop() {
-	if a.server.IsRunning() {
-		a.logger.Info("Stopping server from tray")
-
-		// Save server states before stopping
-		if err := a.saveServerStatesForStop(); err != nil {
-			a.logger.Error("Failed to save server states", zap.Error(err))
-		}
-
-		// Immediately update UI to show stopping state and disable button
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Stopping...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Stopping...")
-			a.startStopItem.Disable() // Prevent multiple clicks
-		}
-
-		// Stop the server with timeout protection
-		go func() {
-			done := make(chan bool, 1)
-			
-			// Run stop operation in separate goroutine
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						a.logger.Error("Panic during server stop", zap.Any("panic", r))
-					}
-					done <- true
-				}()
-				
-				if err := a.server.StopServer(); err != nil {
-					a.logger.Error("Failed to stop server", zap.Error(err))
-				}
-			}()
-
-			// Wait for completion or timeout
-			select {
-			case <-done:
-				a.logger.Info("Server stop operation completed")
-			case <-time.After(5 * time.Second):
-				a.logger.Warn("Server stop operation timed out after 5 seconds")
-			}
-
-			// Always restore UI state
-			if a.startStopItem != nil {
-				a.startStopItem.Enable()
-			}
-			a.updateStatus()
-		}()
-	} else {
-		a.logger.Info("Starting server from tray")
-
-		// Immediately update UI to show starting state and disable button
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Starting...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Starting...")
-			a.startStopItem.Disable() // Prevent multiple clicks
-		}
-
-		// Start the server with timeout protection
-		go func() {
-			done := make(chan bool, 1)
-			
-			// Run start operation in separate goroutine
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						a.logger.Error("Panic during server start", zap.Any("panic", r))
-					}
-					done <- true
-				}()
-				
-				if err := a.server.StartServer(a.ctx); err != nil {
-					a.logger.Error("Failed to start server", zap.Error(err))
-				}
-			}()
-
-			// Wait for completion or timeout
-			select {
-			case <-done:
-				a.logger.Info("Server start operation completed")
-				// Restore server states after successful start
-				if err := a.restoreServerStatesAfterStart(); err != nil {
-					a.logger.Error("Failed to restore server states", zap.Error(err))
-				}
-			case <-time.After(10 * time.Second):
-				a.logger.Warn("Server start operation timed out after 10 seconds")
-			}
-
-			// Always restore UI state
-			if a.startStopItem != nil {
-				a.startStopItem.Enable()
-			}
-			a.updateStatus()
-		}()
 	}
 }
 

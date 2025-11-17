@@ -246,7 +246,6 @@ type MenuManager struct {
 	connectedServersMenu    *systray.MenuItem
 	disconnectedServersMenu *systray.MenuItem
 	sleepingServersMenu     *systray.MenuItem
-	idleServersMenu         *systray.MenuItem
 	disabledServersMenu     *systray.MenuItem
 	autoDisabledServersMenu *systray.MenuItem
 	quarantineMenu          *systray.MenuItem
@@ -258,7 +257,6 @@ type MenuManager struct {
 	connectedMenuItems      map[string]*systray.MenuItem // server name -> connected menu item
 	disconnectedMenuItems   map[string]*systray.MenuItem // server name -> disconnected menu item
 	sleepingMenuItems       map[string]*systray.MenuItem // server name -> sleeping menu item
-	idleMenuItems           map[string]*systray.MenuItem // server name -> idle menu item
 	disabledMenuItems       map[string]*systray.MenuItem // server name -> disabled menu item
 	autoDisabledMenuItems   map[string]*systray.MenuItem // server name -> auto-disabled menu item
 	quarantineMenuItems     map[string]*systray.MenuItem // server name -> quarantine menu item
@@ -307,13 +305,12 @@ type MenuManager struct {
 }
 
 // NewMenuManager creates a new menu manager
-func NewMenuManager(connectedMenu, disconnectedMenu, sleepingMenu, idleMenu, disabledMenu, autoDisabledMenu, quarantineMenu, upstreamMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
+func NewMenuManager(connectedMenu, disconnectedMenu, sleepingMenu, disabledMenu, autoDisabledMenu, quarantineMenu, upstreamMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
 	return &MenuManager{
 		logger:                  logger,
 		connectedServersMenu:    connectedMenu,
 		disconnectedServersMenu: disconnectedMenu,
 		sleepingServersMenu:     sleepingMenu,
-		idleServersMenu:         idleMenu,
 		disabledServersMenu:     disabledMenu,
 		autoDisabledServersMenu: autoDisabledMenu,
 		quarantineMenu:          quarantineMenu,
@@ -323,7 +320,6 @@ func NewMenuManager(connectedMenu, disconnectedMenu, sleepingMenu, idleMenu, dis
 		connectedMenuItems:      make(map[string]*systray.MenuItem),
 		disconnectedMenuItems:   make(map[string]*systray.MenuItem),
 		sleepingMenuItems:       make(map[string]*systray.MenuItem),
-		idleMenuItems:           make(map[string]*systray.MenuItem),
 		disabledMenuItems:       make(map[string]*systray.MenuItem),
 		autoDisabledMenuItems:   make(map[string]*systray.MenuItem),
 		quarantineMenuItems:     make(map[string]*systray.MenuItem),
@@ -374,7 +370,6 @@ func (m *MenuManager) removeServersFromWrongMenus(allCurrentServers map[string]s
 	statusMenus := map[string]map[string]*systray.MenuItem{
 		"connected":     m.connectedMenuItems,
 		"disconnected":  m.disconnectedMenuItems,
-		"idle":          m.idleMenuItems,
 		"disabled":      m.disabledMenuItems,
 		"auto_disabled": m.autoDisabledMenuItems,
 		"quarantined":   m.quarantineMenuItems,
@@ -422,47 +417,57 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 	defer m.mu.Unlock()
 
 	// Stability check: Don't clear existing menus if we get empty servers and we already have servers
-	if len(servers) == 0 && (len(m.connectedMenuItems) > 0 || len(m.disconnectedMenuItems) > 0 || len(m.sleepingMenuItems) > 0 || len(m.idleMenuItems) > 0 || len(m.disabledMenuItems) > 0 || len(m.autoDisabledMenuItems) > 0) {
+	if len(servers) == 0 && (len(m.connectedMenuItems) > 0 || len(m.disconnectedMenuItems) > 0 || len(m.sleepingMenuItems) > 0 || len(m.disabledMenuItems) > 0 || len(m.autoDisabledMenuItems) > 0) {
 		m.logger.Debug("Received empty server list but existing menu items present, preserving UI state")
 		return
 	}
 
-	// Group servers by status
-	var connected, disconnected, sleeping, idle, disabled, autoDisabled, quarantined []map[string]interface{}
-	connectedCount, disconnectedCount, sleepingCount, idleCount, disabledCount, autoDisabledCount, quarantinedCount := 0, 0, 0, 0, 0, 0, 0
+	// Group servers by status using startup_mode and connection_state
+	var connected, disconnected, sleeping, disabled, autoDisabled, quarantined []map[string]interface{}
+	connectedCount, disconnectedCount, sleepingCount, disabledCount, autoDisabledCount, quarantinedCount := 0, 0, 0, 0, 0, 0
 
 	for _, server := range servers {
-		enabled, _ := server["enabled"].(bool)
+		startupMode, _ := server["startup_mode"].(string)
+		connectionState, _ := server["connection_state"].(string)
 		serverConnected, _ := server["connected"].(bool)
-		serverConnecting, _ := server["connecting"].(bool)
-		serverSleeping, _ := server["sleeping"].(bool)
-		serverQuarantined, _ := server["quarantined"].(bool)
-		serverAutoDisabled, _ := server["auto_disabled"].(bool)
 
-		// Check if server has idle status (enabled but not connected/connecting/sleeping)
-		serverIdle := enabled && !serverConnected && !serverConnecting && !serverSleeping
+		// Categorization priority (in order):
+		// 1. Quarantined (startup_mode == "quarantined")
+		// 2. Auto-Disabled (startup_mode == "auto_disabled")
+		// 3. Disabled (startup_mode == "disabled")
+		// 4. Sleeping (startup_mode == "lazy_loading" AND NOT connected)
+		// 5. Connected (NOT disabled/quarantined/auto_disabled AND connection_state == "Ready")
+		// 6. Disconnected (NOT disabled/quarantined/auto_disabled AND connection_state != "Ready")
+		// Note: Using blacklist approach to handle servers with empty startup_mode
 
-		if serverQuarantined {
+		if startupMode == "quarantined" {
 			quarantined = append(quarantined, server)
 			quarantinedCount++
-		} else if serverAutoDisabled {
-			// Auto-disabled servers (automatically disabled due to failures)
+		} else if startupMode == "auto_disabled" {
+			// Auto-disabled servers (automatically disabled after failures)
 			autoDisabled = append(autoDisabled, server)
 			autoDisabledCount++
-		} else if !enabled {
+		} else if startupMode == "disabled" {
 			// Manually disabled servers
 			disabled = append(disabled, server)
 			disabledCount++
-		} else if serverConnected {
-			connected = append(connected, server)
-			connectedCount++
-		} else if serverSleeping {
+		} else if startupMode == "lazy_loading" && !serverConnected {
+			// Sleeping servers: lazy_loading + not connected
 			sleeping = append(sleeping, server)
 			sleepingCount++
-		} else if serverIdle {
-			idle = append(idle, server)
-			idleCount++
+		} else if startupMode != "disabled" && startupMode != "quarantined" && startupMode != "auto_disabled" {
+			// All other servers (active, lazy_loading when connected, or empty startup_mode)
+			// Categorize by connection state using blacklist approach
+			if connectionState == "Ready" {
+				connected = append(connected, server)
+				connectedCount++
+			} else {
+				// All other states (Connecting, Error, Disconnected, etc.)
+				disconnected = append(disconnected, server)
+				disconnectedCount++
+			}
 		} else {
+			// Fallback: should not reach here, but categorize as disconnected
 			disconnected = append(disconnected, server)
 			disconnectedCount++
 		}
@@ -477,9 +482,6 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 	}
 	if m.sleepingServersMenu != nil {
 		m.sleepingServersMenu.SetTitle(fmt.Sprintf("💤 Sleeping Servers (%d)", sleepingCount))
-	}
-	if m.idleServersMenu != nil {
-		m.idleServersMenu.SetTitle(fmt.Sprintf("⏸️ Idle Servers (%d)", idleCount))
 	}
 	if m.disabledServersMenu != nil {
 		m.disabledServersMenu.SetTitle(fmt.Sprintf("⏸️ Disabled Servers (%d)", disabledCount))
@@ -508,11 +510,6 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 			allCurrentServers[name] = "sleeping"
 		}
 	}
-	for _, server := range idle {
-		if name, ok := server["name"].(string); ok {
-			allCurrentServers[name] = "idle"
-		}
-	}
 	for _, server := range disabled {
 		if name, ok := server["name"].(string); ok {
 			allCurrentServers[name] = "disabled"
@@ -536,7 +533,6 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 	m.updateMenuForStatus(m.connectedServersMenu, connected, m.connectedMenuItems, "connected")
 	m.updateMenuForStatus(m.disconnectedServersMenu, disconnected, m.disconnectedMenuItems, "disconnected")
 	m.updateMenuForStatus(m.sleepingServersMenu, sleeping, m.sleepingMenuItems, "sleeping")
-	m.updateMenuForStatus(m.idleServersMenu, idle, m.idleMenuItems, "idle")
 	m.updateMenuForStatus(m.disabledServersMenu, disabled, m.disabledMenuItems, "disabled")
 	m.updateMenuForStatus(m.autoDisabledServersMenu, autoDisabled, m.autoDisabledMenuItems, "auto_disabled")
 	m.updateMenuForStatus(m.quarantineMenu, quarantined, m.quarantineMenuItems, "quarantined")
@@ -545,7 +541,6 @@ func (m *MenuManager) UpdateStatusBasedMenus(servers []map[string]interface{}) {
 		zap.Int("connected", connectedCount),
 		zap.Int("disconnected", disconnectedCount),
 		zap.Int("sleeping", sleepingCount),
-		zap.Int("idle", idleCount),
 		zap.Int("disabled", disabledCount),
 		zap.Int("auto_disabled", autoDisabledCount),
 		zap.Int("quarantined", quarantinedCount))
@@ -569,12 +564,8 @@ func (m *MenuManager) UpdateSingleServer(serverName string, serverData map[strin
 	// Determine current status
 	enabled, _ := serverData["enabled"].(bool)
 	connected, _ := serverData["connected"].(bool)
-	connecting, _ := serverData["connecting"].(bool)
 	sleeping, _ := serverData["sleeping"].(bool)
 	quarantined, _ := serverData["quarantined"].(bool)
-
-	// Check if server has an idle status (when server is not connecting, not connected, not sleeping, but enabled)
-	idle := enabled && !connected && !connecting && !sleeping
 
 	// Find the correct status menu
 	var targetMenu map[string]*systray.MenuItem
@@ -597,10 +588,6 @@ func (m *MenuManager) UpdateSingleServer(serverName string, serverData map[strin
 		targetMenu = m.sleepingMenuItems
 		parentMenu = m.sleepingServersMenu
 		statusName = "sleeping"
-	} else if idle {
-		targetMenu = m.idleMenuItems
-		parentMenu = m.idleServersMenu
-		statusName = "idle"
 	} else {
 		targetMenu = m.disconnectedMenuItems
 		parentMenu = m.disconnectedServersMenu
@@ -641,7 +628,6 @@ func (m *MenuManager) removeServerFromWrongMenus(serverName, correctStatus strin
 		"connected":     m.connectedMenuItems,
 		"disconnected":  m.disconnectedMenuItems,
 		"sleeping":      m.sleepingMenuItems,
-		"idle":          m.idleMenuItems,
 		"disabled":      m.disabledMenuItems,
 		"quarantined":   m.quarantineMenuItems,
 	}
@@ -670,9 +656,6 @@ func (m *MenuManager) updateMenuCounts() {
 	}
 	if m.sleepingServersMenu != nil {
 		m.sleepingServersMenu.SetTitle(fmt.Sprintf("💤 Sleeping Servers (%d)", len(m.sleepingMenuItems)))
-	}
-	if m.idleServersMenu != nil {
-		m.idleServersMenu.SetTitle(fmt.Sprintf("⏸️ Idle Servers (%d)", len(m.idleMenuItems)))
 	}
 	if m.disabledServersMenu != nil {
 		m.disabledServersMenu.SetTitle(fmt.Sprintf("⏸️ Disabled Servers (%d)", len(m.disabledMenuItems)))

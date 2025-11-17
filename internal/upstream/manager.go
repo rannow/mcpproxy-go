@@ -28,6 +28,7 @@ type Manager struct {
 	logConfig       *config.LogConfig
 	globalConfig    *config.Config
 	storage         *storage.BoltDB
+	storageManager  *storage.Manager // For persisting state changes
 	notificationMgr *NotificationManager
 	eventBus        *events.EventBus // Event bus for publishing state changes
 
@@ -101,6 +102,14 @@ func (m *Manager) SetServerAutoDisableCallback(callback func(serverName string, 
 	m.onServerAutoDisable = callback
 }
 
+// SetStorageManager sets the storage manager for persisting state changes
+func (m *Manager) SetStorageManager(storageManager *storage.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.storageManager = storageManager
+	m.logger.Info("Storage manager configured for upstream manager")
+}
+
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
@@ -117,8 +126,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
 			!equalStringMaps(existingConfig.Env, serverConfig.Env) ||
 			!equalStringMaps(existingConfig.Headers, serverConfig.Headers) ||
-			existingConfig.Enabled != serverConfig.Enabled ||
-			existingConfig.Quarantined != serverConfig.Quarantined
+			existingConfig.StartupMode != serverConfig.StartupMode
 
 		if configChanged {
 			m.logger.Info("Server configuration changed, disconnecting existing client",
@@ -138,11 +146,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			existingClient.Config = serverConfig
 
 			// Restore auto-disabled state from updated config (fix for config reload bug)
-			if serverConfig.AutoDisabled {
-				existingClient.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+			if serverConfig.StartupMode == "auto_disabled" {
+				existingClient.StateManager.SetAutoDisabled("Restored from config")
 				m.logger.Info("Restored auto-disabled state during config update",
 					zap.String("server", serverConfig.Name),
-					zap.String("reason", serverConfig.AutoDisableReason))
+					zap.String("startup_mode", serverConfig.StartupMode))
 			}
 
 			return nil
@@ -171,11 +179,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		zap.Int("threshold", threshold))
 
 	// Restore auto-disable state from config (if server was previously auto-disabled)
-	if serverConfig.AutoDisabled {
-		client.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+	if serverConfig.StartupMode == "auto_disabled" {
+		client.StateManager.SetAutoDisabled("Restored from config")
 		m.logger.Info("Restored auto-disabled state from config",
 			zap.String("server", serverConfig.Name),
-			zap.String("reason", serverConfig.AutoDisableReason))
+			zap.String("startup_mode", serverConfig.StartupMode))
 	}
 
 	// Set up notification callback for state changes
@@ -219,6 +227,13 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		})
 	}
 
+	// Set storage manager for persisting state changes
+	if m.storageManager != nil {
+		client.SetStorageManager(m.storageManager)
+		m.logger.Debug("Configured storage manager for client",
+			zap.String("server", serverConfig.Name))
+	}
+
 	m.clients[id] = client
 	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
@@ -258,30 +273,39 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		return err
 	}
 
-	if !serverConfig.Enabled {
+	// Check startup mode and skip connection if not active
+	if serverConfig.StartupMode == "disabled" {
 		m.logger.Debug("Skipping connection for disabled server",
 			zap.String("id", id),
 			zap.String("name", serverConfig.Name))
 		return nil
 	}
 
-	if serverConfig.Quarantined {
+	if serverConfig.StartupMode == "quarantined" {
 		m.logger.Debug("Skipping connection for quarantined server",
 			zap.String("id", id),
 			zap.String("name", serverConfig.Name))
 		return nil
 	}
 
-	if serverConfig.AutoDisabled {
+	if serverConfig.StartupMode == "auto_disabled" {
 		m.logger.Debug("Skipping connection for auto-disabled server",
 			zap.String("id", id),
-			zap.String("name", serverConfig.Name),
-			zap.String("reason", serverConfig.AutoDisableReason))
+			zap.String("name", serverConfig.Name))
 		return nil
 	}
 
 	// Check if client exists and is already connected
 	if client, exists := m.GetClient(id); exists {
+		// Check runtime-only userStopped flag (NEVER persisted)
+		// If user manually stopped this server via tray, skip connection
+		if client.StateManager.IsUserStopped() {
+			m.logger.Debug("Skipping connection for user-stopped server (runtime-only state)",
+				zap.String("id", id),
+				zap.String("name", serverConfig.Name))
+			return nil
+		}
+
 		if client.IsConnected() {
 			m.logger.Debug("Server is already connected, skipping connection attempt",
 				zap.String("id", id),
@@ -359,7 +383,7 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 	connectedCount := 0
 
 	for id, client := range m.clients {
-		if !client.Config.Enabled {
+		if client.Config.IsDisabled() {
 			continue
 		}
 		if !client.IsConnected() {
@@ -415,8 +439,8 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, fmt.Errorf("no client found for server: %s", serverName)
 	}
 
-	if !targetClient.Config.Enabled {
-		return nil, fmt.Errorf("client for server %s is disabled", serverName)
+	if targetClient.Config.IsDisabled() {
+		return nil, fmt.Errorf("client for server %s is disabled (startup_mode: %s)", serverName, targetClient.Config.StartupMode)
 	}
 
 	// Check connection status and provide detailed error information
@@ -547,47 +571,53 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		m.logger.Debug("Evaluating client for connection",
 			zap.String("id", id),
 			zap.String("name", client.Config.Name),
-			zap.Bool("enabled", client.Config.Enabled),
+			zap.String("startup_mode", client.Config.StartupMode),
+			zap.Bool("should_connect", client.Config.ShouldConnectOnStartup()),
 			zap.Bool("is_connected", client.IsConnected()),
 			zap.Bool("is_connecting", client.IsConnecting()),
-			zap.String("current_state", client.GetState().String()),
-			zap.Bool("quarantined", client.Config.Quarantined))
+			zap.String("current_state", client.GetState().String()))
 
-		if !client.Config.Enabled {
-			m.logger.Debug("Skipping disabled client",
+		if !client.Config.ShouldConnectOnStartup() {
+			m.logger.Debug("Skipping client (startup_mode prevents connection)",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name))
+				zap.String("name", client.Config.Name),
+				zap.String("startup_mode", client.Config.StartupMode))
 
 			if client.IsConnected() {
-				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.Config.Name))
+				m.logger.Info("Disconnecting client that should not connect on startup",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name),
+					zap.String("startup_mode", client.Config.StartupMode))
 				_ = client.Disconnect()
 			}
 			continue
 		}
 
-		// Check if server is stopped - don't auto-connect stopped servers
-		if client.Config.Stopped {
-			m.logger.Debug("Skipping stopped server (user manually stopped)",
+		// Check runtime-only userStopped flag (NOT persisted)
+		// If user manually stopped this server via tray, skip connection
+		if client.StateManager.IsUserStopped() {
+			m.logger.Debug("Skipping user-stopped server (runtime-only state)",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name))
 
 			if client.IsConnected() {
-				m.logger.Info("Disconnecting stopped server", zap.String("id", id), zap.String("name", client.Config.Name))
+				m.logger.Info("Disconnecting user-stopped server",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name))
 				_ = client.Disconnect()
 			}
 			continue
 		}
 
-		// Lazy loading check: Set servers to Sleeping if they have tools in DB and don't have StartOnBoot flag
-		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && !client.Config.StartOnBoot && client.Config.EverConnected {
-			m.logger.Debug("Setting server to Sleeping state (lazy loading enabled, tools in DB)",
+		// Lazy loading optimization: Skip connection for servers with cached tools
+		// These servers will connect on-demand when a tool call is made
+		// ConnectionState remains Disconnected until first tool call
+		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && client.Config.StartupMode == "lazy_loading" && client.Config.EverConnected {
+			m.logger.Debug("Skipping connection for lazy loading server with cached tools",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name),
 				zap.Int("tool_count", client.Config.ToolCount),
-				zap.Bool("start_on_boot", client.Config.StartOnBoot))
-
-			// Set state to Sleeping instead of Disconnected
-			client.StateManager.SetSleeping()
+				zap.String("startup_mode", client.Config.StartupMode))
 			continue
 		}
 
@@ -752,16 +782,13 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 		zap.Int("consecutive_failures", info.ConsecutiveFailures),
 		zap.String("error", errorMsg))
 
-	// Update config to disabled
-	client.Config.Enabled = false
+	// Update config to auto_disabled
+	reason := fmt.Sprintf("Server automatically disabled after %d startup failures", info.ConsecutiveFailures)
+	client.Config.StartupMode = "auto_disabled"
+	client.Config.AutoDisableReason = reason
 
 	// Mark as auto-disabled in StateManager (for tray UI and status)
-	reason := fmt.Sprintf("Server automatically disabled after %d startup failures", info.ConsecutiveFailures)
 	client.StateManager.SetAutoDisabled(reason)
-
-	// Persist auto-disable state to config (so it survives restarts)
-	client.Config.AutoDisabled = true
-	client.Config.AutoDisableReason = reason
 
 	// Write detailed failure information to failed_servers.log for web UI display
 	dataDir := m.globalConfig.DataDir
@@ -785,7 +812,7 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 		}
 	}
 
-	// Persist to storage
+	// Persist to storage (storage layer still uses legacy fields for backward compatibility)
 	if m.storage != nil {
 		if err := m.storage.SaveUpstream(&storage.UpstreamRecord{
 			ID:                       client.Config.Name,
@@ -799,8 +826,7 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 			Headers:                  client.Config.Headers,
 			OAuth:                    client.Config.OAuth,
 			RepositoryURL:            client.Config.RepositoryURL,
-			Enabled:                  false, // DISABLED
-			Quarantined:              client.Config.Quarantined,
+			ServerState:              "auto_disabled",
 			Created:                  client.Config.Created,
 			Updated:                  time.Now(),
 			Isolation:                client.Config.Isolation,
@@ -809,8 +835,6 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 			EverConnected:            client.Config.EverConnected,
 			LastSuccessfulConnection: client.Config.LastSuccessfulConnection,
 			ToolCount:                client.Config.ToolCount,
-			AutoDisabled:             client.Config.AutoDisabled,
-			AutoDisableReason:        client.Config.AutoDisableReason,
 			AutoDisableThreshold:     client.Config.AutoDisableThreshold,
 		}); err != nil {
 			m.logger.Error("Failed to persist disabled server state",
@@ -938,7 +962,7 @@ func (m *Manager) GetTotalToolCount() int {
 
 	totalTools := 0
 	for _, client := range m.clients {
-		if !client.Config.Enabled || !client.IsConnected() {
+		if client.Config.IsDisabled() || !client.IsConnected() {
 			continue
 		}
 
@@ -1152,8 +1176,8 @@ func (m *Manager) scanForNewTokens() {
 
 	now := time.Now()
 	for id, c := range clients {
-		// Only consider enabled, HTTP/SSE servers not currently connected
-		if !c.Config.Enabled || c.IsConnected() {
+		// Only consider servers that should connect on startup but aren't currently connected
+		if c.Config.IsDisabled() || c.IsConnected() {
 			continue
 		}
 
@@ -1296,8 +1320,8 @@ func (m *Manager) performHealthChecks() {
 	m.logger.Debug("Performing health checks", zap.Int("servers_with_health_check", len(clients)))
 
 	for id, client := range clients {
-		// Skip if not enabled
-		if !client.Config.Enabled {
+		// Skip if disabled
+		if client.Config.IsDisabled() {
 			continue
 		}
 

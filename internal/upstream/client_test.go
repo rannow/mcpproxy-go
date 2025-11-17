@@ -50,7 +50,7 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 		Name:     "test-sse-server",
 		URL:      server.URL + "/sse",
 		Protocol: "sse",
-		Enabled:  true,
+		StartupMode: "active",
 		Created:  time.Now(),
 	}
 
@@ -115,7 +115,7 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 		Name:     "test-sse-server",
 		URL:      server.URL + "/sse",
 		Protocol: "sse",
-		Enabled:  true,
+		StartupMode: "active",
 		Created:  time.Now(),
 	}
 
@@ -205,7 +205,7 @@ func TestClient_Connect_WorkingTransports(t *testing.T) {
 				URL:      server.URL + tt.urlSuffix,
 				Command:  tt.command,
 				Args:     tt.args,
-				Enabled:  true,
+				StartupMode: "active",
 				Created:  time.Now(),
 			}
 
@@ -296,7 +296,7 @@ func TestClient_Headers_Support(t *testing.T) {
 				Protocol: tt.protocol,
 				URL:      server.URL + tt.urlSuffix,
 				Headers:  tt.headers,
-				Enabled:  true,
+				StartupMode: "active",
 				Created:  time.Now(),
 			}
 
