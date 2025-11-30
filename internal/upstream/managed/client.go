@@ -105,9 +105,36 @@ func (mc *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("connection already in progress or established (state: %s)", mc.StateManager.GetState().String())
 	}
 
-	mc.logger.Info("Starting managed connection to upstream server",
+	// CRITICAL FIX: Detect and resolve state desync between core and managed client.
+	// This fixes the "client already connected" error during retry attempts.
+	// The issue occurs when core.Client.connected=true but managed state is Error/Disconnected.
+	coreConnected := mc.coreClient.IsConnectedFlag()
+	managedState := mc.StateManager.GetState()
+	if coreConnected && (managedState == types.StateError || managedState == types.StateDisconnected) {
+		mc.logger.Warn("🔄 State desync detected: core thinks connected but managed state is error/disconnected",
+			zap.String("server", mc.Config.Name),
+			zap.Bool("core_connected", coreConnected),
+			zap.String("managed_state", managedState.String()))
+
+		// Force reset the core client state to allow reconnection
+		if err := mc.coreClient.ForceDisconnect(); err != nil {
+			mc.logger.Warn("ForceDisconnect during state sync failed",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+		} else {
+			mc.logger.Info("✅ State desync resolved via ForceDisconnect",
+				zap.String("server", mc.Config.Name))
+		}
+	}
+
+	// Get connection info for enhanced logging
+	connInfo := mc.StateManager.GetConnectionInfo()
+	mc.logger.Info("🔌 Starting managed connection to upstream server",
 		zap.String("server", mc.Config.Name),
-		zap.String("current_state", mc.StateManager.GetState().String()))
+		zap.String("current_state", mc.StateManager.GetState().String()),
+		zap.Int("previous_failures", connInfo.ConsecutiveFailures),
+		zap.Int("auto_disable_threshold", connInfo.AutoDisableThreshold),
+		zap.Bool("was_auto_disabled", connInfo.AutoDisabled))
 
 	// Transition to connecting state
 	mc.StateManager.TransitionTo(types.StateConnecting)
@@ -144,6 +171,13 @@ func (mc *Client) Connect(ctx context.Context) error {
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)
 	}
+
+	// FIX: Explicitly reset consecutive failures on successful connection
+	// This ensures clean slate after reconnection, preventing accumulated failures
+	// from previous sessions from triggering premature auto-disable
+	mc.StateManager.ResetConsecutiveFailures()
+	mc.logger.Debug("Reset consecutive failures after successful connection",
+		zap.String("server", mc.Config.Name))
 
 	// Update state manager with server info
 	if serverInfo := mc.coreClient.GetServerInfo(); serverInfo != nil {
@@ -463,6 +497,25 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 				zap.Error(info.LastError),
 				zap.Int("retry_count", info.RetryCount))
 		}
+
+		// Note: Failure tracking is already done by StateManager.SetError() which increments consecutiveFailures
+		// Log current failure count for debugging
+		failureCount := mc.StateManager.GetConsecutiveFailures()
+		mc.logger.Debug("Connection failure tracked",
+			zap.String("server", mc.Config.Name),
+			zap.Int("consecutive_failures", failureCount),
+			zap.Bool("should_auto_disable", mc.StateManager.ShouldAutoDisable()))
+
+		// Check and handle auto-disable based on failure threshold
+		// This ensures runtime failures trigger auto-disable after threshold is reached
+		mc.checkAndHandleAutoDisable()
+	}
+
+	// Log successful connection (failure counter is reset by StateManager.TransitionTo when entering Ready state)
+	if newState == types.StateReady && oldState != types.StateReady {
+		mc.logger.Debug("Connection established successfully",
+			zap.String("server", mc.Config.Name),
+			zap.String("from_state", oldState.String()))
 	}
 }
 
@@ -504,12 +557,29 @@ func (mc *Client) backgroundHealthCheck() {
 // checkAndHandleAutoDisable checks if server should be auto-disabled and handles it immediately
 // This is called after each connection failure to prevent excessive retries
 func (mc *Client) checkAndHandleAutoDisable() {
+	info := mc.StateManager.GetConnectionInfo()
+
+	// Enhanced logging for debugging connection issues
+	mc.logger.Debug("🔍 Auto-disable check",
+		zap.String("server", mc.Config.Name),
+		zap.Int("consecutive_failures", info.ConsecutiveFailures),
+		zap.Int("threshold", info.AutoDisableThreshold),
+		zap.Time("first_attempt", info.FirstAttemptTime),
+		zap.Duration("time_since_first_attempt", time.Since(info.FirstAttemptTime)),
+		zap.Duration("grace_period", config.StartupGracePeriod),
+		zap.Bool("in_grace_period", !info.FirstAttemptTime.IsZero() && time.Since(info.FirstAttemptTime) < config.StartupGracePeriod))
+
 	// Check if server should be auto-disabled due to consecutive failures
 	if !mc.StateManager.ShouldAutoDisable() {
+		if info.ConsecutiveFailures > 0 {
+			mc.logger.Debug("🛡️ Auto-disable suppressed (grace period or threshold not reached)",
+				zap.String("server", mc.Config.Name),
+				zap.Int("consecutive_failures", info.ConsecutiveFailures),
+				zap.Int("threshold", info.AutoDisableThreshold))
+		}
 		return
 	}
 
-	info := mc.StateManager.GetConnectionInfo()
 	reason := fmt.Sprintf("Server automatically disabled after %d consecutive failures (threshold: %d)",
 		info.ConsecutiveFailures, info.AutoDisableThreshold)
 
