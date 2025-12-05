@@ -27,9 +27,9 @@ func createProcessGroupCommandFunc(workingDir string, logger *zap.Logger) func(c
 			cmd.Dir = workingDir
 		}
 
-		// TODO: Implement Windows-specific process group management
-		// Windows uses Job Objects instead of process groups
-		// For now, we'll use the standard command creation
+		// NOTE: Windows uses Job Objects instead of Unix process groups
+		// Feature Backlog: Implement proper Windows Job Object process management
+		// For now, use standard command creation
 		
 		logger.Debug("Process group configuration applied (Windows)",
 			zap.String("command", command),
@@ -42,10 +42,15 @@ func createProcessGroupCommandFunc(workingDir string, logger *zap.Logger) func(c
 
 // killProcessGroup terminates processes on Windows systems
 // This is a simplified implementation for Windows compatibility
+//
+// NOTE: Windows process management requires Win32 API calls or Job Objects.
+// Current implementation is a placeholder that logs the request but does not
+// actually terminate processes. For full Windows support, consider:
+// - Using Job Objects for process group management
+// - Calling TerminateProcess via syscall for individual processes
+// - Using taskkill.exe as a fallback
 func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
-	// TODO: Implement proper Windows process termination
-	// For now, this is a placeholder that does nothing
-	// Windows process management would require Win32 API calls or Job Objects
+	// Placeholder implementation - Windows process termination not yet implemented
 	
 	logger.Debug("Process group termination requested (Windows placeholder)",
 		zap.String("server", serverName),
@@ -70,8 +75,13 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 }
 
 // isProcessGroupAlive checks if processes are still running on Windows
+//
+// NOTE: Windows-specific process checking not yet implemented.
+// For full Windows support, consider:
+// - Using OpenProcess + GetExitCodeProcess to check process status
+// - Querying Job Object for associated processes
+// Returns false as a safe default (assumes process terminated)
 func isProcessGroupAlive(pgid int) bool {
-	// TODO: Implement Windows-specific process checking
-	// For now, return false as a safe default
+	// Placeholder - returns false as safe default (process assumed terminated)
 	return false
 }

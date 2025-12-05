@@ -222,21 +222,6 @@ func loadConfigFile(path string, cfg *Config) error {
 		}
 	}
 
-	// Migrate configuration from old format to new startup_mode format
-	result := MigrateConfig(cfg, nil)
-	if result.Migrated {
-		// Save the migrated configuration back to disk
-		if err := SaveConfig(cfg, path); err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] Config was migrated but failed to save: %v\n", err)
-			// Don't fail the load operation - migration happened in memory
-		} else {
-			fmt.Printf("[INFO] Configuration migrated successfully (%d servers updated)\n", result.ServersChanged)
-			if result.BackupPath != "" {
-				fmt.Printf("[INFO] Backup created at: %s\n", result.BackupPath)
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -359,41 +344,24 @@ func cleanupOldBackups(configPath string) {
 
 // SaveConfig saves configuration to file with automatic backup
 func SaveConfig(cfg *Config, path string) error {
-	fmt.Printf("[DEBUG] SaveConfig called with path: %s\n", path)
-	fmt.Printf("[DEBUG] SaveConfig - server count: %d\n", len(cfg.Servers))
-
-	// Log server states for debugging (using new startup_mode field)
-	for _, server := range cfg.Servers {
-		fmt.Printf("[DEBUG] SaveConfig - server %s: startup_mode=%s\n",
-			server.Name, server.StartupMode)
-	}
-
 	// Create backup of existing config file
-	if err := createConfigBackup(path); err != nil {
-		fmt.Printf("[WARN] Failed to create config backup: %v\n", err)
-		// Continue with save operation even if backup fails
-	}
+	_ = createConfigBackup(path) // Best effort, don't fail on backup errors
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		fmt.Printf("[DEBUG] SaveConfig - JSON marshal failed: %v\n", err)
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
 	// Ensure directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Printf("[DEBUG] SaveConfig - MkdirAll failed: %v\n", err)
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] SaveConfig - about to write file: %s\n", path)
 	if err := os.WriteFile(path, data, 0600); err != nil {
-		fmt.Printf("[DEBUG] SaveConfig - WriteFile failed: %v\n", err)
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] SaveConfig - successfully wrote file: %s\n", path)
 	return nil
 }
 

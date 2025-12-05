@@ -88,12 +88,6 @@ func NewMCPProxyServer(
 		mcpserver.WithRecovery(),
 	}
 
-	// Add prompts capability if enabled
-	// Note: prompts capability would be added here when mcp-go supports it
-	// if config.EnablePrompts {
-	//     capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
-	// }
-
 	mcpServer := mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		"1.0.0",
@@ -557,6 +551,19 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 			"score":       result.Score,
 			"server":      result.Tool.ServerName,
 		}
+
+		// Add server connection status so LLM knows if tool is callable
+		// This helps prevent tool call failures due to disconnected servers
+		serverConnected := false
+		serverState := "unknown"
+		if p.upstreamManager != nil {
+			if client, exists := p.upstreamManager.GetClient(result.Tool.ServerName); exists {
+				serverConnected = client.IsConnected()
+				serverState = client.GetState().String()
+			}
+		}
+		mcpTool["server_connected"] = serverConnected
+		mcpTool["server_state"] = serverState
 
 		// Add usage statistics if requested
 		if includeStats {
@@ -1220,12 +1227,9 @@ func (p *MCPProxyServer) getDockerContainerInfo(client *managed.Client) map[stri
 		"status":       nil,
 	}
 
-	// Try to get container ID from managed client
-	// Check if this client has Docker container information
-	// This would require extending the client interface to expose container info
+	// NOTE: Container info not yet available from client interface
+	// Feature Backlog: Extend ManagedClient to expose Docker container information
 	_ = client
-	// For now, return empty container info
-	// TODO: Extend client interface to expose container information
 
 	return result
 }
@@ -1713,13 +1717,10 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	// Handle enabled state change
 	wasEnabled := (updatedServer.StartupMode == "active" || updatedServer.StartupMode == "lazy_loading")
 	previousMode := updatedServer.StartupMode
-	startupMode := "active"; 
-	//if !request.GetBool("enabled", wasEnabled) { startupMode = "disabled" }; 
-	updatedServer.StartupMode = startupMode
+	updatedServer.StartupMode = "active"
 
 	// If re-enabling a previously auto-disabled server, clear the auto-disable state
-	if !wasEnabled && updatedServer.StartupMode == "active" && previousMode == "auto_disabled" {
-		updatedServer.StartupMode = "active"
+	if !wasEnabled && previousMode == "auto_disabled" {
 		p.logger.Info("Cleared auto-disable state on manual re-enable",
 			zap.String("server", name))
 	}
@@ -1817,13 +1818,10 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	// Handle enabled state change
 	wasEnabled := (updatedServer.StartupMode == "active" || updatedServer.StartupMode == "lazy_loading")
 	previousMode := updatedServer.StartupMode
-	startupMode := "active"; 
-	//if !request.GetBool("enabled", wasEnabled) { startupMode = "disabled" }; 
-	updatedServer.StartupMode = startupMode
+	updatedServer.StartupMode = "active"
 
 	// If re-enabling a previously auto-disabled server, clear the auto-disable state
-	if !wasEnabled && updatedServer.StartupMode == "active" && previousMode == "auto_disabled" {
-		updatedServer.StartupMode = "active"
+	if !wasEnabled && previousMode == "auto_disabled" {
 		p.logger.Info("Cleared auto-disable state on manual re-enable",
 			zap.String("server", name))
 	}

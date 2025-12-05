@@ -3,7 +3,6 @@ package transport
 import (
 	"fmt"
 	"net/http"
-	"time"
 
 	"mcpproxy-go/internal/config"
 
@@ -161,7 +160,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	httpTransport, err := transport.NewStreamableHTTP(cfg.URL,
-		transport.WithHTTPTimeout(180*time.Second)) // Increased timeout for HTTP connections
+		transport.WithHTTPTimeout(config.HTTPConnectionTimeout)) // MED-002: Use centralized timeout
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP transport: %w", err)
 	}
@@ -221,12 +220,12 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	// Use regular SSE client
 	if len(cfg.Headers) > 0 {
 		logger.Debug("Adding SSE headers", zap.Int("header_count", len(cfg.Headers)))
-		// Create custom HTTP client with longer timeout for SSE
+		// MED-002: Create custom HTTP client with centralized timeout for SSE
 		httpClient := &http.Client{
-			Timeout: 180 * time.Second, // Increased timeout for SSE connections
+			Timeout: config.HTTPConnectionTimeout,
 			Transport: &http.Transport{
 				MaxIdleConns:        10,
-				IdleConnTimeout:     90 * time.Second,
+				IdleConnTimeout:     config.HTTPIdleConnTimeout,
 				DisableCompression:  false,
 				DisableKeepAlives:   false, // Enable keep-alives for SSE stability
 				MaxIdleConnsPerHost: 5,
@@ -235,7 +234,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 		zap.L().Debug("Creating SSE MCP client with custom HTTP timeout and headers",
 			zap.String("url", cfg.URL),
-			zap.Duration("timeout", 180*time.Second),
+			zap.Duration("timeout", config.HTTPConnectionTimeout),
 			zap.Int("header_count", len(cfg.Headers)))
 
 		sseClient, err := client.NewSSEMCPClient(cfg.URL,
@@ -247,12 +246,12 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		return sseClient, nil
 	}
 
-	// Create custom HTTP client with longer timeout for SSE
+	// MED-002: Create custom HTTP client with centralized timeout for SSE
 	httpClient := &http.Client{
-		Timeout: 180 * time.Second, // Increased timeout for SSE connections
+		Timeout: config.HTTPConnectionTimeout,
 		Transport: &http.Transport{
 			MaxIdleConns:        10,
-			IdleConnTimeout:     90 * time.Second,
+			IdleConnTimeout:     config.HTTPIdleConnTimeout,
 			DisableCompression:  false,
 			DisableKeepAlives:   false, // Enable keep-alives for SSE stability
 			MaxIdleConnsPerHost: 5,
@@ -261,14 +260,14 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 	zap.L().Debug("Creating SSE MCP client with custom HTTP timeout",
 		zap.String("url", cfg.URL),
-		zap.Duration("timeout", 180*time.Second))
+		zap.Duration("timeout", config.HTTPConnectionTimeout))
 
 	// Enhanced trace-level debugging for SSE transport
 	if zap.L().Core().Enabled(zap.DebugLevel - 1) { // Trace level
 		zap.L().Debug("TRACE SSE TRANSPORT SETUP",
 			zap.String("transport_type", "sse"),
 			zap.String("url", cfg.URL),
-			zap.Duration("http_timeout", 180*time.Second),
+			zap.Duration("http_timeout", config.HTTPConnectionTimeout),
 			zap.String("debug_note", "SSE client will establish persistent connection for JSON-RPC over SSE"))
 	}
 

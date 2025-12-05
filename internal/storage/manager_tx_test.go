@@ -331,3 +331,196 @@ func TestManager_StartServer_Disabled(t *testing.T) {
 	assert.Error(t, err, "Should not be able to start disabled server")
 	assert.Contains(t, err.Error(), "disabled")
 }
+
+// TestManager_ConfigFilePriority tests that config file values have priority over database values
+// EXCEPT for auto_disabled state which is a runtime protection mechanism
+func TestManager_ConfigFilePriority(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create config file with server set to "active"
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.Servers = []*config.ServerConfig{
+		{
+			Name:        "test-server",
+			Protocol:    "http",
+			URL:         "http://localhost:8080",
+			StartupMode: "active", // Config says active
+			Created:     time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0644))
+
+	// Create manager
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Save server to database with "disabled" state (simulating old database state)
+	disabledServer := &config.ServerConfig{
+		Name:        "test-server",
+		Protocol:    "http",
+		URL:         "http://localhost:8080",
+		StartupMode: "disabled", // Database says disabled
+		Created:     time.Now(),
+	}
+	require.NoError(t, manager.SaveUpstreamServer(disabledServer))
+
+	// Verify database has disabled state
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.Equal(t, "disabled", record.ServerState, "Database should have disabled state")
+
+	// Create and set config loader
+	zapLogger := zap.NewNop()
+	loader, err := config.NewLoader(configPath, zapLogger)
+	require.NoError(t, err)
+	defer loader.Stop()
+
+	_, err = loader.Load()
+	require.NoError(t, err)
+
+	manager.SetConfigLoader(loader)
+
+	// Now test ListUpstreamServers - config file should take priority
+	servers, err := manager.ListUpstreamServers()
+	require.NoError(t, err)
+	require.Len(t, servers, 1)
+	assert.Equal(t, "active", servers[0].StartupMode,
+		"Config file startup_mode (active) should override database server_state (disabled)")
+
+	// Also test GetUpstreamServer
+	server, err := manager.GetUpstreamServer("test-server")
+	require.NoError(t, err)
+	assert.Equal(t, "active", server.StartupMode,
+		"Config file startup_mode (active) should override database server_state (disabled)")
+}
+
+// TestManager_AutoDisabledPreserved tests that auto_disabled state from database is preserved
+// even when config file says active (runtime protection mechanism)
+func TestManager_AutoDisabledPreserved(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create config file with server set to "active"
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.Servers = []*config.ServerConfig{
+		{
+			Name:        "test-server",
+			Protocol:    "http",
+			URL:         "http://localhost:8080",
+			StartupMode: "active", // Config says active
+			Created:     time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0644))
+
+	// Create manager
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Save server to database with "auto_disabled" state (simulating runtime auto-disable)
+	autoDisabledServer := &config.ServerConfig{
+		Name:        "test-server",
+		Protocol:    "http",
+		URL:         "http://localhost:8080",
+		StartupMode: "auto_disabled", // Database says auto_disabled (runtime protection)
+		Created:     time.Now(),
+	}
+	require.NoError(t, manager.SaveUpstreamServer(autoDisabledServer))
+
+	// Verify database has auto_disabled state
+	record, err := manager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.Equal(t, "auto_disabled", record.ServerState, "Database should have auto_disabled state")
+
+	// Create and set config loader
+	zapLogger := zap.NewNop()
+	loader, err := config.NewLoader(configPath, zapLogger)
+	require.NoError(t, err)
+	defer loader.Stop()
+
+	_, err = loader.Load()
+	require.NoError(t, err)
+
+	manager.SetConfigLoader(loader)
+
+	// Now test ListUpstreamServers - auto_disabled from database should be preserved
+	servers, err := manager.ListUpstreamServers()
+	require.NoError(t, err)
+	require.Len(t, servers, 1)
+	assert.Equal(t, "auto_disabled", servers[0].StartupMode,
+		"Database auto_disabled state should be preserved (runtime protection overrides config)")
+
+	// Also test GetUpstreamServer
+	server, err := manager.GetUpstreamServer("test-server")
+	require.NoError(t, err)
+	assert.Equal(t, "auto_disabled", server.StartupMode,
+		"Database auto_disabled state should be preserved (runtime protection overrides config)")
+}
+
+// TestManager_ConfigAutoDisabledOverrides tests that when config file explicitly sets auto_disabled,
+// the config file takes priority (user has confirmed the auto-disable)
+func TestManager_ConfigAutoDisabledOverrides(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create config file with server set to "auto_disabled" (user confirmed)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.Servers = []*config.ServerConfig{
+		{
+			Name:        "test-server",
+			Protocol:    "http",
+			URL:         "http://localhost:8080",
+			StartupMode: "auto_disabled", // Config says auto_disabled (user confirmed)
+			Created:     time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0644))
+
+	// Create manager
+	manager, err := NewManager(tempDir, logger)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Save server to database with "auto_disabled" state
+	autoDisabledServer := &config.ServerConfig{
+		Name:        "test-server",
+		Protocol:    "http",
+		URL:         "http://localhost:8080",
+		StartupMode: "auto_disabled",
+		Created:     time.Now(),
+	}
+	require.NoError(t, manager.SaveUpstreamServer(autoDisabledServer))
+
+	// Create and set config loader
+	zapLogger := zap.NewNop()
+	loader, err := config.NewLoader(configPath, zapLogger)
+	require.NoError(t, err)
+	defer loader.Stop()
+
+	_, err = loader.Load()
+	require.NoError(t, err)
+
+	manager.SetConfigLoader(loader)
+
+	// Now test ListUpstreamServers - both config and db say auto_disabled, result should be auto_disabled
+	servers, err := manager.ListUpstreamServers()
+	require.NoError(t, err)
+	require.Len(t, servers, 1)
+	assert.Equal(t, "auto_disabled", servers[0].StartupMode,
+		"When config says auto_disabled and db says auto_disabled, result should be auto_disabled")
+}

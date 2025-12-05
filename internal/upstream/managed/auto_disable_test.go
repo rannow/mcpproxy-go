@@ -387,3 +387,101 @@ func TestRestartPersistence(t *testing.T) {
 		assert.Contains(t, info2.AutoDisableReason, "consecutive failures")
 	}
 }
+
+// TestRuntimeAutoDisableViaStateChangeCallback tests that auto-disable is triggered
+// via the onStateChange callback when consecutive failures reach the threshold during runtime
+func TestRuntimeAutoDisableViaStateChangeCallback(t *testing.T) {
+	// Create temp directory for test
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create initial config file
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.AutoDisableThreshold = 3
+
+	testServer := &config.ServerConfig{
+		Name:        "test-server",
+		URL:         "http://localhost:9999",
+		Protocol:    "http",
+		StartupMode: "active",
+	}
+	cfg.Servers = []*config.ServerConfig{testServer}
+
+	// Write initial config
+	require.NoError(t, config.SaveConfig(cfg, configPath))
+
+	// Create logger
+	logger := zap.NewNop()
+
+	// Initialize storage manager with config loader
+	storageManager, err := storage.NewManager(tempDir, logger.Sugar())
+	require.NoError(t, err)
+	defer storageManager.Close()
+
+	// Create config loader
+	configLoader, err := config.NewLoader(configPath, logger)
+	require.NoError(t, err)
+	defer configLoader.Stop()
+
+	// Load initial config
+	_, err = configLoader.Load()
+	require.NoError(t, err)
+
+	// Set config loader on storage manager
+	storageManager.SetConfigLoader(configLoader)
+
+	// Save initial upstream record
+	require.NoError(t, storageManager.GetBoltDB().SaveUpstream(&storage.UpstreamRecord{
+		ID:          "test-server",
+		Name:        "test-server",
+		URL:         "http://localhost:9999",
+		Protocol:    "http",
+		ServerState: "active",
+		Created:     time.Now(),
+		Updated:     time.Now(),
+	}))
+
+	// Create client
+	client, err := NewClient("test-server", testServer, logger, nil, cfg, storageManager.GetBoltDB())
+	require.NoError(t, err)
+
+	// Set storage manager on client
+	client.SetStorageManager(storageManager)
+
+	// Configure auto-disable threshold
+	client.StateManager.SetAutoDisableThreshold(3)
+
+	// Simulate runtime failures by calling SetError
+	// This triggers the onStateChange callback which should call checkAndHandleAutoDisable
+	for i := 0; i < 3; i++ {
+		client.StateManager.SetError(assert.AnError)
+	}
+
+	// Give the async callback time to execute (onStateChange runs in goroutine)
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify auto-disable was triggered automatically via the callback
+	info := client.StateManager.GetConnectionInfo()
+	assert.True(t, info.AutoDisabled, "Should be auto-disabled via onStateChange callback after 3 runtime failures")
+	assert.Contains(t, info.AutoDisableReason, "consecutive failures", "Should have proper auto-disable reason")
+
+	// Verify persistence in database
+	record, err := storageManager.GetBoltDB().GetUpstream("test-server")
+	require.NoError(t, err)
+	assert.Equal(t, "auto_disabled", record.ServerState, "Server state should be auto_disabled in database")
+
+	// Verify persistence in config file
+	reloadedCfg, err := config.LoadFromFile(configPath)
+	require.NoError(t, err)
+
+	found := false
+	for _, srv := range reloadedCfg.Servers {
+		if srv.Name == "test-server" {
+			found = true
+			assert.Equal(t, "auto_disabled", srv.StartupMode, "Server startup mode should be auto_disabled in config file")
+			break
+		}
+	}
+	assert.True(t, found, "Server should be found in config file")
+}

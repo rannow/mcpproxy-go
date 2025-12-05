@@ -1,5 +1,301 @@
 # Active Context
 
+## Code Changes (2025-11-29 16:21:35)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
+## Code Changes (2025-11-29 12:50:32)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
+## Code Changes (2025-11-29 12:50:20)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
+## Code Changes (2025-11-29 12:49:46)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
+## Code Changes (2025-11-29 12:49:21)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
+## Code Changes (2025-11-29 12:49:07)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
+## Code Changes (2025-11-29 12:48:50)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
+## Code Changes (2025-11-29 12:47:07)
+
+### Added Files
+- agent_api.go
+- app_state_machine.go
+- app_state_machine_test.go
+- app_state_test.go
+- assign_web.go
+- chat_openai_tools.go
+- dashboard.go
+- docs.go
+- e2e_production_scale_test.go
+- e2e_test.go
+- failed_servers.go
+- fast_actions.go
+- groups_mcp.go
+- groups_test.go
+- groups_web.go
+- inspector.go
+- integration_test.go
+- mcp.go
+- mcp_test.go
+- memory_web.go
+- metrics_web.go
+- mocks_test.go
+- resources_web.go
+- semantic.go
+- server.go
+- server_chat_handlers.go
+- server_chat_web.go
+- servers_web.go
+- upstream_test.go
+- websocket.go
+- websocket_integration_test.go
+- websocket_test.go
+
+
 ## Code Changes (2025-11-16 10:26:45)
 
 ### Added Files

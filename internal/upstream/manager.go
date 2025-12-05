@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -313,8 +314,8 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			return nil
 		}
 
-		// Connect to server with timeout to prevent hanging
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// MED-002: Connect to server with centralized timeout
+		ctx, cancel := context.WithTimeout(context.Background(), config.DefaultConnectionTimeout)
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
@@ -650,15 +651,15 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	// Get concurrency limit from config
 	maxConcurrent := m.globalConfig.MaxConcurrentConnections
 	if maxConcurrent <= 0 {
-		maxConcurrent = 20 // Fallback default
+		maxConcurrent = 10 // Fallback default (reduced to avoid resource contention)
 	}
 
 	m.logger.Info("🚀 Phase 1: Initial connection attempts",
 		zap.Int("total_clients", len(jobs)),
 		zap.Int("max_concurrent", maxConcurrent))
 
-	// PHASE 1: Initial connection attempts (with short timeout)
-	failedJobs := m.connectPhase(ctx, jobs, maxConcurrent, 30*time.Second, "initial")
+	// MED-002: PHASE 1: Initial connection attempts (with centralized timeout)
+	failedJobs := m.connectPhase(ctx, jobs, maxConcurrent, config.DefaultConnectionTimeout, "initial")
 
 	// PHASE 2: Retry failed servers (if any)
 	if len(failedJobs) > 0 {
@@ -725,9 +726,9 @@ func (m *Manager) connectPhase(ctx context.Context, jobs []clientJob, maxConcurr
 	return failedJobs
 }
 
-// retryFailedServers performs up to 5 retries for failed servers
+// retryFailedServers performs up to MaxConnectionRetries for failed servers
 func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob, maxConcurrent int) {
-	const maxRetries = 5
+	maxRetries := config.MaxConnectionRetries
 
 	for retry := 1; retry <= maxRetries; retry++ {
 		if len(failedJobs) == 0 {
@@ -740,10 +741,10 @@ func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob
 			zap.Int("max_retries", maxRetries),
 			zap.Int("servers_to_retry", len(failedJobs)))
 
-		// Exponential backoff delay before retry
+		// MED-002: Exponential backoff delay before retry with centralized max
 		backoffDelay := time.Duration(1<<uint(retry-1)) * time.Second
-		if backoffDelay > 30*time.Second {
-			backoffDelay = 30 * time.Second
+		if backoffDelay > config.MaxBackoffDelay {
+			backoffDelay = config.MaxBackoffDelay
 		}
 
 		m.logger.Info("Waiting before retry",
@@ -751,8 +752,8 @@ func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob
 			zap.Int("retry", retry))
 		time.Sleep(backoffDelay)
 
-		// Retry failed servers
-		failedJobs = m.connectPhase(ctx, failedJobs, maxConcurrent, 30*time.Second, fmt.Sprintf("retry-%d", retry))
+		// MED-002: Retry failed servers with centralized timeout
+		failedJobs = m.connectPhase(ctx, failedJobs, maxConcurrent, config.DefaultConnectionTimeout, fmt.Sprintf("retry-%d", retry))
 
 		// Check if we're on the last retry
 		if retry == maxRetries && len(failedJobs) > 0 {
@@ -857,6 +858,7 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 }
 
 // DisconnectAll disconnects from all servers
+// CRIT-005: Now aggregates all errors instead of returning only the last one
 func (m *Manager) DisconnectAll() error {
 	m.mu.RLock()
 	clients := make([]*managed.Client, 0, len(m.clients))
@@ -865,14 +867,22 @@ func (m *Manager) DisconnectAll() error {
 	}
 	m.mu.RUnlock()
 
-	var lastError error
+	// CRIT-005: Collect all errors for proper error reporting
+	var errs []error
 	for _, client := range clients {
 		if err := client.Disconnect(); err != nil {
-			lastError = err
+			errs = append(errs, fmt.Errorf("%s: %w", client.Config.Name, err))
+			m.logger.Warn("Failed to disconnect client",
+				zap.String("server", client.Config.Name),
+				zap.Error(err))
 		}
 	}
 
-	return lastError
+	// Return aggregated errors using errors.Join (Go 1.20+)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // HasDockerContainers checks if any connected servers are running Docker containers
@@ -971,12 +981,12 @@ func (m *Manager) GetTotalToolCount() int {
 			continue
 		}
 
-		// Use timeout for UI status updates (30 seconds for SSE servers)
+		// MED-002: Use centralized timeout for UI status updates
 		// This allows time for SSE servers to establish connections and respond
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), config.ListToolsTimeout)
 
 		m.logger.Debug("Starting ListTools for tool counting",
-			zap.Duration("timeout", 30*time.Second))
+			zap.Duration("timeout", config.ListToolsTimeout))
 		tools, err := client.ListTools(ctx)
 		cancel()
 		if err == nil && tools != nil {
@@ -1054,7 +1064,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 
 	// Trigger connection attempt in background to avoid blocking
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), config.BatchOperationTimeout)
 		defer cancel()
 
 		// Important: Ensure a clean reconnect only if not already connected.
@@ -1082,7 +1092,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 func (m *Manager) startOAuthEventMonitor() {
 	m.logger.Info("Starting OAuth event monitor for cross-process notifications")
 
-	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	ticker := time.NewTicker(config.HealthCheckInterval) // Check every 5 seconds
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -1188,7 +1198,7 @@ func (m *Manager) scanForNewTokens() {
 		}
 
 		// Rate-limit triggers per server
-		if last, ok := m.tokenReconnect[id]; ok && now.Sub(last) < 10*time.Second {
+		if last, ok := m.tokenReconnect[id]; ok && now.Sub(last) < config.TokenReconnectCooldown {
 			continue
 		}
 
@@ -1239,7 +1249,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), config.LongRunningOperationTimeout)
 		defer cancel()
 
 		if force {
@@ -1258,7 +1268,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
 				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false)
 				if err2 == nil {
-					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
+					tctx, tcancel := context.WithTimeout(ctx, config.QuickOperationTimeout)
 					_ = testClient.Connect(tctx)
 					tcancel()
 					if testClient.GetServerInfo() != nil {
@@ -1293,7 +1303,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 func (m *Manager) startHealthCheckMonitor() {
 	m.logger.Info("Starting health check monitor for servers with health_check enabled")
 
-	ticker := time.NewTicker(60 * time.Second) // Check every 60 seconds
+	ticker := time.NewTicker(config.AutoRecoveryCheckInterval) // Check every 60 seconds
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -1334,7 +1344,7 @@ func (m *Manager) performHealthChecks() {
 				zap.String("state", state.String()))
 
 			// Attempt to reconnect
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), config.DefaultConnectionTimeout)
 			err := client.Connect(ctx)
 			cancel()
 

@@ -1379,6 +1379,12 @@ func (s *Server) handleUnassignServer(w http.ResponseWriter, r *http.Request) {
 				if name, ok := m["name"].(string); ok && name == payload.ServerName {
 					m["group_id"] = 0
 					delete(m, "group_name")
+					// Remove deprecated fields that should not be written to config
+					delete(m, "enabled")
+					delete(m, "quarantined")
+					delete(m, "auto_disabled")
+					delete(m, "start_on_boot")
+					delete(m, "stopped")
 					servers[i] = m
 					break
 				}

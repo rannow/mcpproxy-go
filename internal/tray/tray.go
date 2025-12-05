@@ -641,8 +641,9 @@ func (a *App) onReady() {
 				// Force quit with timeout to prevent hanging
 				go func() {
 					// Set a maximum time for graceful shutdown
-					timeout := time.After(3 * time.Second)
-					killTimeout := time.After(5 * time.Second)
+					// MED-002: Using centralized timeout constants
+					timeout := time.After(config.TrayQuitTimeout)
+					killTimeout := time.After(config.TrayKillTimeout)
 					done := make(chan bool, 1)
 
 					go func() {
@@ -657,7 +658,7 @@ func (a *App) onReady() {
 						a.logger.Info("Graceful shutdown completed")
 						os.Exit(0)
 					case <-timeout:
-						a.logger.Warn("Graceful shutdown timed out after 3s, forcing exit with os.Exit(0)")
+						a.logger.Warn("Graceful shutdown timed out after 10s, forcing exit with os.Exit(0)")
 						os.Exit(0) // Force exit if graceful shutdown hangs
 
 						// If os.Exit(0) doesn't work (should never happen), wait for kill timeout
@@ -1736,6 +1737,16 @@ func (a *App) handleServerAction(serverName, action string) {
 		}
 		err = a.syncManager.HandleServerEnable(serverName, !serverEnabled)
 
+	case "force_enable":
+		// Force-enable a server (used by "Enable All" to avoid race conditions)
+		a.logger.Info("Force-enabling server", zap.String("server", serverName))
+		err = a.syncManager.HandleServerEnable(serverName, true)
+
+	case "force_disable":
+		// Force-disable a server (for consistency with force_enable)
+		a.logger.Info("Force-disabling server", zap.String("server", serverName))
+		err = a.syncManager.HandleServerEnable(serverName, false)
+
 	case "oauth_login":
 		err = a.handleOAuthLogin(serverName)
 
@@ -2039,6 +2050,13 @@ func (a *App) saveGroupsToConfig() error {
 			if server, ok := serverInterface.(map[string]interface{}); ok {
 				if serverName, ok := server["name"].(string); ok {
 					delete(server, "group_name") // Remove old field
+
+					// Remove deprecated fields that should not be written to config
+					delete(server, "enabled")
+					delete(server, "quarantined")
+					delete(server, "auto_disabled")
+					delete(server, "start_on_boot")
+					delete(server, "stopped")
 
 					// Set group_id from map, or 0 if not in any group
 					if groupID, exists := serverToGroupID[serverName]; exists {
@@ -3109,8 +3127,9 @@ func (a *App) assignServerToGroup(serverName, groupName string) {
 		zap.String("message", response.Message))
 }
 
-// ServerState represents the state of a server before stop
-type ServerState struct {
+// ServerSnapshot represents a snapshot of server state before stop operations.
+// HIGH-001: Renamed from ServerState to ServerSnapshot to avoid confusion with types.ServerState
+type ServerSnapshot struct {
 	Name      string `json:"name"`
 	Enabled   bool   `json:"enabled"`
 	Connected bool   `json:"connected"`
@@ -3129,13 +3148,13 @@ func (a *App) saveServerStatesForStop() error {
 	}
 
 	// Create state snapshot
-	states := make([]ServerState, 0, len(servers))
+	states := make([]ServerSnapshot, 0, len(servers))
 	for _, server := range servers {
 		name, _ := server["name"].(string)
 		enabled, _ := server["enabled"].(bool)
 		connected, _ := server["connected"].(bool)
 
-		states = append(states, ServerState{
+		states = append(states, ServerSnapshot{
 			Name:      name,
 			Enabled:   enabled,
 			Connected: connected,
@@ -3176,7 +3195,7 @@ func (a *App) restoreServerStatesAfterStart() error {
 		return err
 	}
 
-	var states []ServerState
+	var states []ServerSnapshot
 	if err := json.Unmarshal(data, &states); err != nil {
 		return err
 	}

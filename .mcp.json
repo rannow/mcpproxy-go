@@ -1,31 +1,97 @@
 {
   "mcpServers": {
     "claude-flow@alpha": {
+      "type": "stdio",
       "command": "npx",
       "args": [
         "claude-flow@alpha",
         "mcp",
         "start"
       ],
-      "type": "stdio"
-    },
-    "ruv-swarm": {
-      "command": "npx",
-      "args": [
-        "ruv-swarm@latest",
-        "mcp",
-        "start"
+      "description": "Primary orchestration server with SPARC methodology, 54 agents, swarm coordination, and hooks automation",
+      "capabilities": [
+        "swarm-orchestration",
+        "agent-spawning",
+        "task-coordination",
+        "memory-management",
+        "neural-patterns",
+        "performance-tracking",
+        "github-integration",
+        "hooks-automation"
       ],
-      "type": "stdio"
+      "priority": 1
     },
     "flow-nexus": {
+      "type": "stdio",
       "command": "npx",
       "args": [
         "flow-nexus@latest",
         "mcp",
         "start"
       ],
-      "type": "stdio"
+      "description": "Cloud-based AI swarm deployment with 70+ tools, sandboxes, neural networks, and real-time collaboration",
+      "capabilities": [
+        "cloud-execution",
+        "sandbox-management",
+        "neural-networks",
+        "template-deployment",
+        "github-automation",
+        "real-time-streaming",
+        "storage-management",
+        "authentication"
+      ],
+      "priority": 2
+    },
+    "ruv-swarm": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "ruv-swarm",
+        "mcp",
+        "start"
+      ],
+      "description": "Enhanced swarm coordination with advanced consensus mechanisms and distributed systems",
+      "capabilities": [
+        "advanced-coordination",
+        "consensus-protocols",
+        "distributed-systems",
+        "collective-intelligence",
+        "swarm-memory"
+      ],
+      "priority": 3
+    },
+    "mcpproxy": {
+      "type": "streamable-http",
+      "url": "http://localhost:8080/mcp",
+      "description": "Local mcpproxy-go server for upstream MCP server management and HTTP streaming",
+      "capabilities": [
+        "upstream-management",
+        "http-streaming",
+        "server-aggregation",
+        "local-coordination"
+      ],
+      "priority": 4
     }
+  },
+  "metadata": {
+    "version": "2.0.0",
+    "lastUpdated": "2025-11-23",
+    "totalServers": 4,
+    "activeServers": 4,
+    "description": "Consolidated MCP configuration for mcpproxy-go with all available servers activated",
+    "optimizations": [
+      "Removed duplicate server definitions",
+      "Added comprehensive server descriptions",
+      "Defined clear capability sets",
+      "Established priority ordering",
+      "Maintained hooks and permissions integration"
+    ],
+    "changes": [
+      "Added ruv-swarm server (previously referenced but not configured)",
+      "Consolidated .mcp.json and mcp.json configurations",
+      "Enhanced server metadata with capabilities and priorities",
+      "Preserved existing claude-flow@alpha and flow-nexus configurations",
+      "Maintained mcpproxy local server integration"
+    ]
   }
 }
