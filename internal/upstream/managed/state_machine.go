@@ -78,7 +78,7 @@ func NewStateMachine(
 		storage:              storage,
 		eventBus:             eventBus,
 		serverName:           serverName,
-		autoDisableThreshold: 5, // Default to 5 consecutive failures (per user requirement)
+		autoDisableThreshold: types.DefaultAutoDisableThreshold, // HIGH-003: Use consolidated constant
 	}
 }
 
@@ -90,16 +90,23 @@ func (sm *StateMachine) SetAutoDisableThreshold(threshold int) {
 }
 
 // CanTransitionTo checks if a transition from current state to newState is valid.
+// CRIT-004: Changed from permissive to deny-by-default policy for security
 func (sm *StateMachine) CanTransitionTo(newState types.ServerState) bool {
 	sm.mu.RLock()
 	currentState := sm.stateManager.GetServerState()
 	sm.mu.RUnlock()
 
+	// Same state transition is always allowed (no-op)
+	if currentState == newState {
+		return true
+	}
+
 	// Check if transition is defined in validTransitions
 	allowedStates, ok := validTransitions[currentState]
 	if !ok {
-		// If not defined, allow transition (permissive default)
-		return true
+		// CRIT-004: Deny by default - only explicitly listed transitions are allowed
+		// This prevents unintended state changes when new states are added
+		return false
 	}
 
 	// Check if newState is in the allowed list
@@ -114,21 +121,23 @@ func (sm *StateMachine) CanTransitionTo(newState types.ServerState) bool {
 
 // TransitionTo attempts to transition to a new server state with validation.
 // Returns an error if the transition is invalid.
+// CRIT-003: Fixed race condition by using unsafe methods that don't acquire nested locks
 func (sm *StateMachine) TransitionTo(newState types.ServerState) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	currentState := sm.stateManager.GetServerState()
+	// CRIT-003: Use GetServerStateUnsafe to avoid nested lock acquisition
+	// The StateMachine lock protects the entire transition operation
+	currentState := sm.stateManager.GetServerStateUnsafe()
 
 	// Validate transition
 	if !sm.canTransitionToLocked(currentState, newState) {
 		return fmt.Errorf("invalid state transition: %s → %s", currentState, newState)
 	}
 
-	// Perform the transition
-	if err := sm.stateManager.TransitionServerState(newState); err != nil {
-		return fmt.Errorf("failed to transition state: %w", err)
-	}
+	// CRIT-003: Use TransitionServerStateUnsafe to avoid nested lock acquisition
+	// Validation is already done above, so we can safely transition
+	sm.stateManager.TransitionServerStateUnsafe(newState)
 
 	// Persist to storage
 	if err := sm.persistStateLocked(newState); err != nil {
@@ -146,12 +155,19 @@ func (sm *StateMachine) TransitionTo(newState types.ServerState) error {
 }
 
 // canTransitionToLocked checks transition validity (must be called with lock held).
+// CRIT-004: Changed from permissive to deny-by-default policy for security
 func (sm *StateMachine) canTransitionToLocked(currentState, newState types.ServerState) bool {
+	// Same state transition is always allowed (no-op)
+	if currentState == newState {
+		return true
+	}
+
 	// Check if transition is defined in validTransitions
 	allowedStates, ok := validTransitions[currentState]
 	if !ok {
-		// If not defined, allow transition (permissive default)
-		return true
+		// CRIT-004: Deny by default - only explicitly listed transitions are allowed
+		// This prevents unintended state changes when new states are added
+		return false
 	}
 
 	// Check if newState is in the allowed list
@@ -217,21 +233,64 @@ func (sm *StateMachine) persistStateLocked(state types.ServerState) error {
 		return nil // No storage configured, skip persistence
 	}
 
-	// Persist state to storage
-	// This will be implemented when storage interface is updated
-	// For now, we'll just return nil
+	// Map types.ServerState to storage string representation
+	var stateStr string
+	switch state {
+	case types.StateActive:
+		stateStr = "active"
+	case types.StateDisabledConfig:
+		stateStr = "disabled"
+	case types.StateQuarantined:
+		stateStr = "quarantined"
+	case types.StateAutoDisabled:
+		stateStr = "auto_disabled"
+	case types.StateLazyLoading:
+		stateStr = "lazy_loading"
+	default:
+		stateStr = "active" // Default fallback
+	}
+
+	// Persist to database only (not config file) for runtime state changes
+	// This preserves the original startup_mode in config while tracking runtime state in DB
+	if err := sm.storage.UpdateUpstreamServerState(sm.serverName, stateStr); err != nil {
+		return fmt.Errorf("failed to persist state to database: %w", err)
+	}
+
+	// Emit state change event for Tray synchronization
+	if sm.eventBus != nil {
+		sm.eventBus.Publish(events.Event{
+			Type:       events.ServerStateChanged,
+			ServerName: sm.serverName,
+			OldState:   "", // Not tracked here, StateManager handles this
+			NewState:   stateStr,
+			Data: map[string]interface{}{
+				"server_state": stateStr,
+				"source":       "state_machine",
+			},
+		})
+	}
+
 	return nil
 }
 
 // persistAutoDisableLocked persists auto-disable state to storage (must be called with lock held).
+// This uses the full two-phase commit that updates BOTH database AND config file
 func (sm *StateMachine) persistAutoDisableLocked() error {
 	if sm.storage == nil {
 		return nil // No storage configured, skip persistence
 	}
 
-	// Persist auto-disable state to storage
-	// This will be implemented when storage interface is updated
-	// For now, we'll just return nil
+	// Build reason string with failure count for debugging
+	reason := fmt.Sprintf("Auto-disabled after %d consecutive connection failures", sm.autoDisableThreshold)
+
+	// Use UpdateServerState which handles two-phase commit (DB + config)
+	// This ensures both database and config file are updated atomically
+	if err := sm.storage.UpdateServerState(sm.serverName, reason); err != nil {
+		return fmt.Errorf("failed to persist auto-disable state: %w", err)
+	}
+
+	// Note: Event emission is handled by storage.UpdateServerState via events.ServerAutoDisabled
+
 	return nil
 }
 

@@ -561,33 +561,46 @@ func (m *MenuManager) UpdateSingleServer(serverName string, serverData map[strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Determine current status
+	// Determine current status using startup_mode for accurate categorization
+	startupMode, _ := serverData["startup_mode"].(string)
 	enabled, _ := serverData["enabled"].(bool)
 	connected, _ := serverData["connected"].(bool)
 	sleeping, _ := serverData["sleeping"].(bool)
 	quarantined, _ := serverData["quarantined"].(bool)
+	autoDisabled, _ := serverData["auto_disabled"].(bool)
 
 	// Find the correct status menu
+	// Priority order matches UpdateStatusBasedMenus:
+	// 1. Quarantined
+	// 2. Auto-Disabled
+	// 3. Disabled
+	// 4. Sleeping
+	// 5. Connected
+	// 6. Disconnected
 	var targetMenu map[string]*systray.MenuItem
 	var parentMenu *systray.MenuItem
 	var statusName string
 
-	if quarantined {
+	if quarantined || startupMode == "quarantined" {
 		targetMenu = m.quarantineMenuItems
 		parentMenu = m.quarantineMenu
 		statusName = "quarantined"
-	} else if !enabled {
+	} else if autoDisabled || startupMode == "auto_disabled" {
+		targetMenu = m.autoDisabledMenuItems
+		parentMenu = m.autoDisabledServersMenu
+		statusName = "auto_disabled"
+	} else if !enabled || startupMode == "disabled" {
 		targetMenu = m.disabledMenuItems
 		parentMenu = m.disabledServersMenu
 		statusName = "disabled"
+	} else if sleeping || (startupMode == "lazy_loading" && !connected) {
+		targetMenu = m.sleepingMenuItems
+		parentMenu = m.sleepingServersMenu
+		statusName = "sleeping"
 	} else if connected {
 		targetMenu = m.connectedMenuItems
 		parentMenu = m.connectedServersMenu
 		statusName = "connected"
-	} else if sleeping {
-		targetMenu = m.sleepingMenuItems
-		parentMenu = m.sleepingServersMenu
-		statusName = "sleeping"
 	} else {
 		targetMenu = m.disconnectedMenuItems
 		parentMenu = m.disconnectedServersMenu
@@ -629,6 +642,7 @@ func (m *MenuManager) removeServerFromWrongMenus(serverName, correctStatus strin
 		"disconnected":  m.disconnectedMenuItems,
 		"sleeping":      m.sleepingMenuItems,
 		"disabled":      m.disabledMenuItems,
+		"auto_disabled": m.autoDisabledMenuItems,
 		"quarantined":   m.quarantineMenuItems,
 	}
 
@@ -826,10 +840,10 @@ func (m *MenuManager) handleEnableAllByStatus(serverNames []string, status strin
 		zap.String("status", status),
 		zap.Int("server_count", len(serverNames)))
 
-	// Enable each server
+	// Force-enable each server (not toggle, to avoid race conditions)
 	for _, serverName := range serverNames {
 		if m.onServerAction != nil {
-			go m.onServerAction(serverName, "toggle_enable")
+			go m.onServerAction(serverName, "force_enable")
 		}
 	}
 }
@@ -849,7 +863,12 @@ func (m *MenuManager) createServerMenuItem(parentMenu *systray.MenuItem, server 
 	menuItem := parentMenu.AddSubMenuItem(status, "")
 
 	// Special handling for quarantined servers - they should be clickable to unquarantine
-	quarantined, _ := server["quarantined"].(bool)
+	// Use startup_mode first, fallback to quarantined boolean for backwards compatibility
+	startupMode, _ := server["startup_mode"].(string)
+	quarantined := startupMode == "quarantined"
+	if !quarantined {
+		quarantined, _ = server["quarantined"].(bool)
+	}
 	if quarantined {
 		// Set up direct click handler for unquarantining
 		go func(name string, item *systray.MenuItem) {
@@ -929,13 +948,26 @@ func (m *MenuManager) updateLegacyUpstreamMenu(servers []map[string]interface{})
 	quarantinedServers := 0
 
 	for _, server := range servers {
-		enabled, _ := server["enabled"].(bool)
+		// Use startup_mode first, fallback to boolean fields for backwards compatibility
+		startupMode, _ := server["startup_mode"].(string)
 		connected, _ := server["connected"].(bool)
-		quarantined, _ := server["quarantined"].(bool)
 
-		if quarantined {
+		// Determine status from startup_mode with fallbacks
+		var isQuarantined, isDisabled, isEnabled bool
+		if startupMode != "" {
+			isQuarantined = startupMode == "quarantined"
+			isDisabled = startupMode == "disabled" || startupMode == "auto_disabled"
+			isEnabled = startupMode == "active" || startupMode == "lazy_loading"
+		} else {
+			// Fallback for old configs
+			isQuarantined, _ = server["quarantined"].(bool)
+			isEnabled, _ = server["enabled"].(bool)
+			isDisabled = !isEnabled && !isQuarantined
+		}
+
+		if isQuarantined {
 			quarantinedServers++
-		} else if !enabled {
+		} else if isDisabled {
 			disabledServers++
 		} else if connected {
 			connectedServers++
@@ -963,13 +995,24 @@ func (m *MenuManager) updateLegacyUpstreamMenu(servers []map[string]interface{})
 	var connected, disconnected, disabled, quarantined []string
 	for _, name := range currentServerNames {
 		server := currentServerMap[name]
-		enabled, _ := server["enabled"].(bool)
+		// Use startup_mode first, fallback to boolean fields for backwards compatibility
+		startupMode, _ := server["startup_mode"].(string)
 		serverConnected, _ := server["connected"].(bool)
-		serverQuarantined, _ := server["quarantined"].(bool)
 
-		if serverQuarantined {
+		var isQuarantined, isDisabled, isEnabled bool
+		if startupMode != "" {
+			isQuarantined = startupMode == "quarantined"
+			isDisabled = startupMode == "disabled" || startupMode == "auto_disabled"
+			isEnabled = startupMode == "active" || startupMode == "lazy_loading"
+		} else {
+			isQuarantined, _ = server["quarantined"].(bool)
+			isEnabled, _ = server["enabled"].(bool)
+			isDisabled = !isEnabled && !isQuarantined
+		}
+
+		if isQuarantined {
 			quarantined = append(quarantined, name)
-		} else if !enabled {
+		} else if isDisabled {
 			disabled = append(disabled, name)
 		} else if serverConnected {
 			connected = append(connected, name)
@@ -1107,11 +1150,11 @@ func (m *MenuManager) calculateMenuStateHash(servers []map[string]interface{}) s
 	// Build state string with server status and key properties
 	for _, name := range serverNames {
 		server := serverMap[name]
-		enabled, _ := server["enabled"].(bool)
+		// Use startup_mode for consistent hashing
+		startupMode, _ := server["startup_mode"].(string)
 		connected, _ := server["connected"].(bool)
-		quarantined, _ := server["quarantined"].(bool)
-		
-		stateBuilder.WriteString(fmt.Sprintf("%s:%t:%t:%t;", name, enabled, connected, quarantined))
+
+		stateBuilder.WriteString(fmt.Sprintf("%s:%s:%t;", name, startupMode, connected))
 	}
 	
 	// Calculate MD5 hash
@@ -1304,13 +1347,6 @@ func (m *MenuManager) findGroupForServer(serverName string, server map[string]in
 			for _, g := range *m.serverGroups { if g.ID == gid { m.logger.Debug("Group match via group_id (float64)", zap.String("server", serverName), zap.Int("group_id", gid), zap.String("group", g.Name)); return g } }
 		}
 	}
-	// Then group_name
-	// if gname, ok := server["group_name"].(string); ok && gname != "" {
-	// 	ln := strings.ToLower(strings.TrimSpace(gname))
-	// 	for name, g := range *m.serverGroups {
-	// 		if strings.ToLower(strings.TrimSpace(name)) == ln { m.logger.Debug("Group match via group_name", zap.String("server", serverName), zap.String("group_name", gname), zap.String("group", g.Name)); return g }
-	// 	}
-	// }
 	// Fallback: scan assignments
 	lnServer := strings.ToLower(strings.TrimSpace(serverName))
 	for _, g := range *m.serverGroups {
@@ -1731,16 +1767,6 @@ func (m *SynchronizationManager) syncLoop() {
 
 // performSync performs the actual synchronization
 func (m *SynchronizationManager) performSync() error {
-	// Check if the state manager's server is available and running
-	// If not, skip the sync to avoid database errors
-	//
-	// FIXME: remove this if no issue with DB connection
-	//
-	// if m.stateManager.server != nil && !m.stateManager.server.IsRunning() {
-	// 	m.logger.Debug("Server is stopped, skipping synchronization")
-	// 	return nil
-	// }
-
 	// Get current state with error handling for database issues
 	allServers, err := m.stateManager.GetAllServers()
 	if err != nil {

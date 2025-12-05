@@ -2,6 +2,7 @@ package managed
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +20,7 @@ func TestNewStateMachine(t *testing.T) {
 
 	assert.NotNil(t, sm)
 	assert.Equal(t, "test-server", sm.serverName)
-	assert.Equal(t, 3, sm.autoDisableThreshold, "default threshold should be 3")
+	assert.Equal(t, types.DefaultAutoDisableThreshold, sm.autoDisableThreshold, "default threshold should match types.DefaultAutoDisableThreshold")
 }
 
 func TestStateMachine_SetAutoDisableThreshold(t *testing.T) {
@@ -320,7 +321,8 @@ func TestStateMachine_EventBusIntegration(t *testing.T) {
 	err := sm.TransitionTo(types.StateDisabledConfig)
 	require.NoError(t, err)
 
-	// Verify event was published
+	// CRIT-003: Event is now published asynchronously, so we need a timeout
+	// instead of default case to allow the goroutine to publish the event
 	select {
 	case event := <-eventChan:
 		assert.Equal(t, events.ServerStateChanged, event.Type)
@@ -329,7 +331,7 @@ func TestStateMachine_EventBusIntegration(t *testing.T) {
 		assert.Equal(t, "test-server", data["server_name"])
 		assert.Equal(t, string(types.StateActive), data["old_state"])
 		assert.Equal(t, string(types.StateDisabledConfig), data["new_state"])
-	default:
-		t.Fatal("expected ServerStateChanged event")
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected ServerStateChanged event within timeout")
 	}
 }

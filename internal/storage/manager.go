@@ -125,6 +125,42 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		return nil, err
 	}
 
+	// Determine startup mode with config file priority
+	// PRIORITY: Config file has priority over database, EXCEPT for auto_disabled state
+	startupMode := record.ServerState
+	dbServerState := record.ServerState
+
+	if m.configLoader != nil {
+		if cfg := m.configLoader.GetConfig(); cfg != nil {
+			for _, s := range cfg.Servers {
+				if s.Name == name {
+					configStartupMode := s.StartupMode
+					if configStartupMode == "" {
+						configStartupMode = "active" // Default if not specified in config
+					}
+
+					// Special case: If database has auto_disabled, keep it (runtime protection)
+					// UNLESS config explicitly sets auto_disabled (user confirmed)
+					if dbServerState == "auto_disabled" && configStartupMode != "auto_disabled" {
+						// Keep auto_disabled from database
+						m.logger.Debug("GetUpstreamServer: keeping auto_disabled from database",
+							zap.String("server", name),
+							zap.String("config_startup_mode", configStartupMode))
+					} else {
+						// Config file takes priority
+						startupMode = configStartupMode
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Default to "active" if still empty
+	if startupMode == "" {
+		startupMode = "active"
+	}
+
 	return &config.ServerConfig{
 		Name:                     record.Name,
 		Description:              record.Description,
@@ -147,7 +183,7 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		ToolCount:                record.ToolCount,
 		HealthCheck:              record.HealthCheck,
 		AutoDisableThreshold:     record.AutoDisableThreshold,
-		StartupMode:              record.ServerState,       // Map storage.ServerState → config.StartupMode
+		StartupMode:              startupMode,             // Use config-prioritized startup mode
 		AutoDisableReason:        record.AutoDisableReason, // Include auto-disable reason
 	}, nil
 }
@@ -165,42 +201,51 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 	var servers []*config.ServerConfig
 	for _, record := range records {
 		// Map database server_state to config startup_mode
+		// PRIORITY: Config file has priority over database, EXCEPT for auto_disabled state
+		// which is a runtime state that should persist across restarts
 		startupMode := record.ServerState
+		dbServerState := record.ServerState
 
 		m.logger.Debug("ListUpstreamServers processing record",
 			zap.String("server", record.Name),
 			zap.String("db_server_state", record.ServerState),
 			zap.String("initial_startup_mode", startupMode))
 
-		// IMPORTANT: Fallback to config if database doesn't have server_state populated yet
-		// This handles the migration case where existing servers in database don't have server_state set
-		if startupMode == "" && m.configLoader != nil {
-			m.logger.Debug("Attempting config fallback",
-				zap.String("server", record.Name),
-				zap.Bool("has_config_loader", m.configLoader != nil))
-
+		// CONFIG FILE HAS PRIORITY: Always check config file for startup_mode
+		// The config file is the source of truth for user-defined states (active, disabled, quarantined, lazy_loading)
+		// Only auto_disabled from database should override config, as it's a runtime protection mechanism
+		if m.configLoader != nil {
 			if cfg := m.configLoader.GetConfig(); cfg != nil {
-				m.logger.Debug("Config loaded",
-					zap.String("server", record.Name),
-					zap.Int("config_servers_count", len(cfg.Servers)))
-
 				for _, s := range cfg.Servers {
 					if s.Name == record.Name {
-						startupMode = s.StartupMode
-						m.logger.Debug("Using startup_mode from config as fallback",
-							zap.String("server", record.Name),
-							zap.String("startup_mode", startupMode))
+						configStartupMode := s.StartupMode
+						if configStartupMode == "" {
+							configStartupMode = "active" // Default if not specified in config
+						}
+
+						// Special case: If database has auto_disabled, keep it (runtime protection)
+						// UNLESS config explicitly sets auto_disabled (user confirmed)
+						if dbServerState == "auto_disabled" && configStartupMode != "auto_disabled" {
+							m.logger.Info("Server is auto_disabled in database - keeping runtime state",
+								zap.String("server", record.Name),
+								zap.String("db_server_state", dbServerState),
+								zap.String("config_startup_mode", configStartupMode),
+								zap.String("result", "keeping auto_disabled"))
+							// Keep auto_disabled from database
+						} else {
+							// Config file takes priority for all other cases
+							if startupMode != configStartupMode {
+								m.logger.Info("Config file takes priority over database",
+									zap.String("server", record.Name),
+									zap.String("db_server_state", dbServerState),
+									zap.String("config_startup_mode", configStartupMode),
+									zap.String("result", configStartupMode))
+							}
+							startupMode = configStartupMode
+						}
 						break
 					}
 				}
-
-				if startupMode == "" {
-					m.logger.Warn("Config fallback failed - server not found in config",
-						zap.String("server", record.Name))
-				}
-			} else {
-				m.logger.Warn("Config fallback failed - config is nil",
-					zap.String("server", record.Name))
 			}
 		}
 
@@ -320,10 +365,11 @@ func (m *Manager) ListQuarantinedTools(serverName string) ([]map[string]interfac
 		return nil, fmt.Errorf("server '%s' is not quarantined", serverName)
 	}
 
-	// Return placeholder for now - actual implementation would need to connect to server
-	// and retrieve tools with full descriptions for security analysis
-	// TODO: This should connect to the upstream server and return actual tool descriptions
-	// for security analysis, but currently we only return placeholder information
+	// NOTE: This returns placeholder data. Actual implementation would need to:
+	// 1. Connect to the quarantined upstream server via UpstreamManager
+	// 2. Retrieve tool descriptions with full schemas for LLM security analysis
+	// 3. Include input schemas and security analysis prompts
+	// Feature Backlog: Implement GetQuarantinedServerTools with actual server connection
 	tools := []map[string]interface{}{
 		{
 			"message":        fmt.Sprintf("Server '%s' is quarantined. The actual tool descriptions should be retrieved from the upstream manager for security analysis.", serverName),
@@ -347,7 +393,7 @@ func (m *Manager) DeleteUpstreamServer(name string) error {
 }
 
 // EnableUpstreamServer enables/disables an upstream server using server_state
-// When enabling, sets server_state to "active", when disabling sets to "disabled"
+// When enabling, sets server_state to "active", when disabling sets to "auto_disabled"
 func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -365,8 +411,8 @@ func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 		record.ServerState = "active"
 		record.AutoDisableReason = "" // Clear auto-disable reason when enabling
 	} else {
-		record.ServerState = "disabled"
-		record.AutoDisableReason = "" // Clear auto-disable reason when disabling
+		record.ServerState = "auto_disabled"
+		// Keep auto-disable reason when disabling (it may have been set by auto-disable logic)
 	}
 	record.Updated = time.Now()
 
@@ -384,9 +430,8 @@ func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 						cfg.Servers[i].StartupMode = "active"
 						cfg.Servers[i].AutoDisableReason = "" // Clear auto-disable reason when enabling
 					} else {
-						//cfg.Servers[i].StartupMode = "disabled"
-						cfg.Servers[i].StartupMode = "quarantined"
-						cfg.Servers[i].AutoDisableReason = "" // Clear auto-disable reason when disabling
+						cfg.Servers[i].StartupMode = "auto_disabled"
+						// Keep auto-disable reason when disabling (it may have been set by auto-disable logic)
 					}
 					break
 				}

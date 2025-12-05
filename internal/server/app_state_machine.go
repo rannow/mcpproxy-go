@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/events"
 	"mcpproxy-go/internal/upstream"
 	"mcpproxy-go/internal/upstream/types"
@@ -74,7 +75,7 @@ func NewAppStateMachine(
 		eventBus:        eventBus,
 		upstreamManager: upstreamManager,
 		currentState:    AppStateStarting,
-		stableTimeout:   30 * time.Second, // Default 30 second timeout
+		stableTimeout:   config.StableStateTimeout, // Default 30 second timeout
 	}
 }
 
@@ -300,7 +301,7 @@ func (asm *AppStateMachine) StartServers() error {
 
 	// Background task to check state after delay
 	go func() {
-		time.Sleep(2 * time.Second)
+		time.Sleep(config.StateTransitionDelay)
 		if err := asm.UpdateState(); err != nil {
 			asm.logger.Error("Failed to update app state after startup", zap.Error(err))
 		}

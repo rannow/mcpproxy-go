@@ -189,7 +189,7 @@ type ServerConfig struct {
 	OAuth         *OAuthConfig      `json:"oauth,omitempty" mapstructure:"oauth"`            // OAuth configuration
 	RepositoryURL string            `json:"repository_url,omitempty" mapstructure:"repository_url"` // GitHub/Repository URL for the MCP server
 
-	// NEW: Unified startup mode (replaces Enabled, Quarantined, StartOnBoot, AutoDisabled)
+	// Unified startup mode - determines server behavior at startup
 	// Values: "active", "disabled", "quarantined", "auto_disabled", "lazy_loading"
 	StartupMode   string            `json:"startup_mode,omitempty" mapstructure:"startup_mode"`
 
@@ -625,8 +625,8 @@ func DefaultConfig() *Config {
 			Timeout:    Duration(0),
 		},
 
-		// Default concurrent connections: 20 servers at once
-		MaxConcurrentConnections: 20,
+		// Default concurrent connections: 10 servers at once (reduced to avoid resource contention)
+		MaxConcurrentConnections: 10,
 
 		// Default LLM configuration (tries environment variables as fallback)
 		LLM: &LLMConfig{
@@ -665,7 +665,7 @@ func (c *Config) Validate() error {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
 	}
 	if c.MaxConcurrentConnections <= 0 {
-		c.MaxConcurrentConnections = 20 // Default to 20 concurrent connections
+		c.MaxConcurrentConnections = 10 // Default to 10 concurrent connections (reduced to avoid resource contention)
 	}
 
 	// Ensure Environment config is not nil
@@ -804,6 +804,23 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("server %s: %w", server.Name, err)
 			}
 		}
+	}
+
+	return nil
+}
+
+// ValidateStartupMode validates that a startup_mode value is valid
+func ValidateStartupMode(mode string) error {
+	validModes := map[string]bool{
+		"active":        true,
+		"disabled":      true,
+		"quarantined":   true,
+		"auto_disabled": true,
+		"lazy_loading":  true,
+	}
+
+	if !validModes[mode] {
+		return fmt.Errorf("invalid startup_mode: %s (must be one of: active, disabled, quarantined, auto_disabled, lazy_loading)", mode)
 	}
 
 	return nil

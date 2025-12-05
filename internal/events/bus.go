@@ -3,6 +3,8 @@ package events
 import (
 	"sync"
 	"time"
+
+	"mcpproxy-go/internal/config"
 )
 
 // EventType represents the type of event
@@ -14,12 +16,20 @@ const (
 	ServerConfigChanged EventType = "server_config_changed"
 	ServerAutoDisabled  EventType = "server_auto_disabled"
 	ServerGroupUpdated  EventType = "server_group_updated"
-	EventStateChange    EventType = "state_change" // Legacy compatibility
 
 	// Application state events
-	AppStateChanged      EventType = "app_state_changed"
-	EventAppStateChange  EventType = "app_state_change" // Alias for consistency
-	EventConfigChange    EventType = "config_change"
+	AppStateChanged EventType = "app_state_changed"
+
+	// HIGH-006: Legacy event type names - kept for backward compatibility
+	// These are actively used throughout the codebase and should be migrated
+	// to the canonical names above in a future refactoring phase.
+	// Canonical mappings:
+	//   EventStateChange    → ServerStateChanged (for server state changes)
+	//   EventAppStateChange → AppStateChanged (for app state changes)
+	//   EventConfigChange   → ServerConfigChanged (for config changes)
+	EventStateChange    EventType = "state_change"     // Legacy: use ServerStateChanged for new code
+	EventAppStateChange EventType = "app_state_change" // Legacy: use AppStateChanged for new code
+	EventConfigChange   EventType = "config_change"    // Legacy: use ServerConfigChanged for new code
 
 	// Tool events
 	ToolsUpdated EventType = "tools_updated"
@@ -98,7 +108,7 @@ func (b *Bus) Subscribe(eventType EventType) <-chan Event {
 	}
 
 	// Create buffered channel to prevent blocking
-	ch := make(chan Event, 100)
+	ch := make(chan Event, config.EventChannelBufferSize)
 	b.subscribers[eventType] = append(b.subscribers[eventType], ch)
 	return ch
 }
@@ -115,7 +125,7 @@ func (b *Bus) SubscribeAll() <-chan Event {
 	}
 
 	// Create a larger buffer for all events
-	ch := make(chan Event, 500)
+	ch := make(chan Event, config.EventChannelBufferSizeAll)
 
 	// Subscribe to all known event types
 	for eventType := range b.subscribers {

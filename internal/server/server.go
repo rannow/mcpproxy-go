@@ -20,6 +20,7 @@ import (
 	"mcpproxy-go/internal/events"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/shutdown"
 	"mcpproxy-go/internal/startup"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
@@ -47,9 +48,29 @@ const (
 	AppStateStopped AppState = "stopped"
 )
 
-// String returns the string representation of AppState
+// String returns the string representation of AppState (technical/API format)
+// MED-004: Consistent with API serialization format (lowercase)
 func (a AppState) String() string {
 	return string(a)
+}
+
+// DisplayString returns a human-readable representation of the application state
+// MED-004: For UI display purposes (Title Case)
+func (a AppState) DisplayString() string {
+	switch a {
+	case AppStateStarting:
+		return "Starting"
+	case AppStateRunning:
+		return "Running"
+	case AppStateDegraded:
+		return "Degraded"
+	case AppStateStopping:
+		return "Stopping"
+	case AppStateStopped:
+		return "Stopped"
+	default:
+		return "Unknown"
+	}
 }
 
 // Group represents a server group
@@ -103,6 +124,12 @@ type Server struct {
 
 	// WebSocket manager for real-time updates
 	wsManager *WebSocketManager
+
+	// Shutdown coordinator (MED-003)
+	shutdownCoordinator *shutdown.Coordinator
+
+	// Restart loop detection (MED-005)
+	restartTracker *upstream.RestartTracker
 
 	// Server control
 	httpServer *http.Server
@@ -216,21 +243,29 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize event bus for state change notifications
 	eventBus := events.NewEventBus()
 
+	// MED-003: Initialize shutdown coordinator for coordinated shutdown
+	shutdownCoordinator := shutdown.NewCoordinator(logger)
+
+	// MED-005: Initialize restart tracker for loop detection
+	restartTracker := upstream.NewRestartTracker(logger, upstream.DefaultRestartTrackerConfig())
+
 	server := &Server{
-		config:          cfg,
-		configPath:      configPath,
-		logger:          logger,
-		storageManager:  storageManager,
-		indexManager:    indexManager,
-		upstreamManager: upstreamManager,
-		cacheManager:    cacheManager,
-		truncator:       truncator,
-		eventBus:        eventBus,
-		appState:        AppStateStarting, // Initialize app state
-		appCtx:          ctx,
-		appCancel:       cancel,
-		statusCh:        make(chan interface{}, 10),       // Buffered channel for status updates (can be Status or map)
-		toolCountCache:  make(map[string]*toolCountCache), // Initialize tool count cache
+		config:              cfg,
+		configPath:          configPath,
+		logger:              logger,
+		storageManager:      storageManager,
+		indexManager:        indexManager,
+		upstreamManager:     upstreamManager,
+		cacheManager:        cacheManager,
+		truncator:           truncator,
+		eventBus:            eventBus,
+		shutdownCoordinator: shutdownCoordinator,
+		restartTracker:      restartTracker,
+		appState:            AppStateStarting, // Initialize app state
+		appCtx:              ctx,
+		appCancel:           cancel,
+		statusCh:            make(chan interface{}, 10),       // Buffered channel for status updates (can be Status or map)
+		toolCountCache:      make(map[string]*toolCountCache), // Initialize tool count cache
 		status: Status{
 			Phase:       "Initializing",
 			Message:     "Server is initializing...",
@@ -301,10 +336,140 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Setup event bridge to connect StateManager to EventBus
 	server.setupEventBridge()
 
+	// MED-003: Register shutdown handlers with coordinator
+	server.registerShutdownHandlers()
+
 	// Start background initialization immediately
 	go server.backgroundInitialization()
 
 	return server, nil
+}
+
+// registerShutdownHandlers registers all shutdown handlers with the coordinator
+// MED-003: Centralized shutdown coordination
+func (s *Server) registerShutdownHandlers() {
+	// Phase 1: Stop accepting new connections (HTTP server)
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "http-server",
+		Phase:    shutdown.PhaseConnections,
+		Priority: 100,
+		Timeout:  30 * time.Second,
+		Fn: func(ctx context.Context) error {
+			s.mu.Lock()
+			httpServer := s.httpServer
+			s.mu.Unlock()
+
+			if httpServer != nil {
+				s.logger.Info("Gracefully shutting down HTTP server...")
+				if err := httpServer.Shutdown(ctx); err != nil {
+					s.logger.Warn("HTTP server forced shutdown", zap.Error(err))
+					httpServer.Close()
+					return err
+				}
+				s.logger.Info("HTTP server shutdown completed gracefully")
+			}
+			return nil
+		},
+	})
+
+	// Phase 1: Stop startup script
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "startup-script",
+		Phase:    shutdown.PhaseConnections,
+		Priority: 90,
+		Timeout:  5 * time.Second,
+		Fn: func(ctx context.Context) error {
+			if s.startupManager != nil {
+				s.logger.Info("Stopping startup script")
+				return s.startupManager.Stop()
+			}
+			return nil
+		},
+	})
+
+	// Phase 2: Stop WebSocket manager
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "websocket-manager",
+		Phase:    shutdown.PhaseWebSockets,
+		Priority: 100,
+		Timeout:  5 * time.Second,
+		Fn: func(ctx context.Context) error {
+			if s.wsManager != nil {
+				s.logger.Info("Stopping WebSocket manager")
+				s.wsManager.Stop()
+			}
+			return nil
+		},
+	})
+
+	// Phase 3: Disconnect upstream servers
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "upstream-servers",
+		Phase:    shutdown.PhaseUpstreams,
+		Priority: 100,
+		Timeout:  config.ServerDisconnectTimeout,
+		Fn: func(ctx context.Context) error {
+			s.logger.Info("Disconnecting upstream servers")
+			return s.upstreamManager.DisconnectAll()
+		},
+	})
+
+	// Phase 4: Cancel app context (stops background operations)
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "app-context",
+		Phase:    shutdown.PhaseProcesses,
+		Priority: 100,
+		Timeout:  2 * time.Second,
+		Fn: func(ctx context.Context) error {
+			if s.appCancel != nil {
+				s.logger.Info("Cancelling app context to stop background operations")
+				s.appCancel()
+			}
+			return nil
+		},
+	})
+
+	// Phase 5: Close cache manager
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "cache-manager",
+		Phase:    shutdown.PhaseStorage,
+		Priority: 90,
+		Timeout:  5 * time.Second,
+		Fn: func(ctx context.Context) error {
+			if s.cacheManager != nil {
+				s.logger.Info("Closing cache manager")
+				s.cacheManager.Close()
+			}
+			return nil
+		},
+	})
+
+	// Phase 5: Close index manager
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "index-manager",
+		Phase:    shutdown.PhaseStorage,
+		Priority: 80,
+		Timeout:  5 * time.Second,
+		Fn: func(ctx context.Context) error {
+			s.logger.Info("Closing index manager")
+			return s.indexManager.Close()
+		},
+	})
+
+	// Phase 5: Close storage manager (last, as other components may depend on it)
+	s.shutdownCoordinator.Register(&shutdown.Handler{
+		Name:     "storage-manager",
+		Phase:    shutdown.PhaseStorage,
+		Priority: 10,
+		Timeout:  5 * time.Second,
+		Fn: func(ctx context.Context) error {
+			s.logger.Info("Closing storage manager")
+			return s.storageManager.Close()
+		},
+	})
+
+	s.logger.Debug("Registered shutdown handlers",
+		zap.Int("count", s.shutdownCoordinator.GetHandlerCount()))
 }
 
 // GetStatus returns the current server status
@@ -733,7 +898,7 @@ func (s *Server) loadConfiguredServers() error {
 	s.mu.RUnlock()
 
 	if maxConcurrent <= 0 {
-		maxConcurrent = 20 // Default to 20 concurrent connections
+		maxConcurrent = 10 // Default to 10 concurrent connections (reduced to avoid resource contention)
 	}
 
 	s.logger.Info("Starting server sync",
@@ -1012,7 +1177,8 @@ func (s *Server) discoverAndIndexTools(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown gracefully shuts down the server
+// Shutdown gracefully shuts down the server using the coordinated shutdown system
+// MED-003: Uses ShutdownCoordinator for ordered, timeout-managed shutdown
 func (s *Server) Shutdown() error {
 	s.mu.Lock()
 	if s.shutdown {
@@ -1021,66 +1187,50 @@ func (s *Server) Shutdown() error {
 		return nil
 	}
 	s.shutdown = true
-	httpServer := s.httpServer
 	s.mu.Unlock()
 
-	s.logger.Info("Shutting down MCP proxy server...")
+	s.logger.Info("Shutting down MCP proxy server using coordinated shutdown...")
 
-	// First stop startup script and its subprocesses
-	if s.startupManager != nil {
-		s.logger.Info("Stopping startup script")
-		if err := s.startupManager.Stop(); err != nil {
-			s.logger.Warn("Failed to stop startup script", zap.Error(err))
-		}
+	// Use shutdown coordinator for ordered shutdown with timeouts
+	ctx := context.Background()
+	err := s.shutdownCoordinator.Shutdown(ctx)
+
+	if err != nil {
+		s.logger.Warn("Shutdown completed with errors", zap.Error(err))
+	} else {
+		s.logger.Info("MCP proxy server shutdown complete")
 	}
 
-	// Gracefully shutdown HTTP server first to stop accepting new connections
-	if httpServer != nil {
-		s.logger.Info("Gracefully shutting down HTTP server...")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	return err
+}
 
-		if err := httpServer.Shutdown(ctx); err != nil {
-			s.logger.Warn("HTTP server forced shutdown due to timeout", zap.Error(err))
-			// Force close if graceful shutdown times out
-			httpServer.Close()
-		} else {
-			s.logger.Info("HTTP server shutdown completed gracefully")
-		}
+// ShutdownWithContext gracefully shuts down the server with a custom context
+// MED-003: Allows external timeout/cancellation control
+func (s *Server) ShutdownWithContext(ctx context.Context) error {
+	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		s.logger.Info("Server already shutdown, skipping")
+		return nil
 	}
+	s.shutdown = true
+	s.mu.Unlock()
 
-	// Stop WebSocket manager and close all connections
-	if s.wsManager != nil {
-		s.logger.Info("Stopping WebSocket manager")
-		s.wsManager.Stop()
-	}
+	s.logger.Info("Shutting down MCP proxy server using coordinated shutdown...")
 
-	// Cancel the server context to stop all background operations
-	if s.appCancel != nil {
-		s.logger.Info("Cancelling server context to stop background operations")
-		s.appCancel()
-	}
+	return s.shutdownCoordinator.Shutdown(ctx)
+}
 
-	// Disconnect upstream servers
-	if err := s.upstreamManager.DisconnectAll(); err != nil {
-		s.logger.Error("Failed to disconnect upstream servers", zap.Error(err))
-	}
+// IsShuttingDown returns true if shutdown is in progress
+// MED-003: Exposes shutdown state from coordinator
+func (s *Server) IsShuttingDown() bool {
+	return s.shutdownCoordinator.IsShuttingDown()
+}
 
-	// Close managers
-	if s.cacheManager != nil {
-		s.cacheManager.Close()
-	}
-
-	if err := s.indexManager.Close(); err != nil {
-		s.logger.Error("Failed to close index manager", zap.Error(err))
-	}
-
-	if err := s.storageManager.Close(); err != nil {
-		s.logger.Error("Failed to close storage manager", zap.Error(err))
-	}
-
-	s.logger.Info("MCP proxy server shutdown complete")
-	return nil
+// GetShutdownCoordinator returns the shutdown coordinator for external handler registration
+// MED-003: Allows external components to register shutdown handlers
+func (s *Server) GetShutdownCoordinator() *shutdown.Coordinator {
+	return s.shutdownCoordinator
 }
 
 // IsRunning returns whether the server is currently running
@@ -1152,7 +1302,7 @@ func (s *Server) updateServerConfigEnabled(serverName string, enabled bool) erro
 	if enabled {
 		serverConfig.StartupMode = "active"
 	} else {
-		serverConfig.StartupMode = "disabled"
+		serverConfig.StartupMode = "auto_disabled"
 	}
 	serverConfig.Updated = time.Now()
 
@@ -1245,6 +1395,23 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		var autoDisabled bool
 		var autoDisableReason string
 
+		// Set default connection state based on startup_mode
+		// This ensures Tray UI categorizes servers correctly even before client connection
+		switch server.StartupMode {
+		case "active", "lazy_loading":
+			connectionState = "Disconnected" // Default for active servers not yet connected
+		case "disabled":
+			connectionState = "Disabled"
+		case "quarantined":
+			connectionState = "Quarantined"
+		case "auto_disabled":
+			connectionState = "AutoDisabled"
+			autoDisabled = true
+			autoDisableReason = server.AutoDisableReason
+		default:
+			connectionState = "Disconnected"
+		}
+
 		if s.upstreamManager != nil {
 			if client, exists := s.upstreamManager.GetClient(server.Name); exists {
 				connectionStatus := client.GetConnectionStatus()
@@ -1254,10 +1421,9 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				if c, ok := connectionStatus["connecting"].(bool); ok {
 					connecting = c
 				}
-				if state, ok := connectionStatus["state"].(string); ok {
+				// Only override default if client has actual state
+				if state, ok := connectionStatus["state"].(string); ok && state != "" {
 					connectionState = state
-					// Note: "Sleeping" state removed from ConnectionState enum
-					// Lazy loading servers now use server_state="stopped" in database instead
 				}
 				if e, ok := connectionStatus["last_error"].(string); ok {
 					lastError = e
@@ -1461,16 +1627,38 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 }
 
 // RestartServer restarts an individual upstream server by disabling and re-enabling it
+// CRIT-002: Added state verification to ensure server is fully stopped before restart
+// MED-005: Added restart loop detection to prevent rapid restart cycles
 func (s *Server) RestartServer(serverName string) error {
 	s.logger.Info("Request to restart server", zap.String("server", serverName))
+
+	// MED-005: Check for restart loop before proceeding
+	if s.restartTracker != nil {
+		if !s.restartTracker.RecordRestart(serverName, "manual restart") {
+			recent, _, inCooldown, remaining := s.restartTracker.GetServerStats(serverName)
+			s.logger.Error("Restart loop detected - server restart blocked",
+				zap.String("server", serverName),
+				zap.Int("recent_restarts", recent),
+				zap.Bool("in_cooldown", inCooldown),
+				zap.Duration("cooldown_remaining", remaining))
+			return fmt.Errorf("restart loop detected for server '%s': too many restarts in short period (cooldown: %v remaining)", serverName, remaining)
+		}
+	}
 
 	// First disable the server
 	if err := s.EnableServer(serverName, false); err != nil {
 		return fmt.Errorf("failed to disable server during restart: %w", err)
 	}
 
-	// Give it a moment to fully disconnect
-	time.Sleep(500 * time.Millisecond)
+	// CRIT-002: Wait for server to actually disconnect instead of arbitrary sleep
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := s.waitForServerDisconnected(ctx, serverName); err != nil {
+		s.logger.Warn("Server did not disconnect cleanly, proceeding with restart anyway",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
 
 	// Re-enable the server
 	if err := s.EnableServer(serverName, true); err != nil {
@@ -1479,6 +1667,40 @@ func (s *Server) RestartServer(serverName string) error {
 
 	s.logger.Info("Successfully restarted server", zap.String("server", serverName))
 	return nil
+}
+
+// waitForServerDisconnected waits until the server is in Disconnected state or timeout
+// CRIT-002: New helper function for restart state verification
+func (s *Server) waitForServerDisconnected(ctx context.Context, serverName string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for server %s to disconnect", serverName)
+		case <-ticker.C:
+			client, exists := s.upstreamManager.GetClient(serverName)
+			if !exists {
+				// Server doesn't exist in manager, consider it disconnected
+				s.logger.Debug("Server not found in manager, considering disconnected",
+					zap.String("server", serverName))
+				return nil
+			}
+
+			state := client.GetState()
+			if state == types.StateDisconnected || state == types.StateError {
+				s.logger.Debug("Server reached disconnected state",
+					zap.String("server", serverName),
+					zap.String("state", state.String()))
+				return nil
+			}
+
+			s.logger.Debug("Waiting for server to disconnect",
+				zap.String("server", serverName),
+				zap.String("current_state", state.String()))
+		}
+	}
 }
 
 // QuarantineServer quarantines/unquarantines a server
@@ -2288,14 +2510,23 @@ func (s *Server) SaveConfiguration() error {
 			m["headers"] = sc.Headers
 			m["oauth"] = sc.OAuth
 			m["repository_url"] = sc.RepositoryURL
-			m["enabled"] = sc.StartupMode == "active"
-			m["quarantined"] = sc.StartupMode == "quarantined"
+			m["startup_mode"] = sc.StartupMode // Use startup_mode instead of deprecated boolean fields
 			m["created"] = sc.Created
 			m["updated"] = sc.Updated
 			m["isolation"] = sc.Isolation
-			m["auto_disabled"] = sc.StartupMode == "auto_disabled"
 			m["auto_disable_reason"] = sc.AutoDisableReason
+			m["health_check"] = sc.HealthCheck
+			m["ever_connected"] = sc.EverConnected
+			m["last_successful_connection"] = sc.LastSuccessfulConnection
+			m["tool_count"] = sc.ToolCount
+			m["auto_disable_threshold"] = sc.AutoDisableThreshold
 		}
+		// Remove deprecated fields that should not be written to config
+		delete(m, "enabled")
+		delete(m, "quarantined")
+		delete(m, "auto_disabled")
+		delete(m, "start_on_boot")
+		delete(m, "stopped")
 		// Compute final group fields using current values as base
 		prevID := 0
 		if v, ok := m["group_id"].(float64); ok {
@@ -2322,24 +2553,27 @@ func (s *Server) SaveConfiguration() error {
 			continue
 		}
 		m := map[string]interface{}{
-			"name":                sc.Name,
-			"description":         sc.Description,
-			"url":                 sc.URL,
-			"protocol":            sc.Protocol,
-			"command":             sc.Command,
-			"args":                sc.Args,
-			"working_dir":         sc.WorkingDir,
-			"env":                 sc.Env,
-			"headers":             sc.Headers,
-			"oauth":               sc.OAuth,
-			"repository_url":      sc.RepositoryURL,
-			"enabled":             sc.StartupMode == "active",
-			"quarantined":         sc.StartupMode == "quarantined",
-			"created":             sc.Created,
-			"updated":             sc.Updated,
-			"isolation":           sc.Isolation,
-			"auto_disabled":       sc.StartupMode == "auto_disabled",
-			"auto_disable_reason": sc.AutoDisableReason,
+			"name":                         sc.Name,
+			"description":                  sc.Description,
+			"url":                          sc.URL,
+			"protocol":                     sc.Protocol,
+			"command":                      sc.Command,
+			"args":                         sc.Args,
+			"working_dir":                  sc.WorkingDir,
+			"env":                          sc.Env,
+			"headers":                      sc.Headers,
+			"oauth":                        sc.OAuth,
+			"repository_url":               sc.RepositoryURL,
+			"startup_mode":                 sc.StartupMode, // Use startup_mode instead of deprecated boolean fields
+			"created":                      sc.Created,
+			"updated":                      sc.Updated,
+			"isolation":                    sc.Isolation,
+			"auto_disable_reason":          sc.AutoDisableReason,
+			"health_check":                 sc.HealthCheck,
+			"ever_connected":               sc.EverConnected,
+			"last_successful_connection":   sc.LastSuccessfulConnection,
+			"tool_count":                   sc.ToolCount,
+			"auto_disable_threshold":       sc.AutoDisableThreshold,
 		}
 		// Group fields for new server: compute from assignment (if any) else 0/""
 		finalID, _ := computeGroupFields(name, sc.GroupID, "")
@@ -3042,22 +3276,20 @@ func (s *Server) handleUpdateServerConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Update fields
-	if updateData.Enabled {
-		serverConfig.StartupMode = "active"
+	// Update fields - determine startup_mode based on enabled and quarantined status
+	// Priority: quarantined > auto_disabled > active
+	if updateData.Quarantined {
+		serverConfig.StartupMode = "quarantined"
+	} else if !updateData.Enabled {
+		serverConfig.StartupMode = "auto_disabled"
 	} else {
-		serverConfig.StartupMode = "disabled"
+		serverConfig.StartupMode = "active"
 	}
 	serverConfig.Protocol = updateData.Protocol
 	serverConfig.Command = updateData.Command
 	serverConfig.WorkingDir = updateData.WorkingDir
 	serverConfig.URL = updateData.URL
 	serverConfig.RepositoryURL = updateData.RepositoryURL
-	if updateData.Quarantined {
-		serverConfig.StartupMode = "quarantined"
-	} else {
-		serverConfig.StartupMode = "active"
-	}
 	serverConfig.Args = updateData.Args
 	serverConfig.Env = updateData.Env
 	serverConfig.Updated = time.Now()
