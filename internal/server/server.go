@@ -1594,6 +1594,23 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 		return fmt.Errorf("failed to update server '%s' in storage: %w", serverName, err)
 	}
 
+	// Update in-memory config to match storage
+	s.mu.Lock()
+	var serverConfig *config.ServerConfig
+	for i := range s.config.Servers {
+		if s.config.Servers[i].Name == serverName {
+			if enabled {
+				s.config.Servers[i].StartupMode = "active"
+				s.config.Servers[i].AutoDisableReason = ""
+			} else {
+				s.config.Servers[i].StartupMode = "disabled"
+			}
+			serverConfig = s.config.Servers[i]
+			break
+		}
+	}
+	s.mu.Unlock()
+
 	// Now that storage is updated, save the configuration to disk.
 	// This ensures the file reflects the authoritative state.
 	if err := s.SaveConfiguration(); err != nil {
@@ -1617,11 +1634,50 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 		zap.String("server", serverName),
 		zap.String("action", action))
 
-	// The file watcher in the tray will detect the change to the config file and
-	// trigger ReloadConfiguration(), which calls loadConfiguredServers().
-	// This completes the loop by updating the running state (upstreamManager) from the new config.
-	s.logger.Info("Successfully persisted server state change. Relying on file watcher to sync running state.",
-		zap.String("server", serverName))
+	// Directly trigger connection/disconnection instead of relying on file watcher
+	// This ensures the server state change takes effect immediately
+	if enabled && serverConfig != nil {
+		s.logger.Info("Triggering direct connection after enable",
+			zap.String("server", serverName))
+
+		// Clear any user-stopped flag on the client so it can reconnect
+		if client, exists := s.upstreamManager.GetClient(serverName); exists {
+			client.StateManager.SetUserStopped(false)
+		}
+
+		// Use AddServer which handles the connection attempt
+		go func() {
+			if err := s.upstreamManager.AddServer(serverName, serverConfig); err != nil {
+				s.logger.Warn("Failed to connect server after enable",
+					zap.String("server", serverName),
+					zap.Error(err))
+			} else {
+				s.logger.Info("Server connection triggered successfully after enable",
+					zap.String("server", serverName))
+			}
+		}()
+	} else if !enabled {
+		s.logger.Info("Triggering disconnect after disable",
+			zap.String("server", serverName))
+
+		// Disconnect the server
+		go func() {
+			if client, exists := s.upstreamManager.GetClient(serverName); exists {
+				if err := client.Disconnect(); err != nil {
+					s.logger.Warn("Failed to disconnect server after disable",
+						zap.String("server", serverName),
+						zap.Error(err))
+				} else {
+					s.logger.Info("Server disconnected successfully after disable",
+						zap.String("server", serverName))
+				}
+			}
+		}()
+	}
+
+	s.logger.Info("Successfully persisted server state change",
+		zap.String("server", serverName),
+		zap.Bool("enabled", enabled))
 
 	return nil
 }

@@ -6,6 +6,8 @@ import (
 	"context"
 	"testing"
 
+	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/events"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -146,6 +148,53 @@ func (m *MockServerInterface) TriggerOAuthLogin(serverName string) error {
 	return nil
 }
 
+func (m *MockServerInterface) StopUpstreamServer(serverName string) error {
+	_ = serverName
+	return nil
+}
+
+func (m *MockServerInterface) UnstopUpstreamServer(serverName string) error {
+	_ = serverName
+	return nil
+}
+
+func (m *MockServerInterface) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	_ = serverName
+	return []map[string]interface{}{}, nil
+}
+
+func (m *MockServerInterface) GetGitHubURL() string {
+	return "https://github.com/keatontaylor/mcpproxy"
+}
+
+func (m *MockServerInterface) GetLLMConfig() *config.LLMConfig {
+	return nil
+}
+
+func (m *MockServerInterface) StartStartupScript(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+func (m *MockServerInterface) StopStartupScript() error {
+	return nil
+}
+
+func (m *MockServerInterface) RestartStartupScript(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+func (m *MockServerInterface) GetStartupScriptStatus() map[string]interface{} {
+	return map[string]interface{}{
+		"running": false,
+	}
+}
+
+func (m *MockServerInterface) GetEventBus() *events.EventBus {
+	return nil
+}
+
 // Helper methods for testing
 func (m *MockServerInterface) AddServer(name, url string, enabled, quarantined bool) {
 	server := map[string]interface{}{
@@ -171,7 +220,7 @@ func TestQuarantineWorkflow(t *testing.T) {
 	mockServer.AddServer("test-server", "http://localhost:3001", true, false)
 
 	// Create tray app (we don't use it directly but it's good to test creation)
-	_ = New(mockServer, logger, "v1.0.0", func() {})
+	_ = New(mockServer, logger, "v1.0.0", "test", func() {})
 
 	// Test quarantine operation
 	err := mockServer.QuarantineServer("test-server", true)
@@ -280,7 +329,7 @@ func TestMenuRefreshLogic(t *testing.T) {
 	mockServer.AddServer("server2", "http://localhost:3002", true, true) // quarantined
 
 	// Create tray app
-	app := New(mockServer, logger, "v1.0.0", func() {})
+	app := New(mockServer, logger, "v1.0.0", "test", func() {})
 
 	// Since we can't test menu functionality without systray.Run, we focus on state logic
 	// The app should be properly initialized
@@ -311,7 +360,7 @@ func TestQuarantineSubmenuCreation(t *testing.T) {
 	mockServer := NewMockServer()
 
 	// Create tray app
-	app := New(mockServer, logger, "v1.0.0", func() {})
+	app := New(mockServer, logger, "v1.0.0", "test", func() {})
 
 	// Since we can't test menu functionality without systray.Run, we focus on state logic
 	// The app should be properly initialized
@@ -371,7 +420,7 @@ func TestManagerBasedMenuSystem(t *testing.T) {
 	mockServer.AddServer("server3", "http://localhost:3003", true, true)   // quarantined
 
 	// Create tray app and initialize managers
-	_ = New(mockServer, logger, "v1.0.0", func() {})
+	_ = New(mockServer, logger, "v1.0.0", "test", func() {})
 
 	// Test direct server operations since managers may not be available on all platforms
 	// This tests the underlying server interface that the tray depends on

@@ -1311,37 +1311,66 @@ func (m *Manager) startHealthCheckMonitor() {
 	}
 }
 
-// performHealthChecks checks the health of all servers with HealthCheck flag enabled
+// performHealthChecks checks the health of all servers and attempts reconnection for disconnected ones
+// Servers with HealthCheck=true get active health checks, all servers get reconnection attempts
 func (m *Manager) performHealthChecks() {
 	m.mu.RLock()
-	clients := make(map[string]*managed.Client)
+	allClients := make(map[string]*managed.Client)
 	for id, client := range m.clients {
-		// Only check servers with HealthCheck enabled
-		if client.Config.HealthCheck {
-			clients[id] = client
-		}
+		allClients[id] = client
 	}
 	m.mu.RUnlock()
 
-	if len(clients) == 0 {
+	if len(allClients) == 0 {
 		return
 	}
 
-	m.logger.Debug("Performing health checks", zap.Int("servers_with_health_check", len(clients)))
+	var healthCheckCount, disconnectedCount int
+	for _, client := range allClients {
+		if client.Config.HealthCheck {
+			healthCheckCount++
+		}
+		if !client.IsConnected() && !client.Config.IsDisabled() && !client.StateManager.IsAutoDisabled() {
+			disconnectedCount++
+		}
+	}
 
-	for id, client := range clients {
-		// Skip if disabled
+	m.logger.Debug("Performing health checks",
+		zap.Int("total_servers", len(allClients)),
+		zap.Int("servers_with_health_check", healthCheckCount),
+		zap.Int("disconnected_servers", disconnectedCount))
+
+	for id, client := range allClients {
+		// Skip if disabled or auto-disabled
 		if client.Config.IsDisabled() {
 			continue
 		}
+		if client.StateManager.IsAutoDisabled() {
+			continue
+		}
+		// Skip if user manually stopped
+		if client.StateManager.IsUserStopped() {
+			continue
+		}
 
-		// Check connection status
+		// Check connection status - reconnect ALL disconnected servers, not just HealthCheck ones
 		if !client.IsConnected() {
 			state := client.GetState()
+
+			// Check if we should retry based on backoff
+			if !client.ShouldRetry() {
+				m.logger.Debug("Health check: Skipping reconnection (backoff not elapsed)",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name),
+					zap.String("state", state.String()))
+				continue
+			}
+
 			m.logger.Info("Health check: Server not connected, attempting reconnection",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name),
-				zap.String("state", state.String()))
+				zap.String("state", state.String()),
+				zap.Bool("health_check_enabled", client.Config.HealthCheck))
 
 			// Attempt to reconnect
 			ctx, cancel := context.WithTimeout(context.Background(), config.DefaultConnectionTimeout)
@@ -1358,7 +1387,8 @@ func (m *Manager) performHealthChecks() {
 					zap.String("id", id),
 					zap.String("name", client.Config.Name))
 			}
-		} else {
+		} else if client.Config.HealthCheck {
+			// Only log healthy status for servers with explicit health check
 			m.logger.Debug("Health check: Server is healthy",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name))

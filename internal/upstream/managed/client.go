@@ -50,6 +50,11 @@ type Client struct {
 	// Auto-disable callback
 	onAutoDisable func(serverName string, reason string)
 	reconnectInProgress bool
+
+	// Intentional disconnect flag - prevents auto-reconnection when Disconnect() is called explicitly
+	// This distinguishes between user/manager-initiated disconnects vs unexpected process crashes
+	intentionalDisconnect bool
+	intentionalMu         sync.RWMutex
 }
 
 // NewClient creates a new managed client with state management
@@ -99,6 +104,12 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 func (mc *Client) Connect(ctx context.Context) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+
+	// Clear the intentional disconnect flag when Connect is called
+	// This allows future unexpected disconnects to trigger auto-reconnection
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = false
+	mc.intentionalMu.Unlock()
 
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
@@ -241,6 +252,12 @@ func (mc *Client) Disconnect() error {
 	defer mc.mu.Unlock()
 
 	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.Config.Name))
+
+	// Mark this as an intentional disconnect to prevent auto-reconnection
+	// This flag is checked in onStateChange() callback
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = true
+	mc.intentionalMu.Unlock()
 
 	// Stop background monitoring
 	mc.stopBackgroundMonitoring()
@@ -509,6 +526,57 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 		// Check and handle auto-disable based on failure threshold
 		// This ensures runtime failures trigger auto-disable after threshold is reached
 		mc.checkAndHandleAutoDisable()
+
+		// If not auto-disabled, attempt immediate reconnection instead of waiting for health check
+		// This reduces the delay between error detection and reconnection attempt
+		if !mc.StateManager.IsAutoDisabled() && mc.ShouldRetry() {
+			mc.logger.Info("Triggering immediate reconnection after error",
+				zap.String("server", mc.Config.Name),
+				zap.Int("retry_count", info.RetryCount))
+			go mc.tryReconnect()
+		}
+	}
+
+	// Handle disconnected state - trigger immediate reconnection
+	// This handles cases where servers transition Ready -> Disconnected (e.g., process exit)
+	// But ONLY for unexpected disconnects, not intentional ones via Disconnect()
+	mc.intentionalMu.RLock()
+	wasIntentional := mc.intentionalDisconnect
+	mc.intentionalMu.RUnlock()
+
+	mc.logger.Debug("Checking disconnect condition",
+		zap.String("server", mc.Config.Name),
+		zap.Bool("newState_is_disconnected", newState == types.StateDisconnected),
+		zap.Bool("oldState_is_ready", oldState == types.StateReady),
+		zap.Bool("was_intentional", wasIntentional),
+		zap.String("newState", newState.String()),
+		zap.String("oldState", oldState.String()))
+
+	if newState == types.StateDisconnected && oldState == types.StateReady {
+		if wasIntentional {
+			// This was an intentional disconnect (Disconnect() was called)
+			// Don't trigger reconnection or increment failure count
+			mc.logger.Info("Server disconnected intentionally, no reconnection needed",
+				zap.String("server", mc.Config.Name))
+		} else {
+			// Unexpected disconnect - process may have crashed
+			mc.logger.Warn("Server disconnected unexpectedly, will attempt reconnection",
+				zap.String("server", mc.Config.Name),
+				zap.String("from_state", oldState.String()))
+
+			// Increment failure count for disconnection
+			mc.StateManager.IncrementConsecutiveFailures()
+
+			// Check and handle auto-disable
+			mc.checkAndHandleAutoDisable()
+
+			// If not auto-disabled, attempt immediate reconnection
+			if !mc.StateManager.IsAutoDisabled() && mc.ShouldRetry() {
+				mc.logger.Info("Triggering immediate reconnection after disconnect",
+					zap.String("server", mc.Config.Name))
+				go mc.tryReconnect()
+			}
+		}
 	}
 
 	// Log successful connection (failure counter is reset by StateManager.TransitionTo when entering Ready state)
@@ -672,18 +740,25 @@ func (mc *Client) performHealthCheck() {
 		return
 	}
 
-	// Check if client is in error state and should retry connection (non-OAuth errors)
-	if mc.StateManager.GetState() == types.StateError && mc.ShouldRetry() {
+	// Check if client is in error or disconnected state and should retry connection (non-OAuth errors)
+	// Important: Handle both StateError AND StateDisconnected for reconnection
+	// Servers can transition Ready -> Disconnected when the process exits unexpectedly
+	currentState := mc.StateManager.GetState()
+	if (currentState == types.StateError || currentState == types.StateDisconnected) && mc.ShouldRetry() {
 		mc.logger.Info("Attempting automatic reconnection with exponential backoff",
 			zap.String("server", mc.Config.Name),
+			zap.String("state", currentState.String()),
 			zap.Int("retry_count", mc.StateManager.GetConnectionInfo().RetryCount))
 
 		mc.tryReconnect()
 		return
 	}
 
-	// Skip health checks if not connected
+	// Skip health checks if not connected (and not attempting reconnect above)
 	if !mc.IsConnected() {
+		mc.logger.Debug("Server not connected, waiting for reconnection",
+			zap.String("server", mc.Config.Name),
+			zap.String("state", currentState.String()))
 		return
 	}
 
@@ -769,6 +844,13 @@ func (mc *Client) tryReconnect() {
 		zap.String("server", mc.Config.Name),
 		zap.String("current_state", mc.StateManager.GetState().String()))
 
+	// Clear the intentional disconnect flag before attempting reconnection
+	// This ensures the reconnection attempt is treated as intentional (from tryReconnect)
+	// and won't trigger another reconnection from the Reset() callback
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = true // Mark as intentional to prevent callback from triggering recursion
+	mc.intentionalMu.Unlock()
+
 	// First, disconnect the current client to clean up any broken connections
 	// We don't need to hold the mutex here as Disconnect() already handles it
 	if err := mc.coreClient.Disconnect(); err != nil {
@@ -779,6 +861,11 @@ func (mc *Client) tryReconnect() {
 
 	// Reset state to disconnected before attempting reconnection
 	mc.StateManager.Reset()
+
+	// Now clear the flag so that the Connect() call enables auto-reconnection for future crashes
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = false
+	mc.intentionalMu.Unlock()
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management

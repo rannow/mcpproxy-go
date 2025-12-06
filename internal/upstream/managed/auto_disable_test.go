@@ -12,6 +12,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/upstream/types"
 )
 
 // TestAutoDisablePersistence tests that auto-disable state is persisted to storage
@@ -484,4 +485,124 @@ func TestRuntimeAutoDisableViaStateChangeCallback(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "Server should be found in config file")
+}
+
+// TestAutoDisableWithReset tests that auto-disable works even when Reset() is called
+// This reproduces the bug where Reset() was clearing firstAttemptTime, resetting the grace period
+func TestAutoDisableWithReset(t *testing.T) {
+	// Create temp directory for test
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	// Create initial config file
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+	cfg.AutoDisableThreshold = 3
+
+	testServer := &config.ServerConfig{
+		Name:        "test-server",
+		URL:         "http://localhost:9999",
+		Protocol:    "http",
+		StartupMode: "active",
+	}
+	cfg.Servers = []*config.ServerConfig{testServer}
+
+	// Write initial config
+	require.NoError(t, config.SaveConfig(cfg, configPath))
+
+	// Create logger
+	logger := zap.NewNop()
+
+	// Initialize storage manager with config loader
+	storageManager, err := storage.NewManager(tempDir, logger.Sugar())
+	require.NoError(t, err)
+	defer storageManager.Close()
+
+	// Create config loader
+	configLoader, err := config.NewLoader(configPath, logger)
+	require.NoError(t, err)
+	defer configLoader.Stop()
+
+	// Load initial config
+	_, err = configLoader.Load()
+	require.NoError(t, err)
+
+	// Set config loader on storage manager
+	storageManager.SetConfigLoader(configLoader)
+
+	// Save initial upstream record
+	require.NoError(t, storageManager.GetBoltDB().SaveUpstream(&storage.UpstreamRecord{
+		ID:          "test-server",
+		Name:        "test-server",
+		URL:         "http://localhost:9999",
+		Protocol:    "http",
+		ServerState: "active",
+		Created:     time.Now(),
+		Updated:     time.Now(),
+	}))
+
+	// Create client
+	client, err := NewClient("test-server", testServer, logger, nil, cfg, storageManager.GetBoltDB())
+	require.NoError(t, err)
+
+	// Set storage manager on client
+	client.SetStorageManager(storageManager)
+
+	// Configure auto-disable threshold
+	client.StateManager.SetAutoDisableThreshold(3)
+
+	// Simulate connection sequence:
+	// 1. Connect (sets firstAttemptTime)
+	// 2. Fail (increments failures)
+	// 3. Reset (simulating tryReconnect) - THIS SHOULD NOT CLEAR firstAttemptTime
+	// 4. Repeat until threshold
+
+	// Transition to Connecting to set firstAttemptTime
+	client.StateManager.TransitionTo(types.StateConnecting)
+	firstAttempt := client.StateManager.GetConnectionInfo().FirstAttemptTime
+	require.False(t, firstAttempt.IsZero(), "First attempt time should be set")
+
+	// Simulate 3 failures with resets in between
+	for i := 0; i < 3; i++ {
+		// Set error (increments failures)
+		client.StateManager.SetError(assert.AnError)
+
+		// Verify failure count
+		info := client.StateManager.GetConnectionInfo()
+		assert.Equal(t, i+1, info.ConsecutiveFailures)
+
+		// Reset state (as tryReconnect does)
+		client.StateManager.Reset()
+
+		// Verify firstAttemptTime is preserved
+		// NOTE: This assertion will fail before the fix
+		currentInfo := client.StateManager.GetConnectionInfo()
+		assert.Equal(t, firstAttempt, currentInfo.FirstAttemptTime, "First attempt time should be preserved after Reset()")
+	}
+
+	// Verify consecutive failures are preserved
+	info := client.StateManager.GetConnectionInfo()
+	assert.Equal(t, 3, info.ConsecutiveFailures, "Consecutive failures should be preserved after Reset()")
+
+	// Now check auto-disable
+	// We need to manually trigger the check because we're not using the full client loop here
+	client.checkAndHandleAutoDisable()
+
+	// Verify auto-disable is SUPPRESSED due to grace period (since we are just starting)
+	info = client.StateManager.GetConnectionInfo()
+	assert.False(t, info.AutoDisabled, "Should NOT be auto-disabled yet due to grace period")
+
+	// Now simulate enough failures to exceed the "obvious failure" threshold (threshold * 2)
+	// This confirms that auto-disable still works eventually
+	for i := 0; i < 3; i++ {
+		client.StateManager.SetError(assert.AnError)
+		client.StateManager.Reset()
+	}
+
+	// Trigger check again
+	client.checkAndHandleAutoDisable()
+
+	// Now it should be auto-disabled because failures (6) >= threshold*2 (6)
+	info = client.StateManager.GetConnectionInfo()
+	assert.True(t, info.AutoDisabled, "Should be auto-disabled after exceeding grace period threshold (threshold*2)")
 }
