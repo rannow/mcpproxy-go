@@ -17,12 +17,12 @@ type StateManager struct {
 	mu sync.RWMutex
 
 	// Runtime connection state (in-memory only)
-	currentState    ConnectionState
-	lastError       error
-	retryCount      int
-	lastRetryTime   time.Time
-	serverName      string
-	serverVersion   string
+	currentState     ConnectionState
+	lastError        error
+	retryCount       int
+	lastRetryTime    time.Time
+	serverName       string
+	serverVersion    string
 	lastOAuthAttempt time.Time
 	oauthRetryCount  int
 	isOAuthError     bool
@@ -30,10 +30,10 @@ type StateManager struct {
 	connectedAt      time.Time // Time when connection was established
 
 	// Auto-disable tracking
-	consecutiveFailures  int    // Consecutive failures counter
-	autoDisabled         bool   // Auto-disable flag
-	autoDisableReason    string // Reason for auto-disable
-	autoDisableThreshold int    // Threshold for auto-disable (default: DefaultAutoDisableThreshold)
+	consecutiveFailures  int       // Consecutive failures counter
+	autoDisabled         bool      // Auto-disable flag
+	autoDisableReason    string    // Reason for auto-disable
+	autoDisableThreshold int       // Threshold for auto-disable (default: DefaultAutoDisableThreshold)
 	lastSuccessTime      time.Time // Last successful connection time
 
 	// Runtime-only UI state (NOT persisted)
@@ -55,7 +55,7 @@ type StateManager struct {
 func NewStateManager() *StateManager {
 	return &StateManager{
 		currentState:         StateDisconnected,
-		serverState:          StateActive, // Default to active until config loaded
+		serverState:          StateActive,                 // Default to active until config loaded
 		autoDisableThreshold: DefaultAutoDisableThreshold, // HIGH-003: Use consolidated constant
 	}
 }
@@ -257,7 +257,11 @@ func (sm *StateManager) Reset() {
 	sm.lastOAuthAttempt = time.Time{}
 	sm.oauthRetryCount = 0
 	sm.isOAuthError = false
-	sm.firstAttemptTime = time.Time{}
+	sm.isOAuthError = false
+	// FIX: Do NOT reset firstAttemptTime to preserve startup grace period tracking
+	// across reconnection attempts. This ensures that the grace period is calculated
+	// from the actual first attempt, not the most recent reconnection.
+	// sm.firstAttemptTime = time.Time{}
 	sm.connectedAt = time.Time{}
 	// NOTE: Do NOT reset consecutiveFailures, autoDisabled, or lastSuccessTime
 	// These should persist across disconnections for proper auto-disable logic
@@ -440,11 +444,15 @@ func (sm *StateManager) publishConnectionStateChange(oldState, newState Connecti
 // ============================================================================
 
 // ShouldRetry returns true if the connection should be retried based on exponential backoff
+// FIX: Now also returns true for StateDisconnected to ensure background health check
+// can trigger reconnection for unexpectedly disconnected servers
 func (sm *StateManager) ShouldRetry() bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	if sm.currentState != StateError {
+	// Allow retry for both Error and Disconnected states
+	// StateDisconnected can occur when a server process exits unexpectedly
+	if sm.currentState != StateError && sm.currentState != StateDisconnected {
 		return false
 	}
 
@@ -619,6 +627,17 @@ func (sm *StateManager) ResetConsecutiveFailures() {
 	sm.consecutiveFailures = 0
 }
 
+// IncrementConsecutiveFailures increments the consecutive failure counter
+// This is used when a server disconnects unexpectedly (Ready -> Disconnected)
+// without going through SetError (which also increments this counter)
+func (sm *StateManager) IncrementConsecutiveFailures() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.consecutiveFailures++
+	sm.retryCount++
+	sm.lastRetryTime = time.Now()
+}
+
 // IsInGracePeriod returns true if the server is still in the startup grace period
 // During this period, auto-disable is suppressed to allow slow-starting servers time
 func (sm *StateManager) IsInGracePeriod() bool {
@@ -643,7 +662,7 @@ func (sm *StateManager) GetGracePeriodRemaining() time.Duration {
 	}
 
 	gracePeriodEnd := sm.firstAttemptTime.Add(config.StartupGracePeriod)
-	remaining := gracePeriodEnd.Sub(time.Now())
+	remaining := time.Until(gracePeriodEnd)
 	if remaining < 0 {
 		return 0
 	}

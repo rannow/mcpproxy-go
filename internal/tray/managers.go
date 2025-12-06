@@ -276,8 +276,10 @@ type MenuManager struct {
 	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
 
 	// Bulk action tracking
-	disabledBulkEnableItem     *systray.MenuItem // "Enable All Disabled Servers" item
-	autoDisabledBulkEnableItem *systray.MenuItem // "Enable All Auto-Disabled Servers" item
+	disabledBulkEnableItem       *systray.MenuItem // "Enable All Disabled Servers" item
+	autoDisabledBulkEnableItem   *systray.MenuItem // "Enable All Auto-Disabled Servers" item
+	disabledServerNames          []string          // Current list of disabled server names for bulk enable
+	autoDisabledServerNames      []string          // Current list of auto-disabled server names for bulk enable
 
 	// Header items and separators tracking
 	headerItems           []*systray.MenuItem          // All header items (Connected, Disconnected, etc.)
@@ -764,9 +766,11 @@ func (m *MenuManager) addBulkEnableAction(menu *systray.MenuItem, servers []map[
 		if status == "disabled" && m.disabledBulkEnableItem != nil {
 			m.disabledBulkEnableItem.Hide()
 			m.disabledBulkEnableItem = nil
+			m.disabledServerNames = nil
 		} else if status == "auto_disabled" && m.autoDisabledBulkEnableItem != nil {
 			m.autoDisabledBulkEnableItem.Hide()
 			m.autoDisabledBulkEnableItem = nil
+			m.autoDisabledServerNames = nil
 		}
 		return
 	}
@@ -783,6 +787,13 @@ func (m *MenuManager) addBulkEnableAction(menu *systray.MenuItem, servers []map[
 		return
 	}
 
+	// Always update the server names list so click handler gets current servers
+	if status == "disabled" {
+		m.disabledServerNames = serverNames
+	} else {
+		m.autoDisabledServerNames = serverNames
+	}
+
 	// Check if bulk action already exists for this status
 	var existingItem *systray.MenuItem
 	if status == "disabled" {
@@ -792,6 +803,7 @@ func (m *MenuManager) addBulkEnableAction(menu *systray.MenuItem, servers []map[
 	}
 
 	// If it already exists, just ensure it's visible and return
+	// The click handler will use the updated server names from m.disabledServerNames/m.autoDisabledServerNames
 	if existingItem != nil {
 		existingItem.Show()
 		return
@@ -819,14 +831,24 @@ func (m *MenuManager) addBulkEnableAction(menu *systray.MenuItem, servers []map[
 		m.autoDisabledBulkEnableItem = enableAllItem
 	}
 
-	// Set up click handler
-	go func(sNames []string, statusType string, item *systray.MenuItem) {
+	// Set up click handler - uses current server names from MenuManager fields
+	// This ensures we always use the latest list, not a captured snapshot
+	go func(statusType string, item *systray.MenuItem) {
 		for range item.ClickedCh {
 			if m.onServerAction != nil {
-				go m.handleEnableAllByStatus(sNames, statusType)
+				// Get current server names at click time, not at creation time
+				var currentNames []string
+				if statusType == "disabled" {
+					currentNames = m.disabledServerNames
+				} else {
+					currentNames = m.autoDisabledServerNames
+				}
+				if len(currentNames) > 0 {
+					go m.handleEnableAllByStatus(currentNames, statusType)
+				}
 			}
 		}
-	}(serverNames, status, enableAllItem)
+	}(status, enableAllItem)
 }
 
 // handleEnableAllByStatus enables all servers with a specific status (disabled or auto-disabled)
@@ -838,10 +860,14 @@ func (m *MenuManager) handleEnableAllByStatus(serverNames []string, status strin
 
 	m.logger.Info("Enabling all servers by status via menu action",
 		zap.String("status", status),
-		zap.Int("server_count", len(serverNames)))
+		zap.Int("server_count", len(serverNames)),
+		zap.Strings("servers", serverNames))
 
 	// Force-enable each server (not toggle, to avoid race conditions)
 	for _, serverName := range serverNames {
+		m.logger.Debug("Force-enabling server from bulk action",
+			zap.String("server", serverName),
+			zap.String("status", status))
 		if m.onServerAction != nil {
 			go m.onServerAction(serverName, "force_enable")
 		}

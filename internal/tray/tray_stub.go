@@ -39,7 +39,7 @@ type App struct {
 }
 
 // New creates a new tray application (stub version)
-func New(_ ServerInterface, logger *zap.SugaredLogger, _ string, _ func()) *App {
+func New(_ ServerInterface, logger *zap.SugaredLogger, _ string, _ string, _ func()) *App {
 	return &App{
 		logger: logger,
 	}

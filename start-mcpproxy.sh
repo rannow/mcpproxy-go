@@ -20,4 +20,4 @@ echo "────────────────────────�
 echo ""
 
 # Start mcpproxy with tray enabled
-./mcpproxy serve
+./mcpproxy serve --tray

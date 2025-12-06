@@ -18,7 +18,7 @@ func TestAdaptiveSyncFrequency(t *testing.T) {
 	mockStateManager := &ServerStateManager{
 		logger: logger,
 	}
-	mockMenuManager := NewMenuManager(nil, nil, logger)
+	mockMenuManager := NewMenuManager(nil, nil, nil, nil, nil, nil, nil, logger)
 
 	// Create sync manager
 	syncManager := NewSynchronizationManager(mockStateManager, mockMenuManager, logger)
@@ -64,7 +64,7 @@ func TestSyncManagerInitialization(t *testing.T) {
 	mockStateManager := &ServerStateManager{
 		logger: logger,
 	}
-	mockMenuManager := NewMenuManager(nil, nil, logger)
+	mockMenuManager := NewMenuManager(nil, nil, nil, nil, nil, nil, nil, logger)
 
 	// Create sync manager
 	syncManager := NewSynchronizationManager(mockStateManager, mockMenuManager, logger)
