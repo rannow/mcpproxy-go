@@ -24,8 +24,10 @@ import (
 	"mcpproxy-go/internal/startup"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
+	"mcpproxy-go/internal/types"
 	"mcpproxy-go/internal/upstream"
-	"mcpproxy-go/internal/upstream/types"
+	"mcpproxy-go/internal/upstream/managed"
+	upstreamtypes "mcpproxy-go/internal/upstream/types"
 )
 
 // AppState represents the overall application state
@@ -155,6 +157,10 @@ type Server struct {
 	// Tool count cache to avoid excessive ListTools operations
 	toolCountCache map[string]*toolCountCache
 	toolCountMu    sync.RWMutex
+
+	// Tray state provider - callback to get actual tray menu state
+	trayStateProvider   func() interface{}
+	trayStateProviderMu sync.RWMutex
 }
 
 // NewServer creates a new server instance
@@ -202,6 +208,12 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 				storageManager.SetConfigLoader(configLoader)
 				logger.Info("Config loader initialized and loaded for two-phase commit and migration fallback",
 					zap.String("config_path", configPath))
+
+				// Sync database with config file - remove servers not in config
+				if err := storageManager.SyncServersWithConfig(); err != nil {
+					logger.Warn("Failed to sync database with config file",
+						zap.Error(err))
+				}
 			}
 		}
 	} else {
@@ -628,7 +640,8 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 		totalCount = len(serverStats)
 		for _, serverStat := range serverStats {
 			if stat, ok := serverStat.(map[string]interface{}); ok {
-				if connected, ok := stat["connected"].(bool); ok && connected {
+				// Use state == "Ready" as single source of truth for connected status
+				if state, ok := stat["state"].(string); ok && state == "Ready" {
 					connectedCount++
 				}
 			}
@@ -1374,6 +1387,14 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		configByName[cfg.Name] = cfg
 	}
 
+	// OPTIMIZATION: Get all clients once to avoid O(n) lock operations
+	// Previously: 86 individual GetClient() calls (43 servers × 2 calls each)
+	// Now: 1 GetAllClients() call that acquires lock once
+	var clientsByName map[string]*managed.Client
+	if s.upstreamManager != nil {
+		clientsByName = s.upstreamManager.GetAllClients()
+	}
+
 	// Debug: Log server count discrepancy
 	configServerCount := len(s.config.Servers)
 	dbServerCount := len(servers)
@@ -1387,7 +1408,6 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for _, server := range servers {
 		// Get connection status and tool count from upstream manager
-		var connected bool
 		var connecting bool
 		var connectionState string
 		var lastError string
@@ -1412,32 +1432,30 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			connectionState = "Disconnected"
 		}
 
-		if s.upstreamManager != nil {
-			if client, exists := s.upstreamManager.GetClient(server.Name); exists {
-				connectionStatus := client.GetConnectionStatus()
-				if c, ok := connectionStatus["connected"].(bool); ok {
-					connected = c
-				}
-				if c, ok := connectionStatus["connecting"].(bool); ok {
-					connecting = c
-				}
-				// Only override default if client has actual state
-				if state, ok := connectionStatus["state"].(string); ok && state != "" {
-					connectionState = state
-				}
-				if e, ok := connectionStatus["last_error"].(string); ok {
-					lastError = e
-				}
-				if ad, ok := connectionStatus["auto_disabled"].(bool); ok {
-					autoDisabled = ad
-				}
-				if adr, ok := connectionStatus["auto_disable_reason"].(string); ok {
-					autoDisableReason = adr
-				}
+		// Use pre-fetched clients map instead of individual GetClient() calls
+		if client, exists := clientsByName[server.Name]; exists {
+			connectionStatus := client.GetConnectionStatus()
+			if c, ok := connectionStatus["connecting"].(bool); ok {
+				connecting = c
+			}
+			// Only override default if client has actual state
+			// Use state as single source of truth for connected status
+			if state, ok := connectionStatus["state"].(string); ok && state != "" {
+				connectionState = state
+			}
+			if e, ok := connectionStatus["last_error"].(string); ok {
+				lastError = e
+			}
+			if ad, ok := connectionStatus["auto_disabled"].(bool); ok {
+				autoDisabled = ad
+			}
+			if adr, ok := connectionStatus["auto_disable_reason"].(string); ok {
+				autoDisableReason = adr
+			}
 
-				if connected {
-					toolCount = s.getServerToolCount(server.Name)
-				}
+			// Use connectionState == "Ready" as single source of truth
+			if connectionState == "Ready" {
+				toolCount = s.getServerToolCount(server.Name)
 			}
 		}
 
@@ -1459,7 +1477,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			healthCheck = cfg.HealthCheck
 		}
 		// Get runtime-only userStopped state (NOT persisted to config/database)
-		if client, exists := s.upstreamManager.GetClient(server.Name); exists {
+		// Use pre-fetched clients map
+		if client, exists := clientsByName[server.Name]; exists {
 			userStopped = client.StateManager.IsUserStopped()
 		}
 
@@ -1478,7 +1497,6 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"quarantined":         (server.StartupMode == "quarantined"),
 			"stopped":             userStopped, // Runtime-only state (NOT persisted)
 			"created":             server.Created,
-			"connected":           connected,
 			"connecting":          connecting,
 			"connection_state":    connectionState,
 			"tool_count":          toolCount,
@@ -1492,6 +1510,61 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+// GetServerCategories returns servers categorized by status
+// THIS IS THE SINGLE SOURCE OF TRUTH FOR ALL STATUS CATEGORIZATION
+// Both the API (/api/tray/status) and Tray menu MUST use this method
+// See types.ServerStatusCategories for categorization priority documentation
+func (s *Server) GetServerCategories() (*types.ServerStatusCategories, error) {
+	// Use GetAllServers as the single data source
+	allServers, err := s.GetAllServers()
+	if err != nil {
+		return nil, err
+	}
+
+	categories := &types.ServerStatusCategories{
+		Connected:    make([]string, 0),
+		Disconnected: make([]string, 0),
+		Sleeping:     make([]string, 0),
+		Disabled:     make([]string, 0),
+		AutoDisabled: make([]string, 0),
+		Quarantined:  make([]string, 0),
+		Total:        len(allServers),
+		Timestamp:    time.Now(),
+	}
+
+	for _, server := range allServers {
+		name, _ := server["name"].(string)
+		startupMode, _ := server["startup_mode"].(string)
+		connectionState, _ := server["connection_state"].(string)
+
+		// Use connection_state == "Ready" as the single source of truth for connected status
+		isConnected := connectionState == "Ready"
+
+		// Apply categorization priority
+		switch {
+		case startupMode == "quarantined":
+			categories.Quarantined = append(categories.Quarantined, name)
+		case startupMode == "auto_disabled":
+			categories.AutoDisabled = append(categories.AutoDisabled, name)
+		case startupMode == "disabled":
+			categories.Disabled = append(categories.Disabled, name)
+		case startupMode == "lazy_loading" && !isConnected:
+			categories.Sleeping = append(categories.Sleeping, name)
+		case startupMode != "disabled" && startupMode != "quarantined" && startupMode != "auto_disabled":
+			if isConnected {
+				categories.Connected = append(categories.Connected, name)
+			} else {
+				categories.Disconnected = append(categories.Disconnected, name)
+			}
+		default:
+			// Fallback: categorize as disconnected
+			categories.Disconnected = append(categories.Disconnected, name)
+		}
+	}
+
+	return categories, nil
 }
 
 // GetServerTools returns tools for a specific server for configuration dialog
@@ -1745,7 +1818,7 @@ func (s *Server) waitForServerDisconnected(ctx context.Context, serverName strin
 			}
 
 			state := client.GetState()
-			if state == types.StateDisconnected || state == types.StateError {
+			if state == upstreamtypes.StateDisconnected || state == upstreamtypes.StateError {
 				s.logger.Debug("Server reached disconnected state",
 					zap.String("server", serverName),
 					zap.String("state", state.String()))
@@ -2219,6 +2292,8 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.HandleFunc("/servers", s.handleServersWeb)
 	mux.HandleFunc("/failed-servers", s.handleFailedServers)
 	mux.HandleFunc("/api/servers/status", s.handleServersStatusAPI)
+	mux.HandleFunc("/api/tray/status", s.handleTrayStatusAPI)     // Tray menu categories API (computed)
+	mux.HandleFunc("/api/tray/internal", s.handleTrayInternalAPI) // Actual tray internal state
 	mux.HandleFunc("/api/servers", s.handleServersAPI)
 	mux.HandleFunc("/api/servers/", s.handleServerConfigOrToolsAPI)
 
@@ -2282,6 +2357,9 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 
 	// Fast action endpoints for diagnostic agent
 	mux.HandleFunc("/api/fast-action", s.handleFastAction)
+
+	// System integration endpoints
+	mux.HandleFunc("/api/open-path", s.handleOpenPath)
 
 	// Agent API endpoints for Python MCP agent integration
 	mux.HandleFunc("/api/v1/agent/servers", s.handleAgentListServers)
@@ -2944,6 +3022,13 @@ func (s *Server) ReloadConfiguration() error {
 	s.logger.Debug("Preserved assignments snapshot (not restored)",
 		zap.Int("preserved_assignments", len(savedAssignments)))
 
+	// Sync database with config file - remove servers not in config
+	s.logger.Debug("Syncing database with config file")
+	if err := s.storageManager.SyncServersWithConfig(); err != nil {
+		s.logger.Warn("Failed to sync database with config file during reload",
+			zap.Error(err))
+	}
+
 	// Reload configured servers (this is where the comprehensive sync happens)
 	s.logger.Debug("About to call loadConfiguredServers")
 	if err := s.loadConfiguredServers(); err != nil {
@@ -3392,6 +3477,26 @@ func (s *Server) GetAppState() AppState {
 	return s.appState
 }
 
+// SetTrayStateProvider registers a callback function to get the actual tray menu state
+// This allows the server to access the tray's internal state for the /api/tray/internal endpoint
+func (s *Server) SetTrayStateProvider(provider func() interface{}) {
+	s.trayStateProviderMu.Lock()
+	defer s.trayStateProviderMu.Unlock()
+	s.trayStateProvider = provider
+	s.logger.Info("Tray state provider registered")
+}
+
+// GetTrayState returns the current tray menu state via the registered provider
+// Returns nil if no provider is registered (tray not running)
+func (s *Server) GetTrayState() interface{} {
+	s.trayStateProviderMu.RLock()
+	defer s.trayStateProviderMu.RUnlock()
+	if s.trayStateProvider == nil {
+		return nil
+	}
+	return s.trayStateProvider()
+}
+
 // setAppState sets the application state and emits an event (must be called with appropriate locking)
 func (s *Server) setAppState(newState AppState) {
 	s.appStateMu.Lock()
@@ -3444,12 +3549,12 @@ func (s *Server) checkAndUpdateAppState() {
 
 		// Count servers by connection state
 		switch state {
-		case types.StateReady:
+		case upstreamtypes.StateReady:
 			readyCount++
 			if serverState.IsStable() {
 				stableCount++
 			}
-		case types.StateError:
+		case upstreamtypes.StateError:
 			errorCount++
 		}
 	}

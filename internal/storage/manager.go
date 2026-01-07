@@ -71,6 +71,79 @@ func (m *Manager) SetConfigLoader(loader *config.Loader) {
 	m.configLoader = loader
 }
 
+// SyncServersWithConfig synchronizes the database with the config file
+// It removes servers from the database that are not present in the config file
+// This should be called after SetConfigLoader on startup and after ReloadConfiguration
+func (m *Manager) SyncServersWithConfig() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.configLoader == nil {
+		m.logger.Debug("SyncServersWithConfig: configLoader is nil, skipping sync")
+		return nil
+	}
+
+	// Reload config from file to ensure we have the latest version
+	// This is important for ReloadConfiguration scenarios
+	cfg, err := m.configLoader.Load()
+	if err != nil {
+		m.logger.Warnw("SyncServersWithConfig: failed to reload config, using cached version",
+			"error", err)
+		cfg = m.configLoader.GetConfig()
+	}
+
+	if cfg == nil {
+		m.logger.Debug("SyncServersWithConfig: config is nil, skipping sync")
+		return nil
+	}
+
+	// Build a set of server names from config
+	configServers := make(map[string]bool)
+	for _, server := range cfg.Servers {
+		configServers[server.Name] = true
+	}
+
+	m.logger.Infow("SyncServersWithConfig: starting database sync with config",
+		"config_server_count", len(cfg.Servers))
+
+	// Get all servers from database
+	dbServers, err := m.db.ListUpstreams()
+	if err != nil {
+		return fmt.Errorf("failed to list upstreams from database: %w", err)
+	}
+
+	m.logger.Debugw("SyncServersWithConfig: database state",
+		"db_server_count", len(dbServers))
+
+	// Find and delete servers that are in the database but not in config
+	var removedServers []string
+	for _, dbServer := range dbServers {
+		if !configServers[dbServer.Name] {
+			m.logger.Infow("SyncServersWithConfig: removing server not in config",
+				"server", dbServer.Name)
+
+			if err := m.db.DeleteUpstream(dbServer.Name); err != nil {
+				m.logger.Errorw("SyncServersWithConfig: failed to delete server",
+					"server", dbServer.Name,
+					"error", err)
+				// Continue with other servers even if one fails
+			} else {
+				removedServers = append(removedServers, dbServer.Name)
+			}
+		}
+	}
+
+	if len(removedServers) > 0 {
+		m.logger.Infow("SyncServersWithConfig: cleanup completed",
+			"removed_count", len(removedServers),
+			"removed_servers", removedServers)
+	} else {
+		m.logger.Debug("SyncServersWithConfig: no servers to remove, database is in sync")
+	}
+
+	return nil
+}
+
 // SetEventBus sets the event bus for publishing state change events
 func (m *Manager) SetEventBus(eventBus *events.Bus) {
 	m.mu.Lock()
@@ -183,7 +256,7 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		ToolCount:                record.ToolCount,
 		HealthCheck:              record.HealthCheck,
 		AutoDisableThreshold:     record.AutoDisableThreshold,
-		StartupMode:              startupMode,             // Use config-prioritized startup mode
+		StartupMode:              startupMode,              // Use config-prioritized startup mode
 		AutoDisableReason:        record.AutoDisableReason, // Include auto-disable reason
 	}, nil
 }
@@ -393,35 +466,41 @@ func (m *Manager) DeleteUpstreamServer(name string) error {
 }
 
 // EnableUpstreamServer enables/disables an upstream server using server_state
-// When enabling, sets server_state to "active", when disabling sets to "auto_disabled"
+// When enabling, sets server_state to "active", when disabling sets to "disabled"
 func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	var oldServerState string
+	var newServerState string
 
+	// Phase 1: Update database (with lock - fast operation)
+	m.mu.Lock()
 	record, err := m.db.GetUpstream(name)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 
 	// Store old value for rollback
-	oldServerState := record.ServerState
+	oldServerState = record.ServerState
 
 	// Set appropriate server_state
 	if enabled {
-		record.ServerState = "active"
+		newServerState = "active"
+		record.ServerState = newServerState
 		record.AutoDisableReason = "" // Clear auto-disable reason when enabling
 	} else {
-		record.ServerState = "auto_disabled"
+		newServerState = "disabled"
+		record.ServerState = newServerState
 		// Keep auto-disable reason when disabling (it may have been set by auto-disable logic)
 	}
 	record.Updated = time.Now()
 
-	// Phase 1: Update database
 	if err := m.db.SaveUpstream(record); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("failed to save to database: %w", err)
 	}
+	m.mu.Unlock() // Release lock before file I/O
 
-	// Phase 2: Update config file
+	// Phase 2: Update config file (without lock - file I/O is slow)
 	if m.configLoader != nil {
 		if err := m.configLoader.UpdateConfigAtomic(func(cfg *config.Config) (*config.Config, error) {
 			for i, server := range cfg.Servers {
@@ -430,7 +509,7 @@ func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 						cfg.Servers[i].StartupMode = "active"
 						cfg.Servers[i].AutoDisableReason = "" // Clear auto-disable reason when enabling
 					} else {
-						cfg.Servers[i].StartupMode = "auto_disabled"
+						cfg.Servers[i].StartupMode = "disabled"
 						// Keep auto-disable reason when disabling (it may have been set by auto-disable logic)
 					}
 					break
@@ -438,13 +517,15 @@ func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 			}
 			return cfg, nil
 		}); err != nil {
-			// Rollback database change
+			// Rollback database change (needs lock)
+			m.mu.Lock()
 			record.ServerState = oldServerState
 			if rollbackErr := m.db.SaveUpstream(record); rollbackErr != nil {
 				m.logger.Errorw("Failed to rollback database changes",
 					"server", name,
 					"error", rollbackErr)
 			}
+			m.mu.Unlock()
 			return fmt.Errorf("failed to update config file: %w", err)
 		}
 	}
@@ -452,22 +533,25 @@ func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 	m.logger.Infow("Updated server state via EnableUpstreamServer",
 		"server", name,
 		"enabled", enabled,
-		"server_state", record.ServerState)
+		"server_state", newServerState)
 
 	return nil
 }
 
 // QuarantineUpstreamServer sets the quarantine status of an upstream server using server_state
 func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	var oldServerState string
+	var newServerState string
 
 	m.logger.Debugw("QuarantineUpstreamServer called",
 		"server", name,
 		"quarantined", quarantined)
 
+	// Phase 1: Update database (with lock - fast operation)
+	m.mu.Lock()
 	record, err := m.db.GetUpstream(name)
 	if err != nil {
+		m.mu.Unlock()
 		m.logger.Errorw("Failed to get upstream record for quarantine operation",
 			"server", name,
 			"error", err)
@@ -475,7 +559,7 @@ func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error 
 	}
 
 	// Store old value for rollback
-	oldServerState := record.ServerState
+	oldServerState = record.ServerState
 
 	m.logger.Debugw("Retrieved upstream record for quarantine",
 		"server", name,
@@ -484,23 +568,25 @@ func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error 
 
 	// Set appropriate server_state
 	if quarantined {
-		record.ServerState = "quarantined"
+		newServerState = "quarantined"
 	} else {
 		// When un-quarantining, set to active
-		record.ServerState = "active"
+		newServerState = "active"
 	}
+	record.ServerState = newServerState
 	record.Updated = time.Now()
 
-	// Phase 1: Update database
 	if err := m.db.SaveUpstream(record); err != nil {
+		m.mu.Unlock()
 		m.logger.Errorw("Failed to save quarantine status to database",
 			"server", name,
 			"quarantined", quarantined,
 			"error", err)
 		return err
 	}
+	m.mu.Unlock() // Release lock before file I/O
 
-	// Phase 2: Update config file
+	// Phase 2: Update config file (without lock - file I/O is slow)
 	if m.configLoader != nil {
 		if err := m.configLoader.UpdateConfigAtomic(func(cfg *config.Config) (*config.Config, error) {
 			for i, server := range cfg.Servers {
@@ -515,20 +601,22 @@ func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error 
 			}
 			return cfg, nil
 		}); err != nil {
-			// Rollback database changes
+			// Rollback database changes (needs lock)
+			m.mu.Lock()
 			record.ServerState = oldServerState
 			if rollbackErr := m.db.SaveUpstream(record); rollbackErr != nil {
 				m.logger.Errorw("Failed to rollback database changes",
 					"server", name,
 					"error", rollbackErr)
 			}
+			m.mu.Unlock()
 			return fmt.Errorf("failed to update config file: %w", err)
 		}
 	}
 
 	m.logger.Debugw("Successfully saved quarantine status to database",
 		"server", name,
-		"server_state", record.ServerState)
+		"server_state", newServerState)
 
 	return nil
 }
@@ -536,17 +624,18 @@ func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error 
 // ClearAutoDisable clears the auto-disable state for a server using server_state
 // This method updates both the database and the config file in a two-phase commit
 func (m *Manager) ClearAutoDisable(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	var oldServerState string
 
-	// Phase 1: Update database (can rollback if config fails)
+	// Phase 1: Update database (with lock - fast operation)
+	m.mu.Lock()
 	record, err := m.db.GetUpstream(name)
 	if err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("failed to get upstream record: %w", err)
 	}
 
 	// Store old value for rollback
-	oldServerState := record.ServerState
+	oldServerState = record.ServerState
 
 	// Clear auto-disable by setting server_state to active and clearing reason
 	record.ServerState = "active"
@@ -554,10 +643,12 @@ func (m *Manager) ClearAutoDisable(name string) error {
 	record.Updated = time.Now()
 
 	if err := m.db.SaveUpstream(record); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("failed to save to database: %w", err)
 	}
+	m.mu.Unlock() // Release lock before file I/O
 
-	// Phase 2: Update config file
+	// Phase 2: Update config file (without lock - file I/O is slow)
 	if m.configLoader != nil {
 		if err := m.configLoader.UpdateConfigAtomic(func(cfg *config.Config) (*config.Config, error) {
 			// Find server in config
@@ -570,13 +661,15 @@ func (m *Manager) ClearAutoDisable(name string) error {
 			}
 			return cfg, nil
 		}); err != nil {
-			// Rollback database changes
+			// Rollback database changes (needs lock)
+			m.mu.Lock()
 			record.ServerState = oldServerState
 			if rollbackErr := m.db.SaveUpstream(record); rollbackErr != nil {
 				m.logger.Errorw("Failed to rollback database changes",
 					"server", name,
 					"error", rollbackErr)
 			}
+			m.mu.Unlock()
 			return fmt.Errorf("failed to update config file: %w", err)
 		}
 	}
@@ -621,17 +714,18 @@ func (m *Manager) UpdateUpstreamServerState(id, serverState string) error {
 // The threshold (e.g., 5 consecutive failures) is validated by StateManager.ShouldAutoDisable()
 // For manual enable/disable, use EnableUpstreamServer instead
 func (m *Manager) UpdateServerState(name string, reason string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	var oldServerState string
 
-	// Phase 1: Update database
+	// Phase 1: Update database (with lock - fast operation)
+	m.mu.Lock()
 	record, err := m.db.GetUpstream(name)
 	if err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("failed to get upstream record: %w", err)
 	}
 
 	// Store old values for rollback
-	oldServerState := record.ServerState
+	oldServerState = record.ServerState
 
 	// Always set to auto_disabled state when this function is called
 	record.ServerState = "auto_disabled"
@@ -639,10 +733,12 @@ func (m *Manager) UpdateServerState(name string, reason string) error {
 	record.Updated = time.Now()
 
 	if err := m.db.SaveUpstream(record); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("failed to save to database: %w", err)
 	}
+	m.mu.Unlock() // Release lock before file I/O
 
-	// Phase 2: Update config file
+	// Phase 2: Update config file (without lock - file I/O is slow)
 	if m.configLoader != nil {
 		if err := m.configLoader.UpdateConfigAtomic(func(cfg *config.Config) (*config.Config, error) {
 			// Find server in config
@@ -656,20 +752,22 @@ func (m *Manager) UpdateServerState(name string, reason string) error {
 			}
 			return cfg, nil
 		}); err != nil {
-			// Rollback database changes
+			// Rollback database changes (needs lock)
+			m.mu.Lock()
 			record.ServerState = oldServerState
 			if rollbackErr := m.db.SaveUpstream(record); rollbackErr != nil {
 				m.logger.Errorw("Failed to rollback database changes",
 					"server", name,
 					"error", rollbackErr)
 			}
+			m.mu.Unlock()
 			return fmt.Errorf("failed to update config file: %w", err)
 		}
 	}
 
 	m.logger.Infow("Updated server server state",
 		"server", name,
-		"server_state", record.ServerState,
+		"server_state", "auto_disabled",
 		"reason", reason)
 
 	// Publish ServerAutoDisabled event
