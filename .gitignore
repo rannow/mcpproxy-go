@@ -49,6 +49,9 @@ mcp_config.json
 .env.local
 .env.*.local
 
+# Local sensitive files (API keys, secrets, etc.)
+.local/
+
 # Log files
 *.log
 
