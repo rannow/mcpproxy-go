@@ -1457,6 +1457,38 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			if connectionState == "Ready" {
 				toolCount = s.getServerToolCount(server.Name)
 			}
+		} else if clientsByName != nil {
+			// BUG FIX: Client not found in pre-fetched map, try individual lookup
+			// This handles race conditions where GetAllClients() snapshot may be stale
+			if client, exists := s.upstreamManager.GetClient(server.Name); exists {
+				connectionStatus := client.GetConnectionStatus()
+				if c, ok := connectionStatus["connecting"].(bool); ok {
+					connecting = c
+				}
+				if state, ok := connectionStatus["state"].(string); ok && state != "" {
+					connectionState = state
+				}
+				if e, ok := connectionStatus["last_error"].(string); ok {
+					lastError = e
+				}
+				if ad, ok := connectionStatus["auto_disabled"].(bool); ok {
+					autoDisabled = ad
+				}
+				if adr, ok := connectionStatus["auto_disable_reason"].(string); ok {
+					autoDisableReason = adr
+				}
+				if connectionState == "Ready" {
+					toolCount = s.getServerToolCount(server.Name)
+				}
+				s.logger.Debug("Client found via individual lookup but not in pre-fetched map",
+					zap.String("server", server.Name),
+					zap.String("connection_state", connectionState))
+			} else {
+				s.logger.Debug("Client not found in upstream manager",
+					zap.String("server", server.Name),
+					zap.String("startup_mode", server.StartupMode),
+					zap.Int("clients_map_size", len(clientsByName)))
+			}
 		}
 
 		// Enrich with group assignment from config (if present)
@@ -1482,6 +1514,9 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			userStopped = client.StateManager.IsUserStopped()
 		}
 
+		// Determine connected status using connection_state as single source of truth
+		isConnected := connectionState == "Ready"
+
 		result = append(result, map[string]interface{}{
 			"name":                server.Name,
 			"description":         description,
@@ -1498,6 +1533,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"stopped":             userStopped, // Runtime-only state (NOT persisted)
 			"created":             server.Created,
 			"connecting":          connecting,
+			"connected":           isConnected, // Boolean for Tray menu categorization
 			"connection_state":    connectionState,
 			"tool_count":          toolCount,
 			"last_error":          lastError,
