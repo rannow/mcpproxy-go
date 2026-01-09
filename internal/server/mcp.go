@@ -630,6 +630,18 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	startTime := time.Now()
 	var requestID string
 
+	// Apply configurable timeout to prevent hanging API requests
+	// Uses the call_tool_timeout from config (default: 2 minutes, configurable via JSON)
+	var timeout time.Duration
+	if p.config != nil {
+		timeout = p.config.CallToolTimeout.Duration()
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Minute // Fallback default
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// Generate request ID for communication logging
 	if p.communicationLogger != nil && p.communicationLogger.IsEnabled() {
 		requestID = fmt.Sprintf("req_%d_%d", startTime.UnixNano(), time.Now().Nanosecond())
@@ -1556,7 +1568,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		Env:         env,
 		Headers:     headers,
 		Protocol:    protocol,
-		StartupMode: "quarantined", // All new servers are automatically quarantined for security
+		StartupMode: "active", // New servers start as active and connect immediately
 		Created:     time.Now(),
 	}
 
@@ -1565,16 +1577,37 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
 	}
 
-	// Add to upstream manager and connect
+	// Add to upstream manager - but DON'T connect or monitor quarantined servers
+	// Quarantined servers are blocked from connecting for security, so monitoring would just timeout
 	var connectionStatus, connectionMessage string
-	if enabled {
-		if err := p.upstreamManager.AddServer(name, serverConfig); err != nil {
-			p.logger.Warn("Failed to add and connect upstream server", zap.String("name", name), zap.Error(err))
+	if serverConfig.StartupMode == "quarantined" {
+		// For quarantined servers, just save to storage - no connection attempt
+		connectionStatus = "quarantined"
+		connectionMessage = "Server added but quarantined for security review - no connection attempted"
+		p.logger.Info("Server added as quarantined - skipping connection",
+			zap.String("server", name),
+			zap.String("startup_mode", serverConfig.StartupMode))
+	} else if enabled {
+		// Add server config without blocking on connection - connect asynchronously for better UX
+		if err := p.upstreamManager.AddServerConfig(name, serverConfig); err != nil {
+			p.logger.Warn("Failed to add upstream server config", zap.String("name", name), zap.Error(err))
 			connectionStatus = statusError
 			connectionMessage = fmt.Sprintf("Failed to add server: %v", err)
 		} else {
-			// Monitor connection status for 1 minute to see final state
-			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
+			// Start connection in background - don't block the API call
+			go func(serverName string) {
+				connectCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if client, exists := p.upstreamManager.GetClient(serverName); exists {
+					if err := client.Connect(connectCtx); err != nil {
+						p.logger.Warn("Background connection failed", zap.String("server", serverName), zap.Error(err))
+					} else {
+						p.logger.Info("Server connected successfully in background", zap.String("server", serverName))
+					}
+				}
+			}(name)
+			connectionStatus = "connecting"
+			connectionMessage = "Server added - connecting in background"
 		}
 	} else {
 		connectionStatus = statusDisabled

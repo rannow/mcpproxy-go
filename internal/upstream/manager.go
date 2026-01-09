@@ -338,8 +338,13 @@ func (m *Manager) RemoveServer(id string) {
 		m.logger.Info("Removing upstream server",
 			zap.String("id", id),
 			zap.String("state", client.GetState().String()))
-		_ = client.Disconnect()
+		// Remove from map immediately to prevent further operations
 		delete(m.clients, id)
+		// Disconnect asynchronously to avoid blocking if connection is in progress
+		// This prevents 30s delay when removing a connecting server
+		go func(c *managed.Client) {
+			_ = c.Disconnect()
+		}(client)
 	}
 }
 
@@ -947,9 +952,13 @@ func (m *Manager) GetStats() map[string]interface{} {
 			status["server_version"] = connectionInfo.ServerVersion
 		}
 
-		if client.GetServerInfo() != nil {
-			info := client.GetServerInfo()
-			status["protocol_version"] = info.ProtocolVersion
+		// Only call GetServerInfo on connected clients to avoid blocking on connecting clients
+		// GetServerInfo requires c.mu.RLock which would block if Connect holds c.mu.Lock
+		if connectionInfo.State == types.StateReady {
+			if client.GetServerInfo() != nil {
+				info := client.GetServerInfo()
+				status["protocol_version"] = info.ProtocolVersion
+			}
 		}
 
 		serverStatus[id] = status
@@ -965,7 +974,8 @@ func (m *Manager) GetStats() map[string]interface{} {
 }
 
 // GetTotalToolCount returns the total number of tools across all servers
-// This is optimized to avoid network calls during shutdown for performance
+// This uses cached tool counts to avoid blocking network calls during status updates
+// Tool counts are updated when ListTools is called on each client
 func (m *Manager) GetTotalToolCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -976,23 +986,9 @@ func (m *Manager) GetTotalToolCount() int {
 			continue
 		}
 
-		// Quick check if client is actually reachable before making network call
-		if !client.IsConnected() {
-			continue
-		}
-
-		// MED-002: Use centralized timeout for UI status updates
-		// This allows time for SSE servers to establish connections and respond
-		ctx, cancel := context.WithTimeout(context.Background(), config.ListToolsTimeout)
-
-		m.logger.Debug("Starting ListTools for tool counting",
-			zap.Duration("timeout", config.ListToolsTimeout))
-		tools, err := client.ListTools(ctx)
-		cancel()
-		if err == nil && tools != nil {
-			totalTools += len(tools)
-		}
-		// Silently ignore errors during tool counting to avoid noise during shutdown
+		// Use cached tool count from Config instead of making network calls
+		// The tool count is updated when ListTools() succeeds on the client
+		totalTools += client.Config.ToolCount
 	}
 	return totalTools
 }
