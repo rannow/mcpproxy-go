@@ -65,6 +65,10 @@ const (
 
 	// ListToolsTimeout is the timeout for listing tools from a server
 	ListToolsTimeout = 30 * time.Second
+
+	// ToolCallTimeout is the timeout for individual tool calls via API
+	// This prevents hanging API requests when upstream servers don't respond
+	ToolCallTimeout = 60 * time.Second
 )
 
 // OAuth Timeouts

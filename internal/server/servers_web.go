@@ -921,3 +921,59 @@ func formatDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%.1fd", d.Hours()/24)
 }
+
+// handleTrayStatusAPI returns tray menu categories as JSON (computed status)
+func (s *Server) handleTrayStatusAPI(w http.ResponseWriter, r *http.Request) {
+	// Get all servers and categorize them for tray menu
+	allServers, err := s.storageManager.ListUpstreamServers()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get servers: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var connected, disconnected, quarantined, disabled []string
+	for _, server := range allServers {
+		switch server.StartupMode {
+		case "quarantined":
+			quarantined = append(quarantined, server.Name)
+		case "disabled", "auto_disabled":
+			disabled = append(disabled, server.Name)
+		default:
+			if s.upstreamManager != nil {
+				if client, exists := s.upstreamManager.GetClient(server.Name); exists {
+					status := client.GetConnectionStatus()
+					if isConnected, ok := status["connected"].(bool); ok && isConnected {
+						connected = append(connected, server.Name)
+					} else {
+						disconnected = append(disconnected, server.Name)
+					}
+				} else {
+					disconnected = append(disconnected, server.Name)
+				}
+			}
+		}
+	}
+
+	response := map[string]interface{}{
+		"connected":    connected,
+		"disconnected": disconnected,
+		"quarantined":  quarantined,
+		"disabled":     disabled,
+		"timestamp":    time.Now(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleTrayInternalAPI returns internal tray state for debugging
+func (s *Server) handleTrayInternalAPI(w http.ResponseWriter, r *http.Request) {
+	// Return internal tray state - this is for debugging/inspection
+	response := map[string]interface{}{
+		"message":   "Tray internal state API",
+		"timestamp": time.Now(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}

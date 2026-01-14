@@ -2,5 +2,20 @@
 # MCPProxy Application Launcher
 # This script runs as a proper macOS application with GUI access
 
+# Determine config file - use tested config if available
+CONFIG_DIR="$HOME/.mcpproxy"
+if [ -f "$CONFIG_DIR/mcp_config_tested.json" ]; then
+    CONFIG_FILE="$CONFIG_DIR/mcp_config_tested.json"
+elif [ -f "$CONFIG_DIR/mcp_config.json" ]; then
+    CONFIG_FILE="$CONFIG_DIR/mcp_config.json"
+else
+    CONFIG_FILE=""
+fi
+
 cd "$(dirname "$0")/../../.."
-exec ./mcpproxy serve --log-to-file=true
+
+if [ -n "$CONFIG_FILE" ]; then
+    exec ./mcpproxy serve -c "$CONFIG_FILE" --tray --log-to-file=true
+else
+    exec ./mcpproxy serve --tray --log-to-file=true
+fi

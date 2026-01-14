@@ -279,11 +279,6 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 		startupMode := record.ServerState
 		dbServerState := record.ServerState
 
-		m.logger.Debug("ListUpstreamServers processing record",
-			zap.String("server", record.Name),
-			zap.String("db_server_state", record.ServerState),
-			zap.String("initial_startup_mode", startupMode))
-
 		// CONFIG FILE HAS PRIORITY: Always check config file for startup_mode
 		// The config file is the source of truth for user-defined states (active, disabled, quarantined, lazy_loading)
 		// Only auto_disabled from database should override config, as it's a runtime protection mechanism
@@ -326,10 +321,6 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 		// This handles cases where database has no server_state and configLoader is not available
 		if startupMode == "" {
 			startupMode = "active"
-			m.logger.Debug("Using default startup_mode as fallback",
-				zap.String("server", record.Name),
-				zap.String("default_startup_mode", "active"),
-				zap.String("reason", "database server_state is empty and config fallback unavailable"))
 		}
 
 		servers = append(servers, &config.ServerConfig{

@@ -1614,13 +1614,15 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		connectionMessage = messageServerDisabled
 	}
 
-	// Trigger configuration save and update
+	// Trigger configuration save and update asynchronously to avoid blocking API response
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after adding server", zap.Error(err))
-		}
-		p.mainServer.OnUpstreamServerChange()
+		go func() {
+			// Save configuration to ensure servers are persisted to config file
+			if err := p.mainServer.SaveConfiguration(); err != nil {
+				p.logger.Error("Failed to save configuration after adding server", zap.Error(err))
+			}
+			p.mainServer.OnUpstreamServerChange()
+		}()
 	}
 
 	// Enhanced response with clear quarantine instructions and connection status for LLMs
@@ -1688,19 +1690,21 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 		p.logger.Info("Removed server tools from search index", zap.String("server", serverID))
 	}
 
-	// Trigger configuration save and update
+	// Trigger configuration save and update asynchronously to avoid blocking
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after removing server", zap.Error(err))
-		}
-		p.mainServer.OnUpstreamServerChange()
+		go func() {
+			if err := p.mainServer.SaveConfiguration(); err != nil {
+				p.logger.Error("Failed to save configuration after removing server", zap.Error(err))
+			}
+			p.mainServer.OnUpstreamServerChange()
+		}()
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
 		"id":      serverID,
 		"name":    name,
 		"removed": true,
+		"message": "Server removed - configuration saving in background",
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
@@ -1864,34 +1868,57 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil
 	}
 
-	// Update in upstream manager
+	// Update in upstream manager - use non-blocking pattern
+	// Remove asynchronously (already non-blocking)
 	p.upstreamManager.RemoveServer(serverID)
+
+	// Add config and connect in background to avoid API timeout
+	var connectionStatus, connectionMessage string
 	if updatedServer.StartupMode == "active" || updatedServer.StartupMode == "lazy_loading" {
-		if err := p.upstreamManager.AddServer(serverID, &updatedServer); err != nil {
-			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
+		// Add server config without blocking on connection
+		if err := p.upstreamManager.AddServerConfig(serverID, &updatedServer); err != nil {
+			p.logger.Warn("Failed to add updated upstream config", zap.String("id", serverID), zap.Error(err))
+			connectionStatus = "error"
+			connectionMessage = fmt.Sprintf("Failed to add server config: %v", err)
+		} else {
+			// Start connection in background - don't block the API call
+			go func(srvID string) {
+				connectCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if client, exists := p.upstreamManager.GetClient(srvID); exists {
+					if err := client.Connect(connectCtx); err != nil {
+						p.logger.Warn("Background connection failed after patch", zap.String("server", srvID), zap.Error(err))
+					} else {
+						p.logger.Info("Server reconnected successfully in background after patch", zap.String("server", srvID))
+					}
+				}
+			}(serverID)
+			connectionStatus = "connecting"
+			connectionMessage = "Server patched - reconnecting in background"
 		}
+	} else {
+		connectionStatus = "disabled"
+		connectionMessage = "Server patched but disabled"
 	}
 
-	// Trigger configuration save and update
+	// Save configuration asynchronously to avoid blocking
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after patching server", zap.Error(err))
-		}
-
-		// Reload configuration to ensure full restart of all servers
-		if err := p.mainServer.ReloadConfiguration(); err != nil {
-			p.logger.Error("Failed to reload configuration after patching server", zap.Error(err))
-		}
-
-		p.mainServer.OnUpstreamServerChange()
+		go func() {
+			// Save configuration to persist changes
+			if err := p.mainServer.SaveConfiguration(); err != nil {
+				p.logger.Error("Failed to save configuration after patching server", zap.Error(err))
+			}
+			p.mainServer.OnUpstreamServerChange()
+		}()
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"id":      serverID,
-		"name":    name,
-		"updated": true,
-		"startup_mode": updatedServer.StartupMode,
+		"id":                 serverID,
+		"name":               name,
+		"updated":            true,
+		"startup_mode":       updatedServer.StartupMode,
+		"connection_status":  connectionStatus,
+		"connection_message": connectionMessage,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil

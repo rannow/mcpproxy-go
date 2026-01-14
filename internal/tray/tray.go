@@ -430,6 +430,16 @@ func (a *App) onReady() {
 		a.logger.Info("✅ Icon data loaded successfully", zap.Int("size", len(iconData)))
 	}
 
+	// On macOS 26.1 Tahoe, set title FIRST to force NSStatusItem creation
+	// This is a workaround for potential initialization timing issues
+	if runtime.GOOS == osDarwin {
+		a.logger.Info("🍎 macOS Tahoe workaround: Setting title first to force status item visibility")
+		systray.SetTitle("MCP")
+		a.logger.Info("✅ systray.SetTitle('MCP') called FIRST for macOS visibility")
+		// Small delay to let NSStatusItem stabilize
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	systray.SetIcon(iconData)
 	a.logger.Info("✅ systray.SetIcon() called")
 
@@ -437,6 +447,11 @@ func (a *App) onReady() {
 	if runtime.GOOS == osDarwin {
 		systray.SetTemplateIcon(iconData, iconData)
 		a.logger.Info("✅ systray.SetTemplateIcon() called for macOS")
+		// Small delay after icon setup to ensure rendering
+		time.Sleep(50 * time.Millisecond)
+		// Force title update again after icon to ensure visibility
+		systray.SetTitle("MCP")
+		a.logger.Info("✅ systray.SetTitle('MCP') called again after icon for visibility")
 	}
 	a.updateServerCountFromConfig()
 

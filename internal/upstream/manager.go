@@ -862,8 +862,9 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 		zap.String("reason", reason))
 }
 
-// DisconnectAll disconnects from all servers
+// DisconnectAll disconnects from all servers in parallel to avoid blocking
 // CRIT-005: Now aggregates all errors instead of returning only the last one
+// TIMEOUT-FIX: Execute disconnects in parallel with timeout to prevent API hangs
 func (m *Manager) DisconnectAll() error {
 	m.mu.RLock()
 	clients := make([]*managed.Client, 0, len(m.clients))
@@ -872,17 +873,50 @@ func (m *Manager) DisconnectAll() error {
 	}
 	m.mu.RUnlock()
 
-	// CRIT-005: Collect all errors for proper error reporting
-	var errs []error
+	if len(clients) == 0 {
+		return nil
+	}
+
+	// TIMEOUT-FIX: Disconnect all clients in parallel with timeout
+	type disconnectResult struct {
+		serverName string
+		err        error
+	}
+
+	results := make(chan disconnectResult, len(clients))
+	timeout := 10 * time.Second // Maximum wait time for all disconnects
+
 	for _, client := range clients {
-		if err := client.Disconnect(); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", client.Config.Name, err))
-			m.logger.Warn("Failed to disconnect client",
-				zap.String("server", client.Config.Name),
-				zap.Error(err))
+		go func(c *managed.Client) {
+			err := c.Disconnect()
+			results <- disconnectResult{serverName: c.Config.Name, err: err}
+		}(client)
+	}
+
+	// Collect results with timeout
+	var errs []error
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for i := 0; i < len(clients); i++ {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", result.serverName, result.err))
+				m.logger.Warn("Failed to disconnect client",
+					zap.String("server", result.serverName),
+					zap.Error(result.err))
+			}
+		case <-timer.C:
+			m.logger.Warn("DisconnectAll timeout reached, some clients may not have disconnected cleanly",
+				zap.Int("remaining", len(clients)-i),
+				zap.Duration("timeout", timeout))
+			errs = append(errs, fmt.Errorf("timeout waiting for %d clients to disconnect", len(clients)-i))
+			goto done
 		}
 	}
 
+done:
 	// Return aggregated errors using errors.Join (Go 1.20+)
 	if len(errs) > 0 {
 		return errors.Join(errs...)
