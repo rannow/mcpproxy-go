@@ -314,8 +314,9 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			return nil
 		}
 
-		// MED-002: Connect to server with centralized timeout
-		ctx, cancel := context.WithTimeout(context.Background(), config.DefaultConnectionTimeout)
+		// MED-002: Connect to server with per-server or default timeout
+		effectiveTimeout := serverConfig.GetConnectionTimeout()
+		ctx, cancel := context.WithTimeout(context.Background(), effectiveTimeout)
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
@@ -697,15 +698,18 @@ func (m *Manager) connectPhase(ctx context.Context, jobs []clientJob, maxConcurr
 			defer wg.Done()
 			defer func() { <-semaphore }() // Release
 
+			// Use per-server timeout if configured, otherwise use the phase default
+			effectiveTimeout := j.client.Config.GetConnectionTimeout()
+
 			// Create timeout context for this connection attempt
-			connCtx, cancel := context.WithTimeout(ctx, timeout)
+			connCtx, cancel := context.WithTimeout(ctx, effectiveTimeout)
 			defer cancel()
 
 			m.logger.Info("Connecting server",
 				zap.String("phase", phase),
 				zap.String("id", j.id),
 				zap.String("name", j.client.Config.Name),
-				zap.Duration("timeout", timeout))
+				zap.Duration("timeout", effectiveTimeout))
 
 			if err := j.client.Connect(connCtx); err != nil {
 				m.logger.Warn("Connection failed",
@@ -1402,8 +1406,9 @@ func (m *Manager) performHealthChecks() {
 				zap.String("state", state.String()),
 				zap.Bool("health_check_enabled", client.Config.HealthCheck))
 
-			// Attempt to reconnect
-			ctx, cancel := context.WithTimeout(context.Background(), config.DefaultConnectionTimeout)
+			// Attempt to reconnect with per-server or default timeout
+			effectiveTimeout := client.Config.GetConnectionTimeout()
+			ctx, cancel := context.WithTimeout(context.Background(), effectiveTimeout)
 			err := client.Connect(ctx)
 			cancel()
 

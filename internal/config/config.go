@@ -210,6 +210,10 @@ type ServerConfig struct {
 	// Auto-disable threshold - per-server override (0 = use global default)
 	AutoDisableThreshold      int       `json:"auto_disable_threshold,omitempty" mapstructure:"auto_disable_threshold"` // Number of consecutive failures before auto-disabling
 
+	// Connection timeout - per-server override (0 = use global default: 60s)
+	// Useful for slow-starting servers like uvx-based AWS servers
+	ConnectionTimeout         Duration  `json:"connection_timeout,omitempty" mapstructure:"connection_timeout"` // Connection timeout for this server
+
 	// Auto-disable state - persisted across restarts
 	AutoDisableReason         string    `json:"auto_disable_reason,omitempty" mapstructure:"auto_disable_reason"` // Reason for auto-disable
 
@@ -232,6 +236,16 @@ func (s *ServerConfig) IsQuarantined() bool {
 // IsDisabled determines if the server is disabled
 func (s *ServerConfig) IsDisabled() bool {
 	return s.StartupMode == "disabled" || s.StartupMode == "auto_disabled"
+}
+
+// GetConnectionTimeout returns the effective connection timeout for this server.
+// If a per-server timeout is configured (ConnectionTimeout > 0), it uses that.
+// Otherwise, it returns the global DefaultConnectionTimeout.
+func (s *ServerConfig) GetConnectionTimeout() time.Duration {
+	if s.ConnectionTimeout > 0 {
+		return time.Duration(s.ConnectionTimeout)
+	}
+	return DefaultConnectionTimeout
 }
 
 // MarshalJSON implements custom JSON marshaling to exclude deprecated fields
