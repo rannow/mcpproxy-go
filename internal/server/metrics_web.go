@@ -361,8 +361,8 @@ func (s *Server) handleMetricsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get tools indexed count
+	// NOTE: Feature Backlog - Add IndexManager.GetToolCount() method
 	toolsIndexed := 0
-	// TODO: Add method to get tool count from index manager
 
 	metrics := MetricsData{
 		Timestamp:       time.Now(),

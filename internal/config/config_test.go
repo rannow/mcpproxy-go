@@ -121,11 +121,11 @@ func TestConfigJSONSerialization(t *testing.T) {
 		EnablePrompts:     false,
 		Servers: []*ServerConfig{
 			{
-				Name:     "test-server",
-				URL:      "http://localhost:3000",
-				Protocol: "http",
-				Enabled:  true,
-				Created:  time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+				Name:        "test-server",
+				URL:         "http://localhost:3000",
+				Protocol:    "http",
+				StartupMode: "active",
+				Created:     time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
 			},
 		},
 	}
@@ -167,8 +167,8 @@ func TestServerConfig(t *testing.T) {
 			"Authorization": "Bearer token123",
 			"Content-Type":  "application/json",
 		},
-		Enabled: true,
-		Created: now,
+		StartupMode: "active",
+		Created:     now,
 	}
 
 	// Test JSON serialization
@@ -183,7 +183,7 @@ func TestServerConfig(t *testing.T) {
 	assert.Equal(t, server.URL, restored.URL)
 	assert.Equal(t, server.Protocol, restored.Protocol)
 	assert.Equal(t, server.Headers, restored.Headers)
-	assert.Equal(t, server.Enabled, restored.Enabled)
+	assert.Equal(t, server.StartupMode, restored.StartupMode)
 	assert.True(t, server.Created.Equal(restored.Created))
 }
 
@@ -225,13 +225,56 @@ func TestConvertFromCursorFormat(t *testing.T) {
 	assert.Equal(t, []string{"mcp-server-sqlite", "--db-path", "/tmp/test.db"}, sqliteServer.Args)
 	assert.Equal(t, map[string]string{"DEBUG": "1"}, sqliteServer.Env)
 	assert.Equal(t, "stdio", sqliteServer.Protocol)
-	assert.True(t, sqliteServer.Enabled)
+	assert.Equal(t, "active", sqliteServer.StartupMode)
 
 	require.NotNil(t, httpServer)
 	assert.Equal(t, "http://localhost:3001", httpServer.URL)
 	assert.Equal(t, map[string]string{"Authorization": "Bearer token"}, httpServer.Headers)
 	assert.Equal(t, "http", httpServer.Protocol)
-	assert.True(t, httpServer.Enabled)
+	assert.Equal(t, "active", httpServer.StartupMode)
+}
+
+func TestConfigStartupModeValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		startupMode string
+		shouldError bool
+	}{
+		{"valid active", "active", false},
+		{"valid disabled", "disabled", false},
+		{"valid quarantined", "quarantined", false},
+		{"valid auto_disabled", "auto_disabled", false},
+		{"valid lazy_loading", "lazy_loading", false},
+		{"empty (unset)", "", false}, // Empty is valid (will be migrated later)
+		{"invalid mode", "invalid", true},
+		{"uppercase", "ACTIVE", true},
+		{"mixed case", "Active", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Listen: ":8080",
+				Servers: []*ServerConfig{
+					{
+						Name:        "test-server",
+						StartupMode: tt.startupMode,
+					},
+				},
+			}
+
+			err := cfg.Validate()
+			if tt.shouldError {
+				if err == nil {
+					t.Errorf("expected error for startup_mode=%q, got nil", tt.startupMode)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for startup_mode=%q: %v", tt.startupMode, err)
+				}
+			}
+		})
+	}
 }
 
 func TestConfigSecurityModes(t *testing.T) {
@@ -404,10 +447,10 @@ func TestSaveAndLoadConfig(t *testing.T) {
 		ToolsLimit: 7,
 		Servers: []*ServerConfig{
 			{
-				Name:    "example",
-				URL:     "http://example.com",
-				Enabled: true,
-				Created: time.Now(),
+				Name:        "example",
+				URL:         "http://example.com",
+				StartupMode: "active",
+				Created:     time.Now(),
 			},
 		},
 	}

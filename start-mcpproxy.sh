@@ -3,7 +3,8 @@
 # This script must be run manually in a Terminal window to enable system tray
 #
 # Usage: ./start-mcpproxy.sh
-
+# Auto Start on Login
+# Create a plist file in ~/Library/LaunchAgents/com.smartmcpproxy.mcpproxy.plist
 cd "$(dirname "$0")"
 
 echo "🚀 Starting MCPProxy with system tray..."
@@ -19,4 +20,4 @@ echo "────────────────────────�
 echo ""
 
 # Start mcpproxy with tray enabled
-./mcpproxy serve
+./mcpproxy serve --tray

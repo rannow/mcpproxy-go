@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ type Manager struct {
 	logConfig       *config.LogConfig
 	globalConfig    *config.Config
 	storage         *storage.BoltDB
+	storageManager  *storage.Manager // For persisting state changes
 	notificationMgr *NotificationManager
 	eventBus        *events.EventBus // Event bus for publishing state changes
 
@@ -101,6 +103,14 @@ func (m *Manager) SetServerAutoDisableCallback(callback func(serverName string, 
 	m.onServerAutoDisable = callback
 }
 
+// SetStorageManager sets the storage manager for persisting state changes
+func (m *Manager) SetStorageManager(storageManager *storage.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.storageManager = storageManager
+	m.logger.Info("Storage manager configured for upstream manager")
+}
+
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
@@ -117,8 +127,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
 			!equalStringMaps(existingConfig.Env, serverConfig.Env) ||
 			!equalStringMaps(existingConfig.Headers, serverConfig.Headers) ||
-			existingConfig.Enabled != serverConfig.Enabled ||
-			existingConfig.Quarantined != serverConfig.Quarantined
+			existingConfig.StartupMode != serverConfig.StartupMode
 
 		if configChanged {
 			m.logger.Info("Server configuration changed, disconnecting existing client",
@@ -138,11 +147,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			existingClient.Config = serverConfig
 
 			// Restore auto-disabled state from updated config (fix for config reload bug)
-			if serverConfig.AutoDisabled {
-				existingClient.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+			if serverConfig.StartupMode == "auto_disabled" {
+				existingClient.StateManager.SetAutoDisabled("Restored from config")
 				m.logger.Info("Restored auto-disabled state during config update",
 					zap.String("server", serverConfig.Name),
-					zap.String("reason", serverConfig.AutoDisableReason))
+					zap.String("startup_mode", serverConfig.StartupMode))
 			}
 
 			return nil
@@ -171,11 +180,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		zap.Int("threshold", threshold))
 
 	// Restore auto-disable state from config (if server was previously auto-disabled)
-	if serverConfig.AutoDisabled {
-		client.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+	if serverConfig.StartupMode == "auto_disabled" {
+		client.StateManager.SetAutoDisabled("Restored from config")
 		m.logger.Info("Restored auto-disabled state from config",
 			zap.String("server", serverConfig.Name),
-			zap.String("reason", serverConfig.AutoDisableReason))
+			zap.String("startup_mode", serverConfig.StartupMode))
 	}
 
 	// Set up notification callback for state changes
@@ -219,6 +228,13 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		})
 	}
 
+	// Set storage manager for persisting state changes
+	if m.storageManager != nil {
+		client.SetStorageManager(m.storageManager)
+		m.logger.Debug("Configured storage manager for client",
+			zap.String("server", serverConfig.Name))
+	}
+
 	m.clients[id] = client
 	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
@@ -258,30 +274,39 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		return err
 	}
 
-	if !serverConfig.Enabled {
+	// Check startup mode and skip connection if not active
+	if serverConfig.StartupMode == "disabled" {
 		m.logger.Debug("Skipping connection for disabled server",
 			zap.String("id", id),
 			zap.String("name", serverConfig.Name))
 		return nil
 	}
 
-	if serverConfig.Quarantined {
+	if serverConfig.StartupMode == "quarantined" {
 		m.logger.Debug("Skipping connection for quarantined server",
 			zap.String("id", id),
 			zap.String("name", serverConfig.Name))
 		return nil
 	}
 
-	if serverConfig.AutoDisabled {
+	if serverConfig.StartupMode == "auto_disabled" {
 		m.logger.Debug("Skipping connection for auto-disabled server",
 			zap.String("id", id),
-			zap.String("name", serverConfig.Name),
-			zap.String("reason", serverConfig.AutoDisableReason))
+			zap.String("name", serverConfig.Name))
 		return nil
 	}
 
 	// Check if client exists and is already connected
 	if client, exists := m.GetClient(id); exists {
+		// Check runtime-only userStopped flag (NEVER persisted)
+		// If user manually stopped this server via tray, skip connection
+		if client.StateManager.IsUserStopped() {
+			m.logger.Debug("Skipping connection for user-stopped server (runtime-only state)",
+				zap.String("id", id),
+				zap.String("name", serverConfig.Name))
+			return nil
+		}
+
 		if client.IsConnected() {
 			m.logger.Debug("Server is already connected, skipping connection attempt",
 				zap.String("id", id),
@@ -289,8 +314,9 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			return nil
 		}
 
-		// Connect to server with timeout to prevent hanging
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// MED-002: Connect to server with per-server or default timeout
+		effectiveTimeout := serverConfig.GetConnectionTimeout()
+		ctx, cancel := context.WithTimeout(context.Background(), effectiveTimeout)
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
@@ -313,8 +339,13 @@ func (m *Manager) RemoveServer(id string) {
 		m.logger.Info("Removing upstream server",
 			zap.String("id", id),
 			zap.String("state", client.GetState().String()))
-		_ = client.Disconnect()
+		// Remove from map immediately to prevent further operations
 		delete(m.clients, id)
+		// Disconnect asynchronously to avoid blocking if connection is in progress
+		// This prevents 30s delay when removing a connecting server
+		go func(c *managed.Client) {
+			_ = c.Disconnect()
+		}(client)
 	}
 }
 
@@ -359,7 +390,7 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 	connectedCount := 0
 
 	for id, client := range m.clients {
-		if !client.Config.Enabled {
+		if client.Config.IsDisabled() {
 			continue
 		}
 		if !client.IsConnected() {
@@ -415,8 +446,8 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, fmt.Errorf("no client found for server: %s", serverName)
 	}
 
-	if !targetClient.Config.Enabled {
-		return nil, fmt.Errorf("client for server %s is disabled", serverName)
+	if targetClient.Config.IsDisabled() {
+		return nil, fmt.Errorf("client for server %s is disabled (startup_mode: %s)", serverName, targetClient.Config.StartupMode)
 	}
 
 	// Check connection status and provide detailed error information
@@ -547,47 +578,53 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		m.logger.Debug("Evaluating client for connection",
 			zap.String("id", id),
 			zap.String("name", client.Config.Name),
-			zap.Bool("enabled", client.Config.Enabled),
+			zap.String("startup_mode", client.Config.StartupMode),
+			zap.Bool("should_connect", client.Config.ShouldConnectOnStartup()),
 			zap.Bool("is_connected", client.IsConnected()),
 			zap.Bool("is_connecting", client.IsConnecting()),
-			zap.String("current_state", client.GetState().String()),
-			zap.Bool("quarantined", client.Config.Quarantined))
+			zap.String("current_state", client.GetState().String()))
 
-		if !client.Config.Enabled {
-			m.logger.Debug("Skipping disabled client",
+		if !client.Config.ShouldConnectOnStartup() {
+			m.logger.Debug("Skipping client (startup_mode prevents connection)",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name))
+				zap.String("name", client.Config.Name),
+				zap.String("startup_mode", client.Config.StartupMode))
 
 			if client.IsConnected() {
-				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.Config.Name))
+				m.logger.Info("Disconnecting client that should not connect on startup",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name),
+					zap.String("startup_mode", client.Config.StartupMode))
 				_ = client.Disconnect()
 			}
 			continue
 		}
 
-		// Check if server is stopped - don't auto-connect stopped servers
-		if client.Config.Stopped {
-			m.logger.Debug("Skipping stopped server (user manually stopped)",
+		// Check runtime-only userStopped flag (NOT persisted)
+		// If user manually stopped this server via tray, skip connection
+		if client.StateManager.IsUserStopped() {
+			m.logger.Debug("Skipping user-stopped server (runtime-only state)",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name))
 
 			if client.IsConnected() {
-				m.logger.Info("Disconnecting stopped server", zap.String("id", id), zap.String("name", client.Config.Name))
+				m.logger.Info("Disconnecting user-stopped server",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name))
 				_ = client.Disconnect()
 			}
 			continue
 		}
 
-		// Lazy loading check: Set servers to Sleeping if they have tools in DB and don't have StartOnBoot flag
-		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && !client.Config.StartOnBoot && client.Config.EverConnected {
-			m.logger.Debug("Setting server to Sleeping state (lazy loading enabled, tools in DB)",
+		// Lazy loading optimization: Skip connection for servers with cached tools
+		// These servers will connect on-demand when a tool call is made
+		// ConnectionState remains Disconnected until first tool call
+		if m.globalConfig.EnableLazyLoading && client.Config.ToolCount > 0 && client.Config.StartupMode == "lazy_loading" && client.Config.EverConnected {
+			m.logger.Debug("Skipping connection for lazy loading server with cached tools",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name),
 				zap.Int("tool_count", client.Config.ToolCount),
-				zap.Bool("start_on_boot", client.Config.StartOnBoot))
-
-			// Set state to Sleeping instead of Disconnected
-			client.StateManager.SetSleeping()
+				zap.String("startup_mode", client.Config.StartupMode))
 			continue
 		}
 
@@ -620,15 +657,15 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	// Get concurrency limit from config
 	maxConcurrent := m.globalConfig.MaxConcurrentConnections
 	if maxConcurrent <= 0 {
-		maxConcurrent = 20 // Fallback default
+		maxConcurrent = 10 // Fallback default (reduced to avoid resource contention)
 	}
 
 	m.logger.Info("🚀 Phase 1: Initial connection attempts",
 		zap.Int("total_clients", len(jobs)),
 		zap.Int("max_concurrent", maxConcurrent))
 
-	// PHASE 1: Initial connection attempts (with short timeout)
-	failedJobs := m.connectPhase(ctx, jobs, maxConcurrent, 30*time.Second, "initial")
+	// MED-002: PHASE 1: Initial connection attempts (with centralized timeout)
+	failedJobs := m.connectPhase(ctx, jobs, maxConcurrent, config.DefaultConnectionTimeout, "initial")
 
 	// PHASE 2: Retry failed servers (if any)
 	if len(failedJobs) > 0 {
@@ -661,15 +698,18 @@ func (m *Manager) connectPhase(ctx context.Context, jobs []clientJob, maxConcurr
 			defer wg.Done()
 			defer func() { <-semaphore }() // Release
 
+			// Use per-server timeout if configured, otherwise use the phase default
+			effectiveTimeout := j.client.Config.GetConnectionTimeout()
+
 			// Create timeout context for this connection attempt
-			connCtx, cancel := context.WithTimeout(ctx, timeout)
+			connCtx, cancel := context.WithTimeout(ctx, effectiveTimeout)
 			defer cancel()
 
 			m.logger.Info("Connecting server",
 				zap.String("phase", phase),
 				zap.String("id", j.id),
 				zap.String("name", j.client.Config.Name),
-				zap.Duration("timeout", timeout))
+				zap.Duration("timeout", effectiveTimeout))
 
 			if err := j.client.Connect(connCtx); err != nil {
 				m.logger.Warn("Connection failed",
@@ -695,9 +735,9 @@ func (m *Manager) connectPhase(ctx context.Context, jobs []clientJob, maxConcurr
 	return failedJobs
 }
 
-// retryFailedServers performs up to 5 retries for failed servers
+// retryFailedServers performs up to MaxConnectionRetries for failed servers
 func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob, maxConcurrent int) {
-	const maxRetries = 5
+	maxRetries := config.MaxConnectionRetries
 
 	for retry := 1; retry <= maxRetries; retry++ {
 		if len(failedJobs) == 0 {
@@ -710,10 +750,10 @@ func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob
 			zap.Int("max_retries", maxRetries),
 			zap.Int("servers_to_retry", len(failedJobs)))
 
-		// Exponential backoff delay before retry
+		// MED-002: Exponential backoff delay before retry with centralized max
 		backoffDelay := time.Duration(1<<uint(retry-1)) * time.Second
-		if backoffDelay > 30*time.Second {
-			backoffDelay = 30 * time.Second
+		if backoffDelay > config.MaxBackoffDelay {
+			backoffDelay = config.MaxBackoffDelay
 		}
 
 		m.logger.Info("Waiting before retry",
@@ -721,8 +761,8 @@ func (m *Manager) retryFailedServers(ctx context.Context, failedJobs []clientJob
 			zap.Int("retry", retry))
 		time.Sleep(backoffDelay)
 
-		// Retry failed servers
-		failedJobs = m.connectPhase(ctx, failedJobs, maxConcurrent, 30*time.Second, fmt.Sprintf("retry-%d", retry))
+		// MED-002: Retry failed servers with centralized timeout
+		failedJobs = m.connectPhase(ctx, failedJobs, maxConcurrent, config.DefaultConnectionTimeout, fmt.Sprintf("retry-%d", retry))
 
 		// Check if we're on the last retry
 		if retry == maxRetries && len(failedJobs) > 0 {
@@ -752,16 +792,13 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 		zap.Int("consecutive_failures", info.ConsecutiveFailures),
 		zap.String("error", errorMsg))
 
-	// Update config to disabled
-	client.Config.Enabled = false
+	// Update config to auto_disabled
+	reason := fmt.Sprintf("Server automatically disabled after %d startup failures", info.ConsecutiveFailures)
+	client.Config.StartupMode = "auto_disabled"
+	client.Config.AutoDisableReason = reason
 
 	// Mark as auto-disabled in StateManager (for tray UI and status)
-	reason := fmt.Sprintf("Server automatically disabled after %d startup failures", info.ConsecutiveFailures)
 	client.StateManager.SetAutoDisabled(reason)
-
-	// Persist auto-disable state to config (so it survives restarts)
-	client.Config.AutoDisabled = true
-	client.Config.AutoDisableReason = reason
 
 	// Write detailed failure information to failed_servers.log for web UI display
 	dataDir := m.globalConfig.DataDir
@@ -785,7 +822,7 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 		}
 	}
 
-	// Persist to storage
+	// Persist to storage (storage layer still uses legacy fields for backward compatibility)
 	if m.storage != nil {
 		if err := m.storage.SaveUpstream(&storage.UpstreamRecord{
 			ID:                       client.Config.Name,
@@ -799,8 +836,7 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 			Headers:                  client.Config.Headers,
 			OAuth:                    client.Config.OAuth,
 			RepositoryURL:            client.Config.RepositoryURL,
-			Enabled:                  false, // DISABLED
-			Quarantined:              client.Config.Quarantined,
+			ServerState:              "auto_disabled",
 			Created:                  client.Config.Created,
 			Updated:                  time.Now(),
 			Isolation:                client.Config.Isolation,
@@ -809,8 +845,6 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 			EverConnected:            client.Config.EverConnected,
 			LastSuccessfulConnection: client.Config.LastSuccessfulConnection,
 			ToolCount:                client.Config.ToolCount,
-			AutoDisabled:             client.Config.AutoDisabled,
-			AutoDisableReason:        client.Config.AutoDisableReason,
 			AutoDisableThreshold:     client.Config.AutoDisableThreshold,
 		}); err != nil {
 			m.logger.Error("Failed to persist disabled server state",
@@ -832,7 +866,9 @@ func (m *Manager) handlePersistentFailure(id string, client *managed.Client) {
 		zap.String("reason", reason))
 }
 
-// DisconnectAll disconnects from all servers
+// DisconnectAll disconnects from all servers in parallel to avoid blocking
+// CRIT-005: Now aggregates all errors instead of returning only the last one
+// TIMEOUT-FIX: Execute disconnects in parallel with timeout to prevent API hangs
 func (m *Manager) DisconnectAll() error {
 	m.mu.RLock()
 	clients := make([]*managed.Client, 0, len(m.clients))
@@ -841,14 +877,55 @@ func (m *Manager) DisconnectAll() error {
 	}
 	m.mu.RUnlock()
 
-	var lastError error
+	if len(clients) == 0 {
+		return nil
+	}
+
+	// TIMEOUT-FIX: Disconnect all clients in parallel with timeout
+	type disconnectResult struct {
+		serverName string
+		err        error
+	}
+
+	results := make(chan disconnectResult, len(clients))
+	timeout := 10 * time.Second // Maximum wait time for all disconnects
+
 	for _, client := range clients {
-		if err := client.Disconnect(); err != nil {
-			lastError = err
+		go func(c *managed.Client) {
+			err := c.Disconnect()
+			results <- disconnectResult{serverName: c.Config.Name, err: err}
+		}(client)
+	}
+
+	// Collect results with timeout
+	var errs []error
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for i := 0; i < len(clients); i++ {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", result.serverName, result.err))
+				m.logger.Warn("Failed to disconnect client",
+					zap.String("server", result.serverName),
+					zap.Error(result.err))
+			}
+		case <-timer.C:
+			m.logger.Warn("DisconnectAll timeout reached, some clients may not have disconnected cleanly",
+				zap.Int("remaining", len(clients)-i),
+				zap.Duration("timeout", timeout))
+			errs = append(errs, fmt.Errorf("timeout waiting for %d clients to disconnect", len(clients)-i))
+			goto done
 		}
 	}
 
-	return lastError
+done:
+	// Return aggregated errors using errors.Join (Go 1.20+)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // HasDockerContainers checks if any connected servers are running Docker containers
@@ -913,9 +990,13 @@ func (m *Manager) GetStats() map[string]interface{} {
 			status["server_version"] = connectionInfo.ServerVersion
 		}
 
-		if client.GetServerInfo() != nil {
-			info := client.GetServerInfo()
-			status["protocol_version"] = info.ProtocolVersion
+		// Only call GetServerInfo on connected clients to avoid blocking on connecting clients
+		// GetServerInfo requires c.mu.RLock which would block if Connect holds c.mu.Lock
+		if connectionInfo.State == types.StateReady {
+			if client.GetServerInfo() != nil {
+				info := client.GetServerInfo()
+				status["protocol_version"] = info.ProtocolVersion
+			}
 		}
 
 		serverStatus[id] = status
@@ -931,34 +1012,21 @@ func (m *Manager) GetStats() map[string]interface{} {
 }
 
 // GetTotalToolCount returns the total number of tools across all servers
-// This is optimized to avoid network calls during shutdown for performance
+// This uses cached tool counts to avoid blocking network calls during status updates
+// Tool counts are updated when ListTools is called on each client
 func (m *Manager) GetTotalToolCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	totalTools := 0
 	for _, client := range m.clients {
-		if !client.Config.Enabled || !client.IsConnected() {
+		if client.Config.IsDisabled() || !client.IsConnected() {
 			continue
 		}
 
-		// Quick check if client is actually reachable before making network call
-		if !client.IsConnected() {
-			continue
-		}
-
-		// Use timeout for UI status updates (30 seconds for SSE servers)
-		// This allows time for SSE servers to establish connections and respond
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-		m.logger.Debug("Starting ListTools for tool counting",
-			zap.Duration("timeout", 30*time.Second))
-		tools, err := client.ListTools(ctx)
-		cancel()
-		if err == nil && tools != nil {
-			totalTools += len(tools)
-		}
-		// Silently ignore errors during tool counting to avoid noise during shutdown
+		// Use cached tool count from Config instead of making network calls
+		// The tool count is updated when ListTools() succeeds on the client
+		totalTools += client.Config.ToolCount
 	}
 	return totalTools
 }
@@ -1030,7 +1098,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 
 	// Trigger connection attempt in background to avoid blocking
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), config.BatchOperationTimeout)
 		defer cancel()
 
 		// Important: Ensure a clean reconnect only if not already connected.
@@ -1058,7 +1126,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 func (m *Manager) startOAuthEventMonitor() {
 	m.logger.Info("Starting OAuth event monitor for cross-process notifications")
 
-	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	ticker := time.NewTicker(config.HealthCheckInterval) // Check every 5 seconds
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -1152,8 +1220,8 @@ func (m *Manager) scanForNewTokens() {
 
 	now := time.Now()
 	for id, c := range clients {
-		// Only consider enabled, HTTP/SSE servers not currently connected
-		if !c.Config.Enabled || c.IsConnected() {
+		// Only consider servers that should connect on startup but aren't currently connected
+		if c.Config.IsDisabled() || c.IsConnected() {
 			continue
 		}
 
@@ -1164,7 +1232,7 @@ func (m *Manager) scanForNewTokens() {
 		}
 
 		// Rate-limit triggers per server
-		if last, ok := m.tokenReconnect[id]; ok && now.Sub(last) < 10*time.Second {
+		if last, ok := m.tokenReconnect[id]; ok && now.Sub(last) < config.TokenReconnectCooldown {
 			continue
 		}
 
@@ -1215,7 +1283,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), config.LongRunningOperationTimeout)
 		defer cancel()
 
 		if force {
@@ -1234,7 +1302,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
 				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false)
 				if err2 == nil {
-					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
+					tctx, tcancel := context.WithTimeout(ctx, config.QuickOperationTimeout)
 					_ = testClient.Connect(tctx)
 					tcancel()
 					if testClient.GetServerInfo() != nil {
@@ -1269,7 +1337,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 func (m *Manager) startHealthCheckMonitor() {
 	m.logger.Info("Starting health check monitor for servers with health_check enabled")
 
-	ticker := time.NewTicker(60 * time.Second) // Check every 60 seconds
+	ticker := time.NewTicker(config.AutoRecoveryCheckInterval) // Check every 60 seconds
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -1277,40 +1345,70 @@ func (m *Manager) startHealthCheckMonitor() {
 	}
 }
 
-// performHealthChecks checks the health of all servers with HealthCheck flag enabled
+// performHealthChecks checks the health of all servers and attempts reconnection for disconnected ones
+// Servers with HealthCheck=true get active health checks, all servers get reconnection attempts
 func (m *Manager) performHealthChecks() {
 	m.mu.RLock()
-	clients := make(map[string]*managed.Client)
+	allClients := make(map[string]*managed.Client)
 	for id, client := range m.clients {
-		// Only check servers with HealthCheck enabled
-		if client.Config.HealthCheck {
-			clients[id] = client
-		}
+		allClients[id] = client
 	}
 	m.mu.RUnlock()
 
-	if len(clients) == 0 {
+	if len(allClients) == 0 {
 		return
 	}
 
-	m.logger.Debug("Performing health checks", zap.Int("servers_with_health_check", len(clients)))
+	var healthCheckCount, disconnectedCount int
+	for _, client := range allClients {
+		if client.Config.HealthCheck {
+			healthCheckCount++
+		}
+		if !client.IsConnected() && !client.Config.IsDisabled() && !client.StateManager.IsAutoDisabled() {
+			disconnectedCount++
+		}
+	}
 
-	for id, client := range clients {
-		// Skip if not enabled
-		if !client.Config.Enabled {
+	m.logger.Debug("Performing health checks",
+		zap.Int("total_servers", len(allClients)),
+		zap.Int("servers_with_health_check", healthCheckCount),
+		zap.Int("disconnected_servers", disconnectedCount))
+
+	for id, client := range allClients {
+		// Skip if disabled or auto-disabled
+		if client.Config.IsDisabled() {
+			continue
+		}
+		if client.StateManager.IsAutoDisabled() {
+			continue
+		}
+		// Skip if user manually stopped
+		if client.StateManager.IsUserStopped() {
 			continue
 		}
 
-		// Check connection status
+		// Check connection status - reconnect ALL disconnected servers, not just HealthCheck ones
 		if !client.IsConnected() {
 			state := client.GetState()
+
+			// Check if we should retry based on backoff
+			if !client.ShouldRetry() {
+				m.logger.Debug("Health check: Skipping reconnection (backoff not elapsed)",
+					zap.String("id", id),
+					zap.String("name", client.Config.Name),
+					zap.String("state", state.String()))
+				continue
+			}
+
 			m.logger.Info("Health check: Server not connected, attempting reconnection",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name),
-				zap.String("state", state.String()))
+				zap.String("state", state.String()),
+				zap.Bool("health_check_enabled", client.Config.HealthCheck))
 
-			// Attempt to reconnect
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// Attempt to reconnect with per-server or default timeout
+			effectiveTimeout := client.Config.GetConnectionTimeout()
+			ctx, cancel := context.WithTimeout(context.Background(), effectiveTimeout)
 			err := client.Connect(ctx)
 			cancel()
 
@@ -1324,7 +1422,8 @@ func (m *Manager) performHealthChecks() {
 					zap.String("id", id),
 					zap.String("name", client.Config.Name))
 			}
-		} else {
+		} else if client.Config.HealthCheck {
+			// Only log healthy status for servers with explicit health check
 			m.logger.Debug("Health check: Server is healthy",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name))

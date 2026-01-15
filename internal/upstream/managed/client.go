@@ -25,9 +25,10 @@ type Client struct {
 	StateManager *types.StateManager // Public field for callback access
 
 	// Configuration for creating fresh connections
-	logConfig    *config.LogConfig
-	globalConfig *config.Config
-	storage      *storage.BoltDB
+	logConfig      *config.LogConfig
+	globalConfig   *config.Config
+	storage        *storage.BoltDB
+	storageManager *storage.Manager // For persisting state changes
 
 	// Connection state protection
 	mu sync.RWMutex
@@ -49,6 +50,11 @@ type Client struct {
 	// Auto-disable callback
 	onAutoDisable func(serverName string, reason string)
 	reconnectInProgress bool
+
+	// Intentional disconnect flag - prevents auto-reconnection when Disconnect() is called explicitly
+	// This distinguishes between user/manager-initiated disconnects vs unexpected process crashes
+	intentionalDisconnect bool
+	intentionalMu         sync.RWMutex
 }
 
 // NewClient creates a new managed client with state management
@@ -81,11 +87,11 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 
 	// Initialize StateManager from config to preserve auto-disable state across restarts
 	// This ensures the runtime state matches the persisted config file state
-	if serverConfig.AutoDisabled {
-		mc.StateManager.SetAutoDisabled(serverConfig.AutoDisableReason)
+	if serverConfig.StartupMode == "auto_disabled" {
+		mc.StateManager.SetAutoDisabled("Server was auto-disabled")
 		mc.logger.Info("Initialized StateManager with auto-disabled state from config",
 			zap.String("server", serverConfig.Name),
-			zap.String("reason", serverConfig.AutoDisableReason))
+			zap.String("startup_mode", serverConfig.StartupMode))
 	}
 
 	// Set up state change callback
@@ -99,14 +105,47 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
+	// Clear the intentional disconnect flag when Connect is called
+	// This allows future unexpected disconnects to trigger auto-reconnection
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = false
+	mc.intentionalMu.Unlock()
+
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
 		return fmt.Errorf("connection already in progress or established (state: %s)", mc.StateManager.GetState().String())
 	}
 
-	mc.logger.Info("Starting managed connection to upstream server",
+	// CRITICAL FIX: Detect and resolve state desync between core and managed client.
+	// This fixes the "client already connected" error during retry attempts.
+	// The issue occurs when core.Client.connected=true but managed state is Error/Disconnected.
+	coreConnected := mc.coreClient.IsConnectedFlag()
+	managedState := mc.StateManager.GetState()
+	if coreConnected && (managedState == types.StateError || managedState == types.StateDisconnected) {
+		mc.logger.Warn("🔄 State desync detected: core thinks connected but managed state is error/disconnected",
+			zap.String("server", mc.Config.Name),
+			zap.Bool("core_connected", coreConnected),
+			zap.String("managed_state", managedState.String()))
+
+		// Force reset the core client state to allow reconnection
+		if err := mc.coreClient.ForceDisconnect(); err != nil {
+			mc.logger.Warn("ForceDisconnect during state sync failed",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+		} else {
+			mc.logger.Info("✅ State desync resolved via ForceDisconnect",
+				zap.String("server", mc.Config.Name))
+		}
+	}
+
+	// Get connection info for enhanced logging
+	connInfo := mc.StateManager.GetConnectionInfo()
+	mc.logger.Info("🔌 Starting managed connection to upstream server",
 		zap.String("server", mc.Config.Name),
-		zap.String("current_state", mc.StateManager.GetState().String()))
+		zap.String("current_state", mc.StateManager.GetState().String()),
+		zap.Int("previous_failures", connInfo.ConsecutiveFailures),
+		zap.Int("auto_disable_threshold", connInfo.AutoDisableThreshold),
+		zap.Bool("was_auto_disabled", connInfo.AutoDisabled))
 
 	// Transition to connecting state
 	mc.StateManager.TransitionTo(types.StateConnecting)
@@ -144,6 +183,13 @@ func (mc *Client) Connect(ctx context.Context) error {
 		mc.StateManager.TransitionTo(types.StateReady)
 	}
 
+	// FIX: Explicitly reset consecutive failures on successful connection
+	// This ensures clean slate after reconnection, preventing accumulated failures
+	// from previous sessions from triggering premature auto-disable
+	mc.StateManager.ResetConsecutiveFailures()
+	mc.logger.Debug("Reset consecutive failures after successful connection",
+		zap.String("server", mc.Config.Name))
+
 	// Update state manager with server info
 	if serverInfo := mc.coreClient.GetServerInfo(); serverInfo != nil {
 		mc.StateManager.SetServerInfo(serverInfo.ServerInfo.Name, serverInfo.ServerInfo.Version)
@@ -167,8 +213,6 @@ func (mc *Client) Connect(ctx context.Context) error {
 			Headers:                  mc.Config.Headers,
 			OAuth:                    mc.Config.OAuth,
 			RepositoryURL:            mc.Config.RepositoryURL,
-			Enabled:                  mc.Config.Enabled,
-			Quarantined:              mc.Config.Quarantined,
 			Created:                  mc.Config.Created,
 			Updated:                  time.Now(),
 			Isolation:                mc.Config.Isolation,
@@ -177,8 +221,6 @@ func (mc *Client) Connect(ctx context.Context) error {
 			EverConnected:            mc.Config.EverConnected,
 			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
 			ToolCount:                mc.Config.ToolCount,
-			AutoDisabled:             mc.Config.AutoDisabled,
-			AutoDisableReason:        mc.Config.AutoDisableReason,
 			AutoDisableThreshold:     mc.Config.AutoDisableThreshold,
 		}); err != nil {
 			mc.logger.Warn("Failed to persist connection history to storage",
@@ -210,6 +252,12 @@ func (mc *Client) Disconnect() error {
 	defer mc.mu.Unlock()
 
 	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.Config.Name))
+
+	// Mark this as an intentional disconnect to prevent auto-reconnection
+	// This flag is checked in onStateChange() callback
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = true
+	mc.intentionalMu.Unlock()
 
 	// Stop background monitoring
 	mc.stopBackgroundMonitoring()
@@ -315,6 +363,11 @@ func (mc *Client) SetAutoDisableCallback(callback func(serverName string, reason
 	mc.onAutoDisable = callback
 }
 
+// SetStorageManager sets the storage manager for persisting state changes
+func (mc *Client) SetStorageManager(manager *storage.Manager) {
+	mc.storageManager = manager
+}
+
 // ListTools retrieves tools with concurrency control
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
@@ -386,18 +439,12 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			Headers:                  mc.Config.Headers,
 			OAuth:                    mc.Config.OAuth,
 			RepositoryURL:            mc.Config.RepositoryURL,
-			Enabled:                  mc.Config.Enabled,
-			Quarantined:              mc.Config.Quarantined,
 			Created:                  mc.Config.Created,
 			Updated:                  time.Now(),
 			Isolation:                mc.Config.Isolation,
 			GroupID:                  mc.Config.GroupID,
 			GroupName:                mc.Config.GroupName,
 			EverConnected:            mc.Config.EverConnected,
-			LastSuccessfulConnection: mc.Config.LastSuccessfulConnection,
-			ToolCount:                mc.Config.ToolCount,
-			AutoDisabled:             mc.Config.AutoDisabled,
-			AutoDisableReason:        mc.Config.AutoDisableReason,
 			AutoDisableThreshold:     mc.Config.AutoDisableThreshold,
 		}); err != nil {
 			mc.logger.Warn("Failed to persist tool count to storage",
@@ -467,6 +514,76 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 				zap.Error(info.LastError),
 				zap.Int("retry_count", info.RetryCount))
 		}
+
+		// Note: Failure tracking is already done by StateManager.SetError() which increments consecutiveFailures
+		// Log current failure count for debugging
+		failureCount := mc.StateManager.GetConsecutiveFailures()
+		mc.logger.Debug("Connection failure tracked",
+			zap.String("server", mc.Config.Name),
+			zap.Int("consecutive_failures", failureCount),
+			zap.Bool("should_auto_disable", mc.StateManager.ShouldAutoDisable()))
+
+		// Check and handle auto-disable based on failure threshold
+		// This ensures runtime failures trigger auto-disable after threshold is reached
+		mc.checkAndHandleAutoDisable()
+
+		// If not auto-disabled, attempt immediate reconnection instead of waiting for health check
+		// This reduces the delay between error detection and reconnection attempt
+		if !mc.StateManager.IsAutoDisabled() && mc.ShouldRetry() {
+			mc.logger.Info("Triggering immediate reconnection after error",
+				zap.String("server", mc.Config.Name),
+				zap.Int("retry_count", info.RetryCount))
+			go mc.tryReconnect()
+		}
+	}
+
+	// Handle disconnected state - trigger immediate reconnection
+	// This handles cases where servers transition Ready -> Disconnected (e.g., process exit)
+	// But ONLY for unexpected disconnects, not intentional ones via Disconnect()
+	mc.intentionalMu.RLock()
+	wasIntentional := mc.intentionalDisconnect
+	mc.intentionalMu.RUnlock()
+
+	mc.logger.Debug("Checking disconnect condition",
+		zap.String("server", mc.Config.Name),
+		zap.Bool("newState_is_disconnected", newState == types.StateDisconnected),
+		zap.Bool("oldState_is_ready", oldState == types.StateReady),
+		zap.Bool("was_intentional", wasIntentional),
+		zap.String("newState", newState.String()),
+		zap.String("oldState", oldState.String()))
+
+	if newState == types.StateDisconnected && oldState == types.StateReady {
+		if wasIntentional {
+			// This was an intentional disconnect (Disconnect() was called)
+			// Don't trigger reconnection or increment failure count
+			mc.logger.Info("Server disconnected intentionally, no reconnection needed",
+				zap.String("server", mc.Config.Name))
+		} else {
+			// Unexpected disconnect - process may have crashed
+			mc.logger.Warn("Server disconnected unexpectedly, will attempt reconnection",
+				zap.String("server", mc.Config.Name),
+				zap.String("from_state", oldState.String()))
+
+			// Increment failure count for disconnection
+			mc.StateManager.IncrementConsecutiveFailures()
+
+			// Check and handle auto-disable
+			mc.checkAndHandleAutoDisable()
+
+			// If not auto-disabled, attempt immediate reconnection
+			if !mc.StateManager.IsAutoDisabled() && mc.ShouldRetry() {
+				mc.logger.Info("Triggering immediate reconnection after disconnect",
+					zap.String("server", mc.Config.Name))
+				go mc.tryReconnect()
+			}
+		}
+	}
+
+	// Log successful connection (failure counter is reset by StateManager.TransitionTo when entering Ready state)
+	if newState == types.StateReady && oldState != types.StateReady {
+		mc.logger.Debug("Connection established successfully",
+			zap.String("server", mc.Config.Name),
+			zap.String("from_state", oldState.String()))
 	}
 }
 
@@ -508,20 +625,49 @@ func (mc *Client) backgroundHealthCheck() {
 // checkAndHandleAutoDisable checks if server should be auto-disabled and handles it immediately
 // This is called after each connection failure to prevent excessive retries
 func (mc *Client) checkAndHandleAutoDisable() {
+	info := mc.StateManager.GetConnectionInfo()
+
+	// Enhanced logging for debugging connection issues
+	mc.logger.Debug("🔍 Auto-disable check",
+		zap.String("server", mc.Config.Name),
+		zap.Int("consecutive_failures", info.ConsecutiveFailures),
+		zap.Int("threshold", info.AutoDisableThreshold),
+		zap.Time("first_attempt", info.FirstAttemptTime),
+		zap.Duration("time_since_first_attempt", time.Since(info.FirstAttemptTime)),
+		zap.Duration("grace_period", config.StartupGracePeriod),
+		zap.Bool("in_grace_period", !info.FirstAttemptTime.IsZero() && time.Since(info.FirstAttemptTime) < config.StartupGracePeriod))
+
 	// Check if server should be auto-disabled due to consecutive failures
 	if !mc.StateManager.ShouldAutoDisable() {
+		if info.ConsecutiveFailures > 0 {
+			mc.logger.Debug("🛡️ Auto-disable suppressed (grace period or threshold not reached)",
+				zap.String("server", mc.Config.Name),
+				zap.Int("consecutive_failures", info.ConsecutiveFailures),
+				zap.Int("threshold", info.AutoDisableThreshold))
+		}
 		return
 	}
 
-	info := mc.StateManager.GetConnectionInfo()
 	reason := fmt.Sprintf("Server automatically disabled after %d consecutive failures (threshold: %d)",
 		info.ConsecutiveFailures, info.AutoDisableThreshold)
 
-	mc.StateManager.SetAutoDisabled(reason)
+	// First, persist to storage before updating state machine
+	// This ensures the state survives application restart
+	if mc.storageManager != nil {
+		if err := mc.storageManager.UpdateServerState(mc.Config.Name, reason); err != nil {
+			mc.logger.Error("Failed to persist auto-disable state to storage",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+			// Don't continue if storage update fails - we want persistence or nothing
+			return
+		}
+		mc.logger.Info("Persisted auto-disable state to storage",
+			zap.String("server", mc.Config.Name),
+			zap.String("reason", reason))
+	}
 
-	// Persist auto-disable state to config (so it survives restarts)
-	mc.Config.AutoDisabled = true
-	mc.Config.AutoDisableReason = reason
+	// Now update state machine (after persistence succeeds)
+	mc.StateManager.SetAutoDisabled(reason)
 
 	mc.logger.Warn("Server auto-disabled due to consecutive failures",
 		zap.String("server", mc.Config.Name),
@@ -555,7 +701,7 @@ func (mc *Client) checkAndHandleAutoDisable() {
 		}
 	}
 
-	// Trigger configuration update callback to persist auto-disable state
+	// Trigger configuration update callback (for backward compatibility)
 	if mc.onAutoDisable != nil {
 		mc.onAutoDisable(mc.Config.Name, reason)
 	}
@@ -594,18 +740,25 @@ func (mc *Client) performHealthCheck() {
 		return
 	}
 
-	// Check if client is in error state and should retry connection (non-OAuth errors)
-	if mc.StateManager.GetState() == types.StateError && mc.ShouldRetry() {
+	// Check if client is in error or disconnected state and should retry connection (non-OAuth errors)
+	// Important: Handle both StateError AND StateDisconnected for reconnection
+	// Servers can transition Ready -> Disconnected when the process exits unexpectedly
+	currentState := mc.StateManager.GetState()
+	if (currentState == types.StateError || currentState == types.StateDisconnected) && mc.ShouldRetry() {
 		mc.logger.Info("Attempting automatic reconnection with exponential backoff",
 			zap.String("server", mc.Config.Name),
+			zap.String("state", currentState.String()),
 			zap.Int("retry_count", mc.StateManager.GetConnectionInfo().RetryCount))
 
 		mc.tryReconnect()
 		return
 	}
 
-	// Skip health checks if not connected
+	// Skip health checks if not connected (and not attempting reconnect above)
 	if !mc.IsConnected() {
+		mc.logger.Debug("Server not connected, waiting for reconnection",
+			zap.String("server", mc.Config.Name),
+			zap.String("state", currentState.String()))
 		return
 	}
 
@@ -691,6 +844,13 @@ func (mc *Client) tryReconnect() {
 		zap.String("server", mc.Config.Name),
 		zap.String("current_state", mc.StateManager.GetState().String()))
 
+	// Clear the intentional disconnect flag before attempting reconnection
+	// This ensures the reconnection attempt is treated as intentional (from tryReconnect)
+	// and won't trigger another reconnection from the Reset() callback
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = true // Mark as intentional to prevent callback from triggering recursion
+	mc.intentionalMu.Unlock()
+
 	// First, disconnect the current client to clean up any broken connections
 	// We don't need to hold the mutex here as Disconnect() already handles it
 	if err := mc.coreClient.Disconnect(); err != nil {
@@ -701,6 +861,11 @@ func (mc *Client) tryReconnect() {
 
 	// Reset state to disconnected before attempting reconnection
 	mc.StateManager.Reset()
+
+	// Now clear the flag so that the Connect() call enables auto-reconnection for future crashes
+	mc.intentionalMu.Lock()
+	mc.intentionalDisconnect = false
+	mc.intentionalMu.Unlock()
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management

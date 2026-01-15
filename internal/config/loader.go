@@ -240,10 +240,10 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 	}
 
 	serverConfig := &ServerConfig{
-		Name:    name,
-		URL:     url,
-		Enabled: true,
-		Created: now(),
+		Name:        name,
+		URL:         url,
+		StartupMode: "active",
+		Created:     now(),
 	}
 
 	cfg.Servers = append(cfg.Servers, serverConfig)
@@ -344,41 +344,24 @@ func cleanupOldBackups(configPath string) {
 
 // SaveConfig saves configuration to file with automatic backup
 func SaveConfig(cfg *Config, path string) error {
-	fmt.Printf("[DEBUG] SaveConfig called with path: %s\n", path)
-	fmt.Printf("[DEBUG] SaveConfig - server count: %d\n", len(cfg.Servers))
-
-	// Log server states for debugging
-	for _, server := range cfg.Servers {
-		fmt.Printf("[DEBUG] SaveConfig - server %s: enabled=%v, quarantined=%v\n",
-			server.Name, server.Enabled, server.Quarantined)
-	}
-
 	// Create backup of existing config file
-	if err := createConfigBackup(path); err != nil {
-		fmt.Printf("[WARN] Failed to create config backup: %v\n", err)
-		// Continue with save operation even if backup fails
-	}
+	_ = createConfigBackup(path) // Best effort, don't fail on backup errors
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		fmt.Printf("[DEBUG] SaveConfig - JSON marshal failed: %v\n", err)
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
 	// Ensure directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Printf("[DEBUG] SaveConfig - MkdirAll failed: %v\n", err)
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] SaveConfig - about to write file: %s\n", path)
 	if err := os.WriteFile(path, data, 0600); err != nil {
-		fmt.Printf("[DEBUG] SaveConfig - WriteFile failed: %v\n", err)
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] SaveConfig - successfully wrote file: %s\n", path)
 	return nil
 }
 
@@ -427,18 +410,18 @@ func CreateSampleConfig(path string) error {
 	cfg := DefaultConfig()
 	cfg.Servers = []*ServerConfig{
 		{
-			Name:    "example",
-			URL:     "http://localhost:8000/mcp/",
-			Enabled: true,
-			Created: now(),
+			Name:        "example",
+			URL:         "http://localhost:8000/mcp/",
+			StartupMode: "active",
+			Created:     now(),
 		},
 		{
-			Name:    "local-command",
-			Command: "mcp-server-example",
-			Args:    []string{"--config", "example.json"},
-			Env:     map[string]string{"DEBUG": "true"},
-			Enabled: true,
-			Created: now(),
+			Name:        "local-command",
+			Command:     "mcp-server-example",
+			Args:        []string{"--config", "example.json"},
+			Env:         map[string]string{"DEBUG": "true"},
+			StartupMode: "active",
+			Created:     now(),
 		},
 	}
 

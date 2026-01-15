@@ -41,8 +41,6 @@ type UpstreamRecord struct {
 	Headers       map[string]string       `json:"headers,omitempty"` // For HTTP authentication
 	OAuth         *config.OAuthConfig     `json:"oauth,omitempty"`   // OAuth configuration
 	RepositoryURL string                  `json:"repository_url,omitempty"` // GitHub/Repository URL for the MCP server
-	Enabled       bool                    `json:"enabled"`
-	Quarantined   bool                    `json:"quarantined"` // Security quarantine status
 	Created       time.Time               `json:"created"`
 	Updated       time.Time               `json:"updated"`
 	Isolation     *config.IsolationConfig `json:"isolation,omitempty"` // Per-server isolation settings
@@ -54,14 +52,19 @@ type UpstreamRecord struct {
 	LastSuccessfulConnection time.Time `json:"last_successful_connection,omitempty"`
 	ToolCount                int       `json:"tool_count,omitempty"`
 
-	// Lazy loading and health check configuration
-	StartOnBoot              bool      `json:"start_on_boot,omitempty"`
+	// Health check configuration
 	HealthCheck              bool      `json:"health_check,omitempty"`
 
-	// Auto-disable state (for servers automatically disabled due to failures)
-	AutoDisabled         bool   `json:"auto_disabled,omitempty"`
-	AutoDisableReason    string `json:"auto_disable_reason,omitempty"`
+	// Auto-disable threshold (number of failures before auto-disabling)
 	AutoDisableThreshold int    `json:"auto_disable_threshold,omitempty"`
+
+	// Server state (persisted runtime state, NOT the config-level startup_mode)
+	// IMPORTANT: This is the DATABASE representation of server state
+	// Config layer uses "startup_mode", but database uses "server_state" for clarity
+	// Values: "active", "lazy_loading", "disabled", "quarantined", "auto_disabled", "stopped"
+	// NOTE: "stopped" is database-only (for lazy_loading servers with cached tools), never persisted to config startup_mode
+	ServerState       string `json:"server_state,omitempty"`
+	AutoDisableReason string `json:"auto_disable_reason,omitempty"` // Reason for auto-disable
 }
 
 // ToolStatRecord represents tool usage statistics

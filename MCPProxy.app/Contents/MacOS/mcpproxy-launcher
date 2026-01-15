@@ -1,6 +1,23 @@
 #!/bin/bash
 # MCPProxy Application Launcher
-# This script runs as a proper macOS application with GUI access
+# This script runs the mcpproxy binary from within the app bundle for proper macOS GUI access
 
-cd "$(dirname "$0")/../../.."
-exec ./mcpproxy serve --log-to-file=true
+# Determine config file - use tested config if available
+CONFIG_DIR="$HOME/.mcpproxy"
+if [ -f "$CONFIG_DIR/mcp_config_tested.json" ]; then
+    CONFIG_FILE="$CONFIG_DIR/mcp_config_tested.json"
+elif [ -f "$CONFIG_DIR/mcp_config.json" ]; then
+    CONFIG_FILE="$CONFIG_DIR/mcp_config.json"
+else
+    CONFIG_FILE=""
+fi
+
+# Get the directory where this script resides (inside the app bundle)
+SCRIPT_DIR="$(dirname "$0")"
+
+# Run mcpproxy from the app bundle
+if [ -n "$CONFIG_FILE" ]; then
+    exec "$SCRIPT_DIR/mcpproxy" serve -c "$CONFIG_FILE" --tray --log-to-file=true
+else
+    exec "$SCRIPT_DIR/mcpproxy" serve --tray --log-to-file=true
+fi

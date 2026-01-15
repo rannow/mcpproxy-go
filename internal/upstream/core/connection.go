@@ -1424,12 +1424,93 @@ func (c *Client) Disconnect() error {
 	return c.DisconnectWithContext(context.Background())
 }
 
+// ForceDisconnect forcibly resets the connection state regardless of current state.
+// This is used to fix state desync issues where core.Client thinks it's connected
+// but the managed.Client knows the connection has failed.
+// CRITICAL FIX: Resolves "client already connected" errors during retry attempts.
+func (c *Client) ForceDisconnect() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.logger.Info("🔄 ForceDisconnect: Forcibly resetting connection state",
+		zap.String("server", c.config.Name),
+		zap.Bool("was_connected", c.connected),
+		zap.Bool("was_connecting", c.connecting))
+
+	// Stop monitoring first
+	c.StopStderrMonitoring()
+	c.StopProcessMonitoring()
+
+	// Clean up Docker containers if applicable
+	if c.isDockerCommand {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+
+		if c.containerName != "" {
+			c.killDockerContainerByNameWithContext(cleanupCtx, c.containerName)
+		} else if c.containerID != "" {
+			c.killDockerContainerWithContext(cleanupCtx)
+		} else {
+			c.killDockerContainerByCommandWithContext(cleanupCtx)
+		}
+	}
+
+	// Clean up process group
+	if c.processGroupID > 0 {
+		if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+			c.logger.Warn("ForceDisconnect: Failed to clean up process group",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID),
+				zap.Error(err))
+		}
+		c.processGroupID = 0
+	}
+
+	// Close client if exists
+	if c.client != nil {
+		c.client.Close()
+		c.client = nil
+	}
+
+	// CRITICAL: Reset ALL connection state flags
+	c.connected = false
+	c.connecting = false
+	c.serverInfo = nil
+	c.cachedTools = nil
+
+	c.logger.Info("✅ ForceDisconnect: Connection state fully reset",
+		zap.String("server", c.config.Name))
+
+	return nil
+}
+
+// IsConnectedFlag returns the raw connected flag value for state sync detection.
+// This is used by managed.Client to detect state desync between core and managed layers.
+func (c *Client) IsConnectedFlag() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
+
 // DisconnectWithContext closes the connection with context timeout
 func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.connected || c.client == nil {
+	// CRITICAL FIX: Always reset connection flags even if already disconnected.
+	// This prevents state desync issues where connected=true but client=nil.
+	if !c.connected && c.client == nil {
+		// Ensure flags are reset even when already disconnected
+		c.connecting = false
+		return nil
+	}
+
+	// Handle edge case: connected=true but client=nil (state desync)
+	if c.client == nil {
+		c.logger.Warn("State desync detected in DisconnectWithContext: connected=true but client=nil",
+			zap.String("server", c.config.Name))
+		c.connected = false
+		c.connecting = false
 		return nil
 	}
 

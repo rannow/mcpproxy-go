@@ -188,8 +188,11 @@ type ServerConfig struct {
 	Headers       map[string]string `json:"headers,omitempty" mapstructure:"headers"`        // For HTTP servers
 	OAuth         *OAuthConfig      `json:"oauth,omitempty" mapstructure:"oauth"`            // OAuth configuration
 	RepositoryURL string            `json:"repository_url,omitempty" mapstructure:"repository_url"` // GitHub/Repository URL for the MCP server
-	Enabled       bool              `json:"enabled" mapstructure:"enabled"`
-	Quarantined   bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
+
+	// Unified startup mode - determines server behavior at startup
+	// Values: "active", "disabled", "quarantined", "auto_disabled", "lazy_loading"
+	StartupMode   string            `json:"startup_mode,omitempty" mapstructure:"startup_mode"`
+
 	Created       time.Time         `json:"created" mapstructure:"created"`
 	Updated       time.Time         `json:"updated,omitempty" mapstructure:"updated"`
 	Isolation                 *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
@@ -202,18 +205,78 @@ type ServerConfig struct {
 	ToolCount                 int       `json:"tool_count,omitempty" mapstructure:"tool_count"`                                 // Number of tools discovered from this server
 
 	// Lazy loading and connection behavior flags
-	StartOnBoot               bool      `json:"start_on_boot" mapstructure:"start_on_boot"`         // Connect to server on startup (default: false for lazy loading)
 	HealthCheck               bool      `json:"health_check" mapstructure:"health_check"`           // Perform regular health checks (default: false)
 
 	// Auto-disable threshold - per-server override (0 = use global default)
 	AutoDisableThreshold      int       `json:"auto_disable_threshold,omitempty" mapstructure:"auto_disable_threshold"` // Number of consecutive failures before auto-disabling
 
+	// Connection timeout - per-server override (0 = use global default: 60s)
+	// Useful for slow-starting servers like uvx-based AWS servers
+	ConnectionTimeout         Duration  `json:"connection_timeout,omitempty" mapstructure:"connection_timeout"` // Connection timeout for this server
+
 	// Auto-disable state - persisted across restarts
-	AutoDisabled              bool      `json:"auto_disabled,omitempty" mapstructure:"auto_disabled"`             // Server was automatically disabled due to failures
 	AutoDisableReason         string    `json:"auto_disable_reason,omitempty" mapstructure:"auto_disable_reason"` // Reason for auto-disable
 
-	// Stopped state - temporary manual stop via tray (separate from Enabled/Disabled)
-	Stopped                   bool      `json:"stopped,omitempty" mapstructure:"stopped"` // Server temporarily stopped by user (keeps Enabled: true)
+	// NOTE: "Stopped" field has been REMOVED - it was runtime-only state that should NOT be persisted
+	// Use StateManager.IsUserStopped() / SetUserStopped() for runtime-only stopped state
+	// When app restarts, all servers return to their original startup_mode (no persisted "stopped" state)
+}
+
+// ShouldConnectOnStartup determines if the server should connect when mcpproxy starts
+// based on the StartupMode field
+func (s *ServerConfig) ShouldConnectOnStartup() bool {
+	return s.StartupMode == "active"
+}
+
+// IsQuarantined determines if the server is quarantined
+func (s *ServerConfig) IsQuarantined() bool {
+	return s.StartupMode == "quarantined"
+}
+
+// IsDisabled determines if the server is disabled
+func (s *ServerConfig) IsDisabled() bool {
+	return s.StartupMode == "disabled" || s.StartupMode == "auto_disabled"
+}
+
+// GetConnectionTimeout returns the effective connection timeout for this server.
+// If a per-server timeout is configured (ConnectionTimeout > 0), it uses that.
+// Otherwise, it returns the global DefaultConnectionTimeout.
+func (s *ServerConfig) GetConnectionTimeout() time.Duration {
+	if s.ConnectionTimeout > 0 {
+		return time.Duration(s.ConnectionTimeout)
+	}
+	return DefaultConnectionTimeout
+}
+
+// MarshalJSON implements custom JSON marshaling to exclude deprecated fields
+// This ensures that old boolean fields (enabled, quarantined, auto_disabled)
+// are never written to the config file, even if they exist in memory from
+// reading old configs.
+func (s *ServerConfig) MarshalJSON() ([]byte, error) {
+	// Create a type alias to avoid infinite recursion
+	type Alias ServerConfig
+
+	// Marshal to JSON using default behavior
+	data, err := json.Marshal((*Alias)(s))
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal to map to filter out deprecated fields
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+
+	// Remove deprecated fields
+	delete(m, "enabled")
+	delete(m, "quarantined")
+	delete(m, "auto_disabled")
+	delete(m, "start_on_boot")
+	delete(m, "stopped")
+
+	// Marshal back to JSON without deprecated fields
+	return json.Marshal(m)
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -340,7 +403,7 @@ func ConvertFromCursorFormat(cursorConfig *CursorMCPConfig) []*ServerConfig {
 	for name, serverConfig := range cursorConfig.MCPServers {
 		server := &ServerConfig{
 			Name:          name,
-			Enabled:       true,
+			StartupMode:   "active",  // Default to active for Cursor imports
 			Created:       time.Now(),
 			RepositoryURL: serverConfig.RepositoryURL,
 		}
@@ -576,8 +639,8 @@ func DefaultConfig() *Config {
 			Timeout:    Duration(0),
 		},
 
-		// Default concurrent connections: 20 servers at once
-		MaxConcurrentConnections: 20,
+		// Default concurrent connections: 10 servers at once (reduced to avoid resource contention)
+		MaxConcurrentConnections: 10,
 
 		// Default LLM configuration (tries environment variables as fallback)
 		LLM: &LLMConfig{
@@ -616,7 +679,7 @@ func (c *Config) Validate() error {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
 	}
 	if c.MaxConcurrentConnections <= 0 {
-		c.MaxConcurrentConnections = 20 // Default to 20 concurrent connections
+		c.MaxConcurrentConnections = 10 // Default to 10 concurrent connections (reduced to avoid resource contention)
 	}
 
 	// Ensure Environment config is not nil
@@ -745,6 +808,33 @@ func (c *Config) Validate() error {
 	}
 	if c.SemanticSearch.MinSimilarity > 1 {
 		c.SemanticSearch.MinSimilarity = 1
+	}
+
+	// Validate server configurations
+	for _, server := range c.Servers {
+		// Validate startup_mode if set
+		if server.StartupMode != "" {
+			if err := ValidateStartupMode(server.StartupMode); err != nil {
+				return fmt.Errorf("server %s: %w", server.Name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ValidateStartupMode validates that a startup_mode value is valid
+func ValidateStartupMode(mode string) error {
+	validModes := map[string]bool{
+		"active":        true,
+		"disabled":      true,
+		"quarantined":   true,
+		"auto_disabled": true,
+		"lazy_loading":  true,
+	}
+
+	if !validModes[mode] {
+		return fmt.Errorf("invalid startup_mode: %s (must be one of: active, disabled, quarantined, auto_disabled, lazy_loading)", mode)
 	}
 
 	return nil

@@ -171,8 +171,8 @@ func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
 		return false
 	}
 
-	// Consider OAuth recent if completed within last 5 minutes
-	isRecent := time.Since(completionTime) < 5*time.Minute
+	// MED-002: Consider OAuth recent if completed within OAuthCompletionWindow
+	isRecent := time.Since(completionTime) < config.OAuthCompletionWindow
 	m.logger.Debug("Checking OAuth completion status",
 		zap.String("server", serverName),
 		zap.Time("completion_time", completionTime),
@@ -326,12 +326,13 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 
 	// Create HTTP server with dedicated mux
 	mux := http.NewServeMux()
+	// MED-002: Use centralized OAuth timeouts
 	server := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
 		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second, // Security: prevent Slowloris attacks
-		ReadTimeout:       30 * time.Second, // Extended timeout for OAuth discovery
-		WriteTimeout:      30 * time.Second, // Extended timeout for OAuth responses
+		ReadHeaderTimeout: config.OAuthReadHeaderTimeout, // Security: prevent Slowloris attacks
+		ReadTimeout:       config.OAuthReadTimeout,       // Extended timeout for OAuth discovery
+		WriteTimeout:      config.OAuthWriteTimeout,      // Extended timeout for OAuth responses
 	}
 
 	// Create callback server instance

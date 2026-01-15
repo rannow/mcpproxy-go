@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -346,17 +347,31 @@ func (s *Server) handleChatCallTool(w http.ResponseWriter, r *http.Request) {
 	// Construct full tool name with server prefix
 	fullToolName := fmt.Sprintf("%s:%s", request.ServerName, request.ToolName)
 
-	ctx := r.Context()
+	// MED-002: Use centralized timeout to prevent hanging API requests
+	ctx, cancel := context.WithTimeout(r.Context(), config.ToolCallTimeout)
+	defer cancel()
+
 	result, err := s.upstreamManager.CallTool(ctx, fullToolName, request.Arguments)
 	if err != nil {
-		s.logger.Error("Failed to call tool",
-			zap.String("server", request.ServerName),
-			zap.String("tool", request.ToolName),
-			zap.Error(err))
+		// Check if it was a timeout error for better error messaging
+		errorMsg := fmt.Sprintf("Failed to call tool: %v", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			errorMsg = fmt.Sprintf("Tool call timed out after %v: %v", config.ToolCallTimeout, err)
+			s.logger.Warn("Tool call timed out",
+				zap.String("server", request.ServerName),
+				zap.String("tool", request.ToolName),
+				zap.Duration("timeout", config.ToolCallTimeout),
+				zap.Error(err))
+		} else {
+			s.logger.Error("Failed to call tool",
+				zap.String("server", request.ServerName),
+				zap.String("tool", request.ToolName),
+				zap.Error(err))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
-			"error":   fmt.Sprintf("Failed to call tool: %v", err),
+			"error":   errorMsg,
 		})
 		return
 	}
@@ -484,8 +499,10 @@ func (s *Server) handleChatTestServerTools(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Get all tools from the server
-	ctx := r.Context()
-	tools, err := client.ListTools(ctx)
+	// MED-002: Use centralized timeout to prevent hanging API requests
+	listCtx, listCancel := context.WithTimeout(r.Context(), config.ListToolsTimeout)
+	defer listCancel()
+	tools, err := client.ListTools(listCtx)
 	if err != nil {
 		s.logger.Error("Failed to list tools from server",
 			zap.String("server", request.ServerName),
@@ -542,12 +559,19 @@ func (s *Server) handleChatTestServerTools(w http.ResponseWriter, r *http.Reques
 			}
 
 			// Call the tool with test arguments
+			// MED-002: Use centralized timeout for each tool call
+			callCtx, callCancel := context.WithTimeout(r.Context(), config.ToolCallTimeout)
 			fullToolName := fmt.Sprintf("%s:%s", request.ServerName, toolName)
-			result, err := s.upstreamManager.CallTool(ctx, fullToolName, testCase.Arguments)
+			result, err := s.upstreamManager.CallTool(callCtx, fullToolName, testCase.Arguments)
+			callCancel()
 
 			if err != nil {
 				caseResult["status"] = "error"
-				caseResult["error"] = err.Error()
+				if callCtx.Err() == context.DeadlineExceeded {
+					caseResult["error"] = fmt.Sprintf("Tool call timed out after %v: %v", config.ToolCallTimeout, err)
+				} else {
+					caseResult["error"] = err.Error()
+				}
 			} else {
 				caseResult["status"] = "success"
 				caseResult["result"] = result

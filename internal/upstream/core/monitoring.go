@@ -9,7 +9,15 @@ import (
 	"strings"
 	"time"
 
+	"mcpproxy-go/internal/config"
 	"go.uber.org/zap"
+)
+
+// MED-002: Use centralized timeout constants from config package
+// Local aliases for backward compatibility
+var (
+	processMonitorShutdownTimeout = config.ProcessMonitorShutdownTimeout
+	processHealthCheckInterval    = config.HealthCheckInterval
 )
 
 // StartStderrMonitoring starts monitoring stderr output and logging it
@@ -94,13 +102,15 @@ func (c *Client) StopProcessMonitoring() {
 			close(done)
 		}()
 
+		// HIGH-005: Use longer timeout to allow Docker containers to stop gracefully
 		select {
 		case <-done:
 			c.logger.Debug("Stopped process monitoring",
 				zap.String("server", c.config.Name))
-		case <-time.After(2 * time.Second):
+		case <-time.After(processMonitorShutdownTimeout):
 			c.logger.Warn("Process monitoring stop timed out",
-				zap.String("server", c.config.Name))
+				zap.String("server", c.config.Name),
+				zap.Duration("timeout", processMonitorShutdownTimeout))
 		}
 	}
 }
@@ -115,7 +125,7 @@ func (c *Client) monitorProcess() {
 	// Check if this is a Docker command
 	isDocker := strings.Contains(c.config.Command, "docker")
 
-	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	ticker := time.NewTicker(processHealthCheckInterval)
 	defer ticker.Stop()
 
 	for {

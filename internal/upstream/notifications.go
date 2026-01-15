@@ -23,6 +23,8 @@ const (
 )
 
 // String returns the string representation of the notification level
+// MED-004: NotificationLevel uses Title Case which is suitable for both API and UI display
+// No separate DisplayString() needed since String() already returns human-readable format
 func (l NotificationLevel) String() string {
 	switch l {
 	case NotificationInfo:

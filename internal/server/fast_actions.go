@@ -97,10 +97,21 @@ func (s *Server) checkServerStartup(serverName string) FastActionResponse {
 	issues := []string{}
 	details := make(map[string]interface{})
 
-	// Check if server is enabled
+	// Check if server is enabled using startup_mode (with fallback to enabled for backwards compatibility)
+	startupMode, _ := serverConfig["startup_mode"].(string)
 	enabled, _ := serverConfig["enabled"].(bool)
-	details["enabled"] = enabled
-	if !enabled {
+
+	// Determine if server is effectively enabled
+	var isEnabled bool
+	if startupMode != "" {
+		isEnabled = startupMode == "active" || startupMode == "lazy_loading"
+	} else {
+		isEnabled = enabled // fallback for old configs
+	}
+
+	details["enabled"] = isEnabled
+	details["startup_mode"] = startupMode
+	if !isEnabled {
 		issues = append(issues, "❌ Server is disabled")
 	} else {
 		issues = append(issues, "✅ Server is enabled")
@@ -168,8 +179,12 @@ func (s *Server) checkServerStartup(serverName string) FastActionResponse {
 		issues = append(issues, fmt.Sprintf("⚠️  Connection state: %s", connectionState))
 	}
 
-	// Check quarantine status
-	quarantined, _ := serverConfig["quarantined"].(bool)
+	// Check quarantine status using startup_mode (with fallback to quarantined for backwards compatibility)
+	quarantined := startupMode == "quarantined"
+	if !quarantined {
+		// Fallback for old configs
+		quarantined, _ = serverConfig["quarantined"].(bool)
+	}
 	details["quarantined"] = quarantined
 	if quarantined {
 		issues = append(issues, "⚠️  Server is quarantined for security review")
@@ -527,7 +542,15 @@ func (s *Server) checkDisabledServers() FastActionResponse {
 
 	disabledServers := []map[string]interface{}{}
 	for _, srv := range servers {
-		if enabled, ok := srv["enabled"].(bool); ok && !enabled {
+		// Check startup_mode first, then fallback to enabled for backwards compatibility
+		startupMode, _ := srv["startup_mode"].(string)
+		var isDisabled bool
+		if startupMode != "" {
+			isDisabled = startupMode == "disabled" || startupMode == "quarantined" || startupMode == "auto_disabled"
+		} else if enabled, ok := srv["enabled"].(bool); ok {
+			isDisabled = !enabled
+		}
+		if isDisabled {
 			disabledServers = append(disabledServers, srv)
 		}
 	}

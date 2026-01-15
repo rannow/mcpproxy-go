@@ -24,7 +24,7 @@ import (
 	"hash/fnv"
 	"strconv"
 
-	"fyne.io/systray"
+	"github.com/getlantern/systray"
 	"github.com/fsnotify/fsnotify"
 	"github.com/inconshreveable/go-update"
 	"go.uber.org/zap"
@@ -138,16 +138,14 @@ type App struct {
 	shutdown  func()
 
 	// Menu items for dynamic updates
-	statusItem        *systray.MenuItem
-	startStopItem     *systray.MenuItem
-	stopStartAllItem  *systray.MenuItem
-	serverCountItem   *systray.MenuItem
+	statusItem       *systray.MenuItem
+	stopStartAllItem *systray.MenuItem
+	serverCountItem  *systray.MenuItem
 
 	// Status-based server menus
 	connectedServersMenu    *systray.MenuItem
 	disconnectedServersMenu *systray.MenuItem
 	sleepingServersMenu     *systray.MenuItem
-	idleServersMenu         *systray.MenuItem // Renamed from stoppedServersMenu
 	disabledServersMenu     *systray.MenuItem
 	autoDisabledServersMenu *systray.MenuItem
 	quarantineMenu          *systray.MenuItem
@@ -276,10 +274,25 @@ func (a *App) getGroupKeyByID(id int) string {
 }
 
 // Run starts the system tray application
+// CRITICAL: On macOS Tahoe, systray.Run() must be called IMMEDIATELY without
+// any goroutines or complex setup beforehand. All initialization is deferred
+// to onReady() callback to ensure proper GUI event loop initialization.
 func (a *App) Run(ctx context.Context) error {
-	a.logger.Info("Starting system tray application")
-	a.ctx, a.cancel = context.WithCancel(ctx)
-	defer a.cancel()
+	a.logger.Info("Starting system tray application - calling systray.Run() immediately")
+	a.ctx = ctx // Store context reference for use in onReady
+
+	// Start systray FIRST - this is a blocking call that must run on main thread
+	// All other initialization happens in onReady() callback
+	systray.Run(a.onReady, a.onExit)
+
+	return ctx.Err()
+}
+
+// startBackgroundServices initializes watchers and goroutines AFTER systray is running
+// This is called from onReady() to ensure GUI is fully initialized first
+func (a *App) startBackgroundServices() {
+	// Create cancellable context from stored parent context
+	a.ctx, a.cancel = context.WithCancel(a.ctx)
 
 	// Initialize config file watcher
 	if err := a.initConfigWatcher(); err != nil {
@@ -294,7 +307,7 @@ func (a *App) Run(ctx context.Context) error {
 			select {
 			case <-ticker.C:
 				a.checkForUpdates()
-			case <-ctx.Done():
+			case <-a.ctx.Done():
 				return
 			}
 		}
@@ -312,7 +325,7 @@ func (a *App) Run(ctx context.Context) error {
 			// Wait for menu items to be initialized using the flag
 			for !a.coreMenusReady {
 				select {
-				case <-ctx.Done():
+				case <-a.ctx.Done():
 					return
 				default:
 					time.Sleep(100 * time.Millisecond) // Check every 100ms
@@ -325,7 +338,7 @@ func (a *App) Run(ctx context.Context) error {
 				select {
 				case status := <-statusCh:
 					a.updateStatusFromData(status)
-				case <-ctx.Done():
+				case <-a.ctx.Done():
 					return
 				}
 			}
@@ -334,16 +347,13 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Monitor context cancellation and quit systray when needed
 	go func() {
-		<-ctx.Done()
+		<-a.ctx.Done()
 		a.logger.Info("Context cancelled, quitting systray")
 		a.cleanup()
 		systray.Quit()
 	}()
 
-	// Start systray - this is a blocking call that must run on main thread
-	systray.Run(a.onReady, a.onExit)
-
-	return ctx.Err()
+	a.logger.Info("Background services started successfully")
 }
 
 // initConfigWatcher initializes the config file watcher
@@ -432,6 +442,16 @@ func (a *App) onReady() {
 		a.logger.Info("✅ Icon data loaded successfully", zap.Int("size", len(iconData)))
 	}
 
+	// On macOS 26.1 Tahoe, set title FIRST to force NSStatusItem creation
+	// This is a workaround for potential initialization timing issues
+	if runtime.GOOS == osDarwin {
+		a.logger.Info("🍎 macOS Tahoe workaround: Setting title first to force status item visibility")
+		systray.SetTitle("")
+		a.logger.Info("✅ systray.SetTitle('') called FIRST for macOS visibility (icon only)")
+		// Small delay to let NSStatusItem stabilize
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	systray.SetIcon(iconData)
 	a.logger.Info("✅ systray.SetIcon() called")
 
@@ -439,6 +459,11 @@ func (a *App) onReady() {
 	if runtime.GOOS == osDarwin {
 		systray.SetTemplateIcon(iconData, iconData)
 		a.logger.Info("✅ systray.SetTemplateIcon() called for macOS")
+		// Small delay after icon setup to ensure rendering
+		time.Sleep(50 * time.Millisecond)
+		// Force title update again after icon to ensure visibility
+		systray.SetTitle("")
+		a.logger.Info("✅ systray.SetTitle('') called again after icon for visibility (icon only)")
 	}
 	a.updateServerCountFromConfig()
 
@@ -446,7 +471,6 @@ func (a *App) onReady() {
 	a.logger.Debug("Initializing tray menu items")
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "")
 	a.statusItem.Disable() // Initially disabled as it's just for display
-	a.startStopItem = systray.AddMenuItem("Start Server", "")
 	a.stopStartAllItem = systray.AddMenuItem("⏸️ Stop All Servers", "Stop all running servers (keeps MCPProxy running)")
 	a.serverCountItem = systray.AddMenuItem("📊 Servers: Loading...", "")
 	a.serverCountItem.Disable() // Display only
@@ -454,13 +478,17 @@ func (a *App) onReady() {
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
 	a.logger.Debug("Core menu items initialized successfully - background processes can now start")
+
+	// Start background services NOW that systray is initialized and core menus are ready
+	// This was moved from Run() to ensure systray.Run() is called first on macOS Tahoe
+	a.startBackgroundServices()
+
 	systray.AddSeparator()
 
 	// --- Status-Based Server Menus ---
 	a.connectedServersMenu = systray.AddMenuItem("🟢 Connected Servers", "")
 	a.disconnectedServersMenu = systray.AddMenuItem("🔴 Disconnected Servers", "")
 	a.sleepingServersMenu = systray.AddMenuItem("💤 Sleeping Servers", "Servers with lazy loading enabled")
-	a.idleServersMenu = systray.AddMenuItem("⏸️ Idle Servers", "Enabled but not connected")
 	a.disabledServersMenu = systray.AddMenuItem("⏹️ Disabled Servers", "Manually disabled servers")
 	a.autoDisabledServersMenu = systray.AddMenuItem("🚫 Auto-Disabled Servers", "Servers automatically disabled due to failures")
 	a.quarantineMenu = systray.AddMenuItem("🔒 Quarantined Servers", "")
@@ -474,7 +502,7 @@ func (a *App) onReady() {
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.idleServersMenu, a.disabledServersMenu, a.autoDisabledServersMenu, a.quarantineMenu, nil, a.logger)
+	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.disabledServersMenu, a.autoDisabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
 	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig())
 
@@ -588,8 +616,6 @@ func (a *App) onReady() {
 	go func() {
 		for {
 			select {
-			case <-a.startStopItem.ClickedCh:
-				a.handleStartStop()
 			case <-a.stopStartAllItem.ClickedCh:
 				a.handleStopStartAll()
 			case <-openConfigItem.ClickedCh:
@@ -637,8 +663,6 @@ func (a *App) onReady() {
 				a.handleServerMenuClick("connected")
 			case <-a.disconnectedServersMenu.ClickedCh:
 				a.handleServerMenuClick("disconnected")
-			case <-a.idleServersMenu.ClickedCh:
-				a.handleServerMenuClick("idle")
 			case <-a.disabledServersMenu.ClickedCh:
 				a.handleServerMenuClick("disabled")
 			case <-a.quarantineMenu.ClickedCh:
@@ -649,8 +673,9 @@ func (a *App) onReady() {
 				// Force quit with timeout to prevent hanging
 				go func() {
 					// Set a maximum time for graceful shutdown
-					timeout := time.After(3 * time.Second)
-					killTimeout := time.After(5 * time.Second)
+					// MED-002: Using centralized timeout constants
+					timeout := time.After(config.TrayQuitTimeout)
+					killTimeout := time.After(config.TrayKillTimeout)
 					done := make(chan bool, 1)
 
 					go func() {
@@ -665,7 +690,7 @@ func (a *App) onReady() {
 						a.logger.Info("Graceful shutdown completed")
 						os.Exit(0)
 					case <-timeout:
-						a.logger.Warn("Graceful shutdown timed out after 3s, forcing exit with os.Exit(0)")
+						a.logger.Warn("Graceful shutdown timed out after 10s, forcing exit with os.Exit(0)")
 						os.Exit(0) // Force exit if graceful shutdown hangs
 
 						// If os.Exit(0) doesn't work (should never happen), wait for kill timeout
@@ -760,12 +785,14 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Debug logging to track status updates
 	running, _ := status["running"].(bool)
 	phase, _ := status["phase"].(string)
+	appState, _ := status["app_state"].(string)
 	serverRunning := a.server != nil && a.server.IsRunning()
 
 	a.logger.Debug("Updating tray status",
 		zap.Bool("status_running", running),
 		zap.Bool("server_is_running", serverRunning),
 		zap.String("phase", phase),
+		zap.String("app_state", appState),
 		zap.Any("status_data", status))
 
 	// Use the actual server running state as the authoritative source
@@ -774,16 +801,29 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Update running status and start/stop button
 	if actuallyRunning {
 		listenAddr, _ := status["listen_addr"].(string)
-		if listenAddr != "" {
-			a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
-		} else {
-			a.statusItem.SetTitle("Status: Running")
+
+		// Show app state in status message
+		switch appState {
+		case "starting":
+			a.statusItem.SetTitle("Status: Starting...")
+		case "degraded":
+			if listenAddr != "" {
+				a.statusItem.SetTitle(fmt.Sprintf("Status: Degraded (%s)", listenAddr))
+			} else {
+				a.statusItem.SetTitle("Status: Degraded")
+			}
+		case "stopping":
+			a.statusItem.SetTitle("Status: Stopping...")
+		default: // "running" or empty
+			if listenAddr != "" {
+				a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
+			} else {
+				a.statusItem.SetTitle("Status: Running")
+			}
 		}
-		a.startStopItem.SetTitle("Stop Server")
-		a.logger.Debug("Set tray to running state")
+		a.logger.Debug("Set tray to running state", zap.String("app_state", appState))
 	} else {
 		a.statusItem.SetTitle("Status: Stopped")
-		a.startStopItem.SetTitle("Start Server")
 		a.logger.Debug("Set tray to stopped state")
 	}
 
@@ -898,108 +938,6 @@ func (a *App) updateStatus() {
 func (a *App) updateServersMenu() {
 	if a.syncManager != nil {
 		a.syncManager.SyncDelayed()
-	}
-}
-
-// handleStartStop toggles the server's running state
-func (a *App) handleStartStop() {
-	if a.server.IsRunning() {
-		a.logger.Info("Stopping server from tray")
-
-		// Save server states before stopping
-		if err := a.saveServerStatesForStop(); err != nil {
-			a.logger.Error("Failed to save server states", zap.Error(err))
-		}
-
-		// Immediately update UI to show stopping state and disable button
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Stopping...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Stopping...")
-			a.startStopItem.Disable() // Prevent multiple clicks
-		}
-
-		// Stop the server with timeout protection
-		go func() {
-			done := make(chan bool, 1)
-			
-			// Run stop operation in separate goroutine
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						a.logger.Error("Panic during server stop", zap.Any("panic", r))
-					}
-					done <- true
-				}()
-				
-				if err := a.server.StopServer(); err != nil {
-					a.logger.Error("Failed to stop server", zap.Error(err))
-				}
-			}()
-
-			// Wait for completion or timeout
-			select {
-			case <-done:
-				a.logger.Info("Server stop operation completed")
-			case <-time.After(5 * time.Second):
-				a.logger.Warn("Server stop operation timed out after 5 seconds")
-			}
-
-			// Always restore UI state
-			if a.startStopItem != nil {
-				a.startStopItem.Enable()
-			}
-			a.updateStatus()
-		}()
-	} else {
-		a.logger.Info("Starting server from tray")
-
-		// Immediately update UI to show starting state and disable button
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Starting...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Starting...")
-			a.startStopItem.Disable() // Prevent multiple clicks
-		}
-
-		// Start the server with timeout protection
-		go func() {
-			done := make(chan bool, 1)
-			
-			// Run start operation in separate goroutine
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						a.logger.Error("Panic during server start", zap.Any("panic", r))
-					}
-					done <- true
-				}()
-				
-				if err := a.server.StartServer(a.ctx); err != nil {
-					a.logger.Error("Failed to start server", zap.Error(err))
-				}
-			}()
-
-			// Wait for completion or timeout
-			select {
-			case <-done:
-				a.logger.Info("Server start operation completed")
-				// Restore server states after successful start
-				if err := a.restoreServerStatesAfterStart(); err != nil {
-					a.logger.Error("Failed to restore server states", zap.Error(err))
-				}
-			case <-time.After(10 * time.Second):
-				a.logger.Warn("Server start operation timed out after 10 seconds")
-			}
-
-			// Always restore UI state
-			if a.startStopItem != nil {
-				a.startStopItem.Enable()
-			}
-			a.updateStatus()
-		}()
 	}
 }
 
@@ -1831,6 +1769,16 @@ func (a *App) handleServerAction(serverName, action string) {
 		}
 		err = a.syncManager.HandleServerEnable(serverName, !serverEnabled)
 
+	case "force_enable":
+		// Force-enable a server (used by "Enable All" to avoid race conditions)
+		a.logger.Info("Force-enabling server", zap.String("server", serverName))
+		err = a.syncManager.HandleServerEnable(serverName, true)
+
+	case "force_disable":
+		// Force-disable a server (for consistency with force_enable)
+		a.logger.Info("Force-disabling server", zap.String("server", serverName))
+		err = a.syncManager.HandleServerEnable(serverName, false)
+
 	case "oauth_login":
 		err = a.handleOAuthLogin(serverName)
 
@@ -2045,7 +1993,8 @@ func (a *App) handleGroupManagement() {
 	createGroupItem := a.groupManagementMenu.AddSubMenuItem("➕ Create New Group", "Create a new server group with color assignment")
 	manageGroupsItem := a.groupManagementMenu.AddSubMenuItem("⚙️ Manage Groups", "Edit existing server groups")
 	migrateGroupsItem := a.groupManagementMenu.AddSubMenuItem("🔄 Migrate to IDs", "Add IDs to existing groups in config")
-	a.groupManagementMenu.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// a.groupManagementMenu.AddSeparator()
 
 	// Show existing groups from API
 	a.logger.Info("TRAY INIT: About to call refreshGroupsMenu")
@@ -2134,6 +2083,13 @@ func (a *App) saveGroupsToConfig() error {
 			if server, ok := serverInterface.(map[string]interface{}); ok {
 				if serverName, ok := server["name"].(string); ok {
 					delete(server, "group_name") // Remove old field
+
+					// Remove deprecated fields that should not be written to config
+					delete(server, "enabled")
+					delete(server, "quarantined")
+					delete(server, "auto_disabled")
+					delete(server, "start_on_boot")
+					delete(server, "stopped")
 
 					// Set group_id from map, or 0 if not in any group
 					if groupID, exists := serverToGroupID[serverName]; exists {
@@ -2281,9 +2237,10 @@ func (a *App) refreshGroupsMenu() {
 	}
 
 	// Add separator before groups list
-	if len(a.serverGroups) > 0 {
-		a.groupManagementMenu.AddSeparator()
-	}
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// if len(a.serverGroups) > 0 {
+	// 	a.groupManagementMenu.AddSeparator()
+	// }
 
 	// Add each group to the menu
 	for groupName, group := range a.serverGroups {
@@ -2376,7 +2333,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 		"Edit group properties")
 	editTitle.Disable()
 
-	a.groupManagementMenu.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// a.groupManagementMenu.AddSeparator()
 
 	// Name editing - show current name and options to change
 	nameSection := a.groupManagementMenu.AddSubMenuItem("📝 Change Name", "Edit the group name")
@@ -2386,7 +2344,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 	currentNameItem.Disable()
 
 	// Predefined name suggestions
-	nameSection.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// nameSection.AddSeparator()
 	nameOptions := []string{"Work", "Personal", "Development", "Production", "Testing", "AWS", "Databases", "AI/ML", "Monitoring", "Custom-" + fmt.Sprintf("%d", len(a.serverGroups)+1)}
 
 	for _, nameOption := range nameOptions {
@@ -2410,7 +2369,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 		"Current group color")
 	currentColorItem.Disable()
 
-	colorSection.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// colorSection.AddSeparator()
 
 	// Show all available colors except current one
 	for _, colorOption := range GroupColors {
@@ -2430,7 +2390,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 	}
 
 	// Action buttons
-	a.groupManagementMenu.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// a.groupManagementMenu.AddSeparator()
 
 	// Done button to return to main menu
 	doneItem := a.groupManagementMenu.AddSubMenuItem("✅ Done", "Finish editing and return to main menu")
@@ -3204,8 +3165,9 @@ func (a *App) assignServerToGroup(serverName, groupName string) {
 		zap.String("message", response.Message))
 }
 
-// ServerState represents the state of a server before stop
-type ServerState struct {
+// ServerSnapshot represents a snapshot of server state before stop operations.
+// HIGH-001: Renamed from ServerState to ServerSnapshot to avoid confusion with types.ServerState
+type ServerSnapshot struct {
 	Name      string `json:"name"`
 	Enabled   bool   `json:"enabled"`
 	Connected bool   `json:"connected"`
@@ -3224,13 +3186,13 @@ func (a *App) saveServerStatesForStop() error {
 	}
 
 	// Create state snapshot
-	states := make([]ServerState, 0, len(servers))
+	states := make([]ServerSnapshot, 0, len(servers))
 	for _, server := range servers {
 		name, _ := server["name"].(string)
 		enabled, _ := server["enabled"].(bool)
 		connected, _ := server["connected"].(bool)
 
-		states = append(states, ServerState{
+		states = append(states, ServerSnapshot{
 			Name:      name,
 			Enabled:   enabled,
 			Connected: connected,
@@ -3271,7 +3233,7 @@ func (a *App) restoreServerStatesAfterStart() error {
 		return err
 	}
 
-	var states []ServerState
+	var states []ServerSnapshot
 	if err := json.Unmarshal(data, &states); err != nil {
 		return err
 	}

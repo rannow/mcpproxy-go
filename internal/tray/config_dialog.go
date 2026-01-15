@@ -573,9 +573,15 @@ const configDialogTemplate = `<!DOCTYPE html>
                         <div class="help-text">Communication protocol with the server</div>
                     </div>
 
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="enabled" name="enabled" {{if .Server.Enabled}}checked{{end}}>
-                        <label for="enabled">Enabled</label>
+                    <div class="form-group">
+                        <label for="startup_mode">Startup Mode</label>
+                        <select id="startup_mode" name="startup_mode">
+                            <option value="active" {{if eq .Server.StartupMode "active"}}selected{{end}}>Active</option>
+                            <option value="disabled" {{if eq .Server.StartupMode "disabled"}}selected{{end}}>Disabled</option>
+                            <option value="quarantined" {{if eq .Server.StartupMode "quarantined"}}selected{{end}}>Quarantined</option>
+                            <option value="lazy_loading" {{if eq .Server.StartupMode "lazy_loading"}}selected{{end}}>Lazy Loading</option>
+                        </select>
+                        <div class="help-text">Server startup behavior</div>
                     </div>
                 </div>
 
@@ -642,19 +648,7 @@ const configDialogTemplate = `<!DOCTYPE html>
                     <div class="help-text">GitHub or repository URL for this MCP server (optional)</div>
                 </div>
 
-                <div class="checkbox-group">
-                    <input type="checkbox" id="quarantined" name="quarantined" {{if .Server.Quarantined}}checked{{end}}>
-                    <label for="quarantined">Quarantined</label>
-                    <div class="help-text">Security quarantine status</div>
-                </div>
-
                 <div class="section-title">Connection Behavior</div>
-
-                <div class="checkbox-group">
-                    <input type="checkbox" id="start_on_boot" name="start_on_boot" {{if .Server.StartOnBoot}}checked{{end}}>
-                    <label for="start_on_boot">Start on Boot</label>
-                    <div class="help-text">Connect to this server on startup (overrides lazy loading)</div>
-                </div>
 
                 <div class="checkbox-group">
                     <input type="checkbox" id="health_check" name="health_check" {{if .Server.HealthCheck}}checked{{end}}>
@@ -786,13 +780,16 @@ const configDialogTemplate = `<!DOCTYPE html>
             const form = document.getElementById('configForm');
             const formData = new FormData(form);
 
+            // LOW-001: Use startup_mode instead of deprecated enabled/quarantined/start_on_boot fields
+            const startupMode = formData.get('startup_mode') || 'active';
             const server = {
                 name: formData.get('name'),
                 description: formData.get('description') || '',
                 protocol: formData.get('protocol'),
-                enabled: formData.get('enabled') === 'on',
-                quarantined: formData.get('quarantined') === 'on',
-                start_on_boot: formData.get('start_on_boot') === 'on',
+                startup_mode: startupMode,
+                // For backwards compatibility with API, derive enabled/quarantined from startup_mode
+                enabled: startupMode !== 'disabled' && startupMode !== 'quarantined',
+                quarantined: startupMode === 'quarantined',
                 health_check: formData.get('health_check') === 'on',
                 repository_url: formData.get('repository_url') || '',
                 created: (configData && configData.Server && configData.Server.created) ? configData.Server.created : new Date().toISOString(),
