@@ -433,6 +433,34 @@ tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 
 ## Advanced Configuration
 
+### System Tray Configuration
+
+The system tray icon is **enabled by default** and provides quick access to server status, configuration, and shutdown options.
+
+**Configuration File:**
+```json
+{
+  "enable_tray": true    // Default: true - set to false to disable tray icon
+}
+```
+
+**Command Line Override:**
+```bash
+# Disable tray icon (for headless/server environments)
+mcpproxy serve --tray=false
+
+# Explicitly enable tray (useful when config has it disabled)
+mcpproxy serve --tray=true
+```
+
+**When to Disable:**
+- Running on headless servers without a GUI
+- CI/CD pipelines and automated testing
+- Docker containers without display access
+- When running as a background service
+
+**📝 Note:** The command line flag `--tray` only overrides the config when explicitly set. If not specified, the `enable_tray` value from your config file is used.
+
 ### Security Settings
 
 ```json
