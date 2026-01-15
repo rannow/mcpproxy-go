@@ -24,7 +24,7 @@ import (
 	"hash/fnv"
 	"strconv"
 
-	"fyne.io/systray"
+	"github.com/getlantern/systray"
 	"github.com/fsnotify/fsnotify"
 	"github.com/inconshreveable/go-update"
 	"go.uber.org/zap"
@@ -434,8 +434,8 @@ func (a *App) onReady() {
 	// This is a workaround for potential initialization timing issues
 	if runtime.GOOS == osDarwin {
 		a.logger.Info("🍎 macOS Tahoe workaround: Setting title first to force status item visibility")
-		systray.SetTitle("MCP")
-		a.logger.Info("✅ systray.SetTitle('MCP') called FIRST for macOS visibility")
+		systray.SetTitle("")
+		a.logger.Info("✅ systray.SetTitle('') called FIRST for macOS visibility (icon only)")
 		// Small delay to let NSStatusItem stabilize
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -450,8 +450,8 @@ func (a *App) onReady() {
 		// Small delay after icon setup to ensure rendering
 		time.Sleep(50 * time.Millisecond)
 		// Force title update again after icon to ensure visibility
-		systray.SetTitle("MCP")
-		a.logger.Info("✅ systray.SetTitle('MCP') called again after icon for visibility")
+		systray.SetTitle("")
+		a.logger.Info("✅ systray.SetTitle('') called again after icon for visibility (icon only)")
 	}
 	a.updateServerCountFromConfig()
 
@@ -1976,7 +1976,8 @@ func (a *App) handleGroupManagement() {
 	createGroupItem := a.groupManagementMenu.AddSubMenuItem("➕ Create New Group", "Create a new server group with color assignment")
 	manageGroupsItem := a.groupManagementMenu.AddSubMenuItem("⚙️ Manage Groups", "Edit existing server groups")
 	migrateGroupsItem := a.groupManagementMenu.AddSubMenuItem("🔄 Migrate to IDs", "Add IDs to existing groups in config")
-	a.groupManagementMenu.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// a.groupManagementMenu.AddSeparator()
 
 	// Show existing groups from API
 	a.logger.Info("TRAY INIT: About to call refreshGroupsMenu")
@@ -2219,9 +2220,10 @@ func (a *App) refreshGroupsMenu() {
 	}
 
 	// Add separator before groups list
-	if len(a.serverGroups) > 0 {
-		a.groupManagementMenu.AddSeparator()
-	}
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// if len(a.serverGroups) > 0 {
+	// 	a.groupManagementMenu.AddSeparator()
+	// }
 
 	// Add each group to the menu
 	for groupName, group := range a.serverGroups {
@@ -2314,7 +2316,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 		"Edit group properties")
 	editTitle.Disable()
 
-	a.groupManagementMenu.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// a.groupManagementMenu.AddSeparator()
 
 	// Name editing - show current name and options to change
 	nameSection := a.groupManagementMenu.AddSubMenuItem("📝 Change Name", "Edit the group name")
@@ -2324,7 +2327,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 	currentNameItem.Disable()
 
 	// Predefined name suggestions
-	nameSection.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// nameSection.AddSeparator()
 	nameOptions := []string{"Work", "Personal", "Development", "Production", "Testing", "AWS", "Databases", "AI/ML", "Monitoring", "Custom-" + fmt.Sprintf("%d", len(a.serverGroups)+1)}
 
 	for _, nameOption := range nameOptions {
@@ -2348,7 +2352,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 		"Current group color")
 	currentColorItem.Disable()
 
-	colorSection.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// colorSection.AddSeparator()
 
 	// Show all available colors except current one
 	for _, colorOption := range GroupColors {
@@ -2368,7 +2373,8 @@ func (a *App) openGroupEditMenu(groupName string, group *ServerGroup) {
 	}
 
 	// Action buttons
-	a.groupManagementMenu.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// a.groupManagementMenu.AddSeparator()
 
 	// Done button to return to main menu
 	doneItem := a.groupManagementMenu.AddSubMenuItem("✅ Done", "Finish editing and return to main menu")

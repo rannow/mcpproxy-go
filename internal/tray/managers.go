@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"fyne.io/systray"
+	"github.com/getlantern/systray"
 	"go.uber.org/zap"
 )
 
@@ -810,7 +810,8 @@ func (m *MenuManager) addBulkEnableAction(menu *systray.MenuItem, servers []map[
 	}
 
 	// Add separator before bulk action
-	menu.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// menu.AddSeparator()
 
 	// Create the bulk enable menu item (without count)
 	var menuTitle, menuTooltip string
@@ -1556,7 +1557,8 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	}
 
 	// Add separator before group actions
-	serverMenuItem.AddSeparator()
+	// Note: getlantern/systray doesn't support AddSeparator on submenus
+	// serverMenuItem.AddSeparator()
 
 	// Group management actions
 	m.createGroupActionsSubmenu(serverMenuItem, serverName)
@@ -1615,7 +1617,8 @@ func (m *MenuManager) createGroupActionsSubmenu(serverMenuItem *systray.MenuItem
 			}
 		}(serverName, currentGroupName, removeFromGroupItem)
 
-		assignSubmenu.AddSeparator()
+		// Note: getlantern/systray doesn't support AddSeparator on submenus
+		// assignSubmenu.AddSeparator()
 	}
 
 	// Add options to assign to different groups

@@ -344,6 +344,34 @@ Message 4: Write "file.js"
 
 Remember: **Claude Flow coordinates, Claude Code creates!**
 
+## macOS Tahoe Systray Fix
+
+**Problem**: Tray icon not visible on macOS Tahoe (26.x) with `fyne.io/systray`.
+
+**Solution**: Migrate from `fyne.io/systray` to `github.com/getlantern/systray v1.2.2`
+
+**Changes made:**
+1. `internal/tray/tray.go` line 27: Changed import to `github.com/getlantern/systray`
+2. `internal/tray/managers.go` line 14: Changed import to `github.com/getlantern/systray`
+3. Commented out `AddSeparator()` calls on submenu items (not supported by getlantern)
+4. Updated `go.mod`: `go get github.com/getlantern/systray@v1.2.2`
+
+**Build & Install:**
+```bash
+cd /Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server/mcpproxy-go
+go build -o bin/mcpproxy ./cmd/mcpproxy
+cp bin/mcpproxy MCPProxy.app/Contents/MacOS/mcpproxy
+```
+
+**Auto-Start at Login:**
+LaunchAgent: `~/Library/LaunchAgents/com.mcpproxy.agent.plist`
+```bash
+launchctl load ~/Library/LaunchAgents/com.mcpproxy.agent.plist
+launchctl unload ~/Library/LaunchAgents/com.mcpproxy.agent.plist  # to disable
+```
+
+**Binary Location:** `bin/mcpproxy`
+
 # important-instruction-reminders
 Do what has been asked; nothing more, nothing less.
 NEVER create files unless they're absolutely necessary for achieving your goal.
