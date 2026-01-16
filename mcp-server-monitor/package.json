@@ -1,0 +1,25 @@
+{
+  "name": "mcp-server-monitor",
+  "version": "1.0.0",
+  "description": "MCP Server Health Monitor with Auto-Check, Auto-Correct and Auto-Update using Claude Agent SDK",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js",
+    "dev": "tsc --watch",
+    "check": "npm run build && node dist/index.js --check-once",
+    "diagnose": "npm run build && node dist/index.js --diagnose",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

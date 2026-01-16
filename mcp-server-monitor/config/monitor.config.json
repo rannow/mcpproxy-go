@@ -1,0 +1,27 @@
+{
+  "autoCheck": {
+    "enabled": true,
+    "intervalMs": 60000,
+    "startupDelayMs": 5000
+  },
+  "autoCorrect": {
+    "enabled": false,
+    "maxRetries": 3,
+    "retryDelayMs": 5000
+  },
+  "autoUpdate": {
+    "enabled": false,
+    "gitCommitBeforeChange": true,
+    "gitCommitAfterChange": true,
+    "backupConfig": true
+  },
+  "diagnostics": {
+    "logPath": "./logs/diagnostic.log",
+    "maxLogSizeMb": 10,
+    "rotateCount": 5
+  },
+  "mcpProxy": {
+    "configPath": "~/.mcpproxy/mcp_config.json",
+    "endpoint": "http://localhost:8080/mcp"
+  }
+}
