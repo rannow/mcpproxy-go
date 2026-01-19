@@ -657,28 +657,30 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	// Get concurrency limit from config
 	maxConcurrent := m.globalConfig.MaxConcurrentConnections
 	if maxConcurrent <= 0 {
-		maxConcurrent = 10 // Fallback default (reduced to avoid resource contention)
+		maxConcurrent = 10 // Fallback default
 	}
 
-	m.logger.Info("🚀 Phase 1: Initial connection attempts",
-		zap.Int("total_clients", len(jobs)),
-		zap.Int("max_concurrent", maxConcurrent))
-
-	// MED-002: PHASE 1: Initial connection attempts (with centralized timeout)
-	failedJobs := m.connectPhase(ctx, jobs, maxConcurrent, config.DefaultConnectionTimeout, "initial")
-
-	// PHASE 2: Retry failed servers (if any)
-	if len(failedJobs) > 0 {
-		m.logger.Info("🔄 Phase 2: Retrying failed servers",
-			zap.Int("failed_count", len(failedJobs)),
-			zap.Int("max_retries", 5))
-
-		m.retryFailedServers(ctx, failedJobs, maxConcurrent)
+	// Build map of eligible clients for scheduler
+	eligibleClients := make(map[string]*managed.Client)
+	for _, job := range jobs {
+		eligibleClients[job.id] = job.client
 	}
+
+	m.logger.Info("🚀 Starting connection scheduler",
+		zap.Int("total_clients", len(eligibleClients)),
+		zap.Int("worker_count", maxConcurrent))
+
+	// Use queue-based scheduler for startup connections
+	// Benefits: constant 10 active workers, individual timeouts, retry queue
+	scheduler := NewConnectionScheduler(m, maxConcurrent, m.logger)
+	result := scheduler.Start(eligibleClients)
 
 	m.logger.Info("✅ ConnectAll completed",
-		zap.Int("total_attempted", len(jobs)),
-		zap.Int("initial_failures", len(failedJobs)))
+		zap.Int("total_attempted", result.TotalJobs),
+		zap.Int("successful", result.Successful),
+		zap.Int("failed", result.Failed),
+		zap.Int("retried", result.Retried),
+		zap.Duration("duration", result.Duration))
 
 	return nil
 }
