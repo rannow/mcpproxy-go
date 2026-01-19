@@ -71,6 +71,19 @@ func (m *Manager) SetConfigLoader(loader *config.Loader) {
 	m.configLoader = loader
 }
 
+// ShouldSkipConfigReload checks if a config file change was programmatic (e.g., auto-disable)
+// and should not trigger a full reload. Returns true if the change should be skipped.
+// This is thread-safe and should be called by external config watchers (like tray).
+func (m *Manager) ShouldSkipConfigReload() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.configLoader == nil {
+		return false
+	}
+	return m.configLoader.ShouldSkipReload()
+}
+
 // SyncServersWithConfig synchronizes the database with the config file
 // It removes servers from the database that are not present in the config file
 // This should be called after SetConfigLoader on startup and after ReloadConfiguration

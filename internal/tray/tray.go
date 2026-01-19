@@ -111,6 +111,7 @@ type ServerInterface interface {
 
 	// Config management for file watching
 	ReloadConfiguration() error
+	ShouldSkipConfigReload() bool // Check if config change was programmatic (skip reload)
 	GetConfigPath() string
 	GetLogDir() string
 	GetGitHubURL() string
@@ -386,10 +387,16 @@ func (a *App) watchConfigFile() {
 			}
 
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				a.logger.Debug("Config file changed, reloading configuration", zap.String("event", event.String()))
-
 				// Add a small delay to ensure file write is complete
 				time.Sleep(500 * time.Millisecond)
+
+				// Check if this change was programmatic (e.g., auto-disable) and should be skipped
+				if a.server.ShouldSkipConfigReload() {
+					a.logger.Debug("Config file changed by internal operation, skipping reload", zap.String("event", event.String()))
+					continue
+				}
+
+				a.logger.Debug("Config file changed externally, reloading configuration", zap.String("event", event.String()))
 
 				if err := a.server.ReloadConfiguration(); err != nil {
 					a.logger.Error("Failed to reload configuration", zap.Error(err))
@@ -782,32 +789,38 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	actuallyRunning := serverRunning
 
 	// Update running status and start/stop button
-	if actuallyRunning {
-		listenAddr, _ := status["listen_addr"].(string)
+	// Check appState FIRST - "starting" and "stopping" should show even if server isn't fully running yet
+	listenAddr, _ := status["listen_addr"].(string)
 
-		// Show app state in status message
-		switch appState {
-		case "starting":
-			a.statusItem.SetTitle("Status: Starting...")
-		case "degraded":
-			if listenAddr != "" {
-				a.statusItem.SetTitle(fmt.Sprintf("Status: Degraded (%s)", listenAddr))
-			} else {
-				a.statusItem.SetTitle("Status: Degraded")
+	switch appState {
+	case "starting":
+		a.statusItem.SetTitle("Status: Starting...")
+		a.logger.Debug("Set tray to starting state")
+	case "stopping":
+		a.statusItem.SetTitle("Status: Stopping...")
+		a.logger.Debug("Set tray to stopping state")
+	default:
+		// For other states, use serverRunning to determine display
+		if actuallyRunning {
+			switch appState {
+			case "degraded":
+				if listenAddr != "" {
+					a.statusItem.SetTitle(fmt.Sprintf("Status: Degraded (%s)", listenAddr))
+				} else {
+					a.statusItem.SetTitle("Status: Degraded")
+				}
+			default: // "running" or empty
+				if listenAddr != "" {
+					a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
+				} else {
+					a.statusItem.SetTitle("Status: Running")
+				}
 			}
-		case "stopping":
-			a.statusItem.SetTitle("Status: Stopping...")
-		default: // "running" or empty
-			if listenAddr != "" {
-				a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
-			} else {
-				a.statusItem.SetTitle("Status: Running")
-			}
+			a.logger.Debug("Set tray to running state", zap.String("app_state", appState))
+		} else {
+			a.statusItem.SetTitle("Status: Stopped")
+			a.logger.Debug("Set tray to stopped state")
 		}
-		a.logger.Debug("Set tray to running state", zap.String("app_state", appState))
-	} else {
-		a.statusItem.SetTitle("Status: Stopped")
-		a.logger.Debug("Set tray to stopped state")
 	}
 
 

@@ -134,6 +134,10 @@ func (m *MockServerInterface) ReloadConfiguration() error {
 	return nil
 }
 
+func (m *MockServerInterface) ShouldSkipConfigReload() bool {
+	return false
+}
+
 func (m *MockServerInterface) GetConfigPath() string {
 	return m.configPath
 }

@@ -214,6 +214,20 @@ func (l *Loader) copyConfig(cfg *Config) (*Config, error) {
 	return &copy, nil
 }
 
+// ShouldSkipReload checks if the next config file change should be skipped.
+// Returns true if the change was programmatic (e.g., auto-disable) and resets the flag.
+// This is thread-safe and should be called by external config watchers.
+func (l *Loader) ShouldSkipReload() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.skipNextReload {
+		l.skipNextReload = false
+		return true
+	}
+	return false
+}
+
 // writeConfigToFile writes configuration to a file.
 func (l *Loader) writeConfigToFile(cfg *Config, path string) error {
 	// Marshal config to JSON with proper formatting

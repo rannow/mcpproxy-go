@@ -1346,6 +1346,12 @@ func (s *Server) GetListenAddress() string {
 	return s.config.Listen
 }
 
+// ShouldSkipConfigReload checks if a config file change was programmatic (e.g., auto-disable)
+// and should not trigger a full reload. Delegates to storageManager's configLoader.
+func (s *Server) ShouldSkipConfigReload() bool {
+	return s.storageManager.ShouldSkipConfigReload()
+}
+
 // GetUpstreamStats returns statistics about upstream servers
 func (s *Server) GetUpstreamStats() map[string]interface{} {
 	stats := s.upstreamManager.GetStats()
