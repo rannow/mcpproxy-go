@@ -3485,6 +3485,24 @@ func (s *Server) handleUpdateServerConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Update in-memory config to keep it in sync
+	s.mu.Lock()
+	for i := range s.config.Servers {
+		if s.config.Servers[i].Name == serverName {
+			s.config.Servers[i].Protocol = serverConfig.Protocol
+			s.config.Servers[i].Command = serverConfig.Command
+			s.config.Servers[i].WorkingDir = serverConfig.WorkingDir
+			s.config.Servers[i].URL = serverConfig.URL
+			s.config.Servers[i].RepositoryURL = serverConfig.RepositoryURL
+			s.config.Servers[i].Args = serverConfig.Args
+			s.config.Servers[i].Env = serverConfig.Env
+			s.config.Servers[i].StartupMode = serverConfig.StartupMode
+			s.config.Servers[i].Updated = serverConfig.Updated
+			break
+		}
+	}
+	s.mu.Unlock()
+
 	// Publish config change event
 	action := "updated"
 	s.eventBus.Publish(events.Event{
