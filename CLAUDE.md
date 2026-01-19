@@ -346,21 +346,20 @@ Remember: **Claude Flow coordinates, Claude Code creates!**
 
 ## macOS Tahoe Systray Fix
 
-**Problem**: Tray icon not visible on macOS Tahoe (26.x) with `fyne.io/systray`.
+**Problem**: Tray icon not visible / kernel deadlock (UE state) on macOS Tahoe (26.x).
 
-**Solution**: Migrate from `fyne.io/systray` to `github.com/getlantern/systray v1.2.2`
+**Root Cause**: Commit `a98cc33` changed tray initialization order - calling `systray.Run()` BEFORE starting goroutines causes deadlock with `getlantern/systray` on macOS Tahoe.
 
-**Changes made:**
-1. `internal/tray/tray.go` line 27: Changed import to `github.com/getlantern/systray`
-2. `internal/tray/managers.go` line 14: Changed import to `github.com/getlantern/systray`
-3. Commented out `AddSeparator()` calls on submenu items (not supported by getlantern)
-4. Updated `go.mod`: `go get github.com/getlantern/systray@v1.2.2`
+**Solution**: Keep `github.com/getlantern/systray v1.2.2` BUT use OLD code structure from commit `c98989a` (goroutines started BEFORE `systray.Run()`).
+
+**CRITICAL**: In `internal/tray/tray.go` Run() function:
+- ✅ CORRECT: Start goroutines first, then call `systray.Run()` at the end
+- ❌ WRONG: Call `systray.Run()` first, start goroutines in `onReady()`
 
 **Build & Install:**
 ```bash
 cd /Users/hrannow/Library/CloudStorage/OneDrive-Persönlich/workspace/mcp-server/mcpproxy-go
 go build -o bin/mcpproxy ./cmd/mcpproxy
-cp bin/mcpproxy MCPProxy.app/Contents/MacOS/mcpproxy
 ```
 
 **Auto-Start at Login:**

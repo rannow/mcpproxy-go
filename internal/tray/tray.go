@@ -274,25 +274,10 @@ func (a *App) getGroupKeyByID(id int) string {
 }
 
 // Run starts the system tray application
-// CRITICAL: On macOS Tahoe, systray.Run() must be called IMMEDIATELY without
-// any goroutines or complex setup beforehand. All initialization is deferred
-// to onReady() callback to ensure proper GUI event loop initialization.
 func (a *App) Run(ctx context.Context) error {
-	a.logger.Info("Starting system tray application - calling systray.Run() immediately")
-	a.ctx = ctx // Store context reference for use in onReady
-
-	// Start systray FIRST - this is a blocking call that must run on main thread
-	// All other initialization happens in onReady() callback
-	systray.Run(a.onReady, a.onExit)
-
-	return ctx.Err()
-}
-
-// startBackgroundServices initializes watchers and goroutines AFTER systray is running
-// This is called from onReady() to ensure GUI is fully initialized first
-func (a *App) startBackgroundServices() {
-	// Create cancellable context from stored parent context
-	a.ctx, a.cancel = context.WithCancel(a.ctx)
+	a.logger.Info("Starting system tray application")
+	a.ctx, a.cancel = context.WithCancel(ctx)
+	defer a.cancel()
 
 	// Initialize config file watcher
 	if err := a.initConfigWatcher(); err != nil {
@@ -307,7 +292,7 @@ func (a *App) startBackgroundServices() {
 			select {
 			case <-ticker.C:
 				a.checkForUpdates()
-			case <-a.ctx.Done():
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -325,7 +310,7 @@ func (a *App) startBackgroundServices() {
 			// Wait for menu items to be initialized using the flag
 			for !a.coreMenusReady {
 				select {
-				case <-a.ctx.Done():
+				case <-ctx.Done():
 					return
 				default:
 					time.Sleep(100 * time.Millisecond) // Check every 100ms
@@ -338,7 +323,7 @@ func (a *App) startBackgroundServices() {
 				select {
 				case status := <-statusCh:
 					a.updateStatusFromData(status)
-				case <-a.ctx.Done():
+				case <-ctx.Done():
 					return
 				}
 			}
@@ -347,13 +332,16 @@ func (a *App) startBackgroundServices() {
 
 	// Monitor context cancellation and quit systray when needed
 	go func() {
-		<-a.ctx.Done()
+		<-ctx.Done()
 		a.logger.Info("Context cancelled, quitting systray")
 		a.cleanup()
 		systray.Quit()
 	}()
 
-	a.logger.Info("Background services started successfully")
+	// Start systray - this is a blocking call that must run on main thread
+	systray.Run(a.onReady, a.onExit)
+
+	return ctx.Err()
 }
 
 // initConfigWatcher initializes the config file watcher
@@ -478,11 +466,6 @@ func (a *App) onReady() {
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
 	a.logger.Debug("Core menu items initialized successfully - background processes can now start")
-
-	// Start background services NOW that systray is initialized and core menus are ready
-	// This was moved from Run() to ensure systray.Run() is called first on macOS Tahoe
-	a.startBackgroundServices()
-
 	systray.AddSeparator()
 
 	// --- Status-Based Server Menus ---
