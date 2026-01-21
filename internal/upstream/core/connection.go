@@ -152,19 +152,31 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		}
 
-		// CRITICAL FIX: Also cleanup process groups to prevent zombie processes on connection failure
+		// CRITICAL FIX: Cleanup process groups asynchronously to prevent zombie processes
+		// The cleanup is done in a goroutine to avoid blocking the Connect() return
+		// This ensures the scheduler's elapsed time accurately reflects the connection attempt
 		if c.processGroupID > 0 {
-			c.logger.Warn("Connection failed - cleaning up process group to prevent zombie processes",
-				zap.String("server", c.config.Name),
-				zap.Int("pgid", c.processGroupID))
+			pgid := c.processGroupID
+			serverName := c.config.Name
+			logger := c.logger
+			c.processGroupID = 0 // Clear immediately to prevent double-cleanup
 
-			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
-				c.logger.Error("Failed to clean up process group after connection failure",
-					zap.String("server", c.config.Name),
-					zap.Int("pgid", c.processGroupID),
-					zap.Error(err))
-			}
-			c.processGroupID = 0
+			logger.Warn("Connection failed - scheduling async process group cleanup",
+				zap.String("server", serverName),
+				zap.Int("pgid", pgid))
+
+			go func() {
+				if cleanupErr := killProcessGroup(pgid, logger, serverName); cleanupErr != nil {
+					logger.Error("Async process group cleanup failed",
+						zap.String("server", serverName),
+						zap.Int("pgid", pgid),
+						zap.Error(cleanupErr))
+				} else {
+					logger.Info("Async process group cleanup completed",
+						zap.String("server", serverName),
+						zap.Int("pgid", pgid))
+				}
+			}()
 		}
 
 		return fmt.Errorf("failed to connect: %w", err)
@@ -354,11 +366,30 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
-	// Start stdio transport with a persistent background context so the child
-	// process keeps running even if the connect context is short-lived.
-	persistentCtx := context.Background()
-	if err := c.client.Start(persistentCtx); err != nil {
-		return fmt.Errorf("failed to start stdio client: %w", err)
+	// Start stdio transport with timeout handling.
+	// The subprocess uses a background context so it keeps running after connection,
+	// but we wrap the Start() call to respect the caller's timeout for startup phase.
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- c.client.Start(context.Background())
+	}()
+
+	// Wait for Start() to complete or timeout
+	select {
+	case <-ctx.Done():
+		// Context timeout - Start() is taking too long
+		c.logger.Warn("Stdio transport Start() timed out",
+			zap.String("server", c.config.Name),
+			zap.Error(ctx.Err()))
+		// Close the client to abort the start attempt
+		if c.client != nil {
+			c.client.Close()
+		}
+		return fmt.Errorf("failed to start stdio client: %w", ctx.Err())
+	case err := <-startDone:
+		if err != nil {
+			return fmt.Errorf("failed to start stdio client: %w", err)
+		}
 	}
 
 	// IMPORTANT: Perform MCP initialize() handshake for stdio transports as well,
@@ -392,19 +423,31 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			}
 		}
 
-		// CRITICAL FIX: Also cleanup process groups to prevent zombie processes on initialization failure
+		// CRITICAL FIX: Cleanup process groups asynchronously to prevent zombie processes
+		// The cleanup is done in a goroutine to avoid blocking the initialization error return
+		// This ensures the scheduler's elapsed time accurately reflects the connection attempt
 		if c.processGroupID > 0 {
-			c.logger.Warn("Initialization failed - cleaning up process group to prevent zombie processes",
-				zap.String("server", c.config.Name),
-				zap.Int("pgid", c.processGroupID))
+			pgid := c.processGroupID
+			serverName := c.config.Name
+			logger := c.logger
+			c.processGroupID = 0 // Clear immediately to prevent double-cleanup
 
-			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
-				c.logger.Error("Failed to clean up process group after initialization failure",
-					zap.String("server", c.config.Name),
-					zap.Int("pgid", c.processGroupID),
-					zap.Error(err))
-			}
-			c.processGroupID = 0
+			logger.Warn("Initialization failed - scheduling async process group cleanup",
+				zap.String("server", serverName),
+				zap.Int("pgid", pgid))
+
+			go func() {
+				if cleanupErr := killProcessGroup(pgid, logger, serverName); cleanupErr != nil {
+					logger.Error("Async process group cleanup failed after init failure",
+						zap.String("server", serverName),
+						zap.Int("pgid", pgid),
+						zap.Error(cleanupErr))
+				} else {
+					logger.Info("Async process group cleanup completed after init failure",
+						zap.String("server", serverName),
+						zap.Int("pgid", pgid))
+				}
+			}()
 		}
 		return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
 	}
@@ -1375,7 +1418,81 @@ func (c *Client) initialize(ctx context.Context) error {
 			zap.String("formatted_json", string(reqBytes)))
 	}
 
-	serverInfo, err := c.client.Initialize(ctx, initRequest)
+	// BUG FIX: Wrap Initialize() in timeout enforcement pattern.
+	// The MCP library's Initialize() doesn't promptly return on context cancellation,
+	// so we use a goroutine + select pattern to enforce the timeout strictly.
+	// Without this, connections can hang for 176+ seconds despite a 20s timeout.
+	type initResult struct {
+		serverInfo *mcp.InitializeResult
+		err        error
+	}
+	initDone := make(chan initResult, 1)
+	go func() {
+		info, err := c.client.Initialize(ctx, initRequest)
+		initDone <- initResult{serverInfo: info, err: err}
+	}()
+
+	// Wait for Initialize() to complete or context timeout
+	var serverInfo *mcp.InitializeResult
+	var err error
+	select {
+	case <-ctx.Done():
+		// Context timeout - Initialize() is taking too long
+		c.logger.Warn("MCP Initialize() timed out - forcing cleanup",
+			zap.String("server", c.config.Name),
+			zap.Error(ctx.Err()))
+
+		// CRITICAL FIX: Kill process group FIRST to unblock the Initialize() goroutine
+		// The mcp-go library's Close() calls cmd.Wait() which blocks until the process exits.
+		// Without killing the process first, Close() can block for 50+ seconds.
+		if c.processGroupID > 0 {
+			pgid := c.processGroupID
+			serverName := c.config.Name
+			logger := c.logger
+			c.processGroupID = 0 // Clear immediately to prevent double-cleanup
+
+			logger.Debug("Initialize timeout - killing process group to unblock cleanup",
+				zap.String("server", serverName),
+				zap.Int("pgid", pgid))
+
+			// Kill synchronously to ensure process dies before Close() is called
+			if killErr := killProcessGroup(pgid, logger, serverName); killErr != nil {
+				logger.Warn("Initialize timeout - process group kill failed",
+					zap.String("server", serverName),
+					zap.Int("pgid", pgid),
+					zap.Error(killErr))
+			}
+		}
+
+		// Now Close() can be called - it should return quickly since process is dead
+		// Run in goroutine with short timeout to avoid any residual blocking
+		if c.client != nil {
+			go func() {
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer closeCancel()
+
+				closeDone := make(chan struct{})
+				go func() {
+					c.client.Close()
+					close(closeDone)
+				}()
+
+				select {
+				case <-closeDone:
+					// Close completed normally
+				case <-closeCtx.Done():
+					c.logger.Debug("Initialize timeout - Close() timed out after process kill, ignoring",
+						zap.String("server", c.config.Name))
+				}
+			}()
+		}
+
+		err = fmt.Errorf("transport error: %w", ctx.Err())
+	case result := <-initDone:
+		serverInfo = result.serverInfo
+		err = result.err
+	}
+
 	if err != nil {
 		// Log initialization failure to server-specific log
 		if c.upstreamLogger != nil {

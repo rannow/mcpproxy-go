@@ -170,8 +170,8 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		// Use global default if per-server not specified
 		threshold = m.globalConfig.AutoDisableThreshold
 		if threshold == 0 {
-			// Final fallback to 3 (user-friendly default)
-			threshold = 3
+			// Final fallback to consolidated constant (HIGH-003)
+			threshold = types.DefaultAutoDisableThreshold
 		}
 	}
 	client.StateManager.SetAutoDisableThreshold(threshold)
@@ -1349,6 +1349,7 @@ func (m *Manager) startHealthCheckMonitor() {
 
 // performHealthChecks checks the health of all servers and attempts reconnection for disconnected ones
 // Servers with HealthCheck=true get active health checks, all servers get reconnection attempts
+// Uses PARALLEL reconnections with a worker pool for efficiency
 func (m *Manager) performHealthChecks() {
 	m.mu.RLock()
 	allClients := make(map[string]*managed.Client)
@@ -1361,22 +1362,19 @@ func (m *Manager) performHealthChecks() {
 		return
 	}
 
-	var healthCheckCount, disconnectedCount int
-	for _, client := range allClients {
+	// Collect servers that need reconnection
+	type reconnectJob struct {
+		id     string
+		client *managed.Client
+	}
+	var toReconnect []reconnectJob
+
+	var healthCheckCount int
+	for id, client := range allClients {
 		if client.Config.HealthCheck {
 			healthCheckCount++
 		}
-		if !client.IsConnected() && !client.Config.IsDisabled() && !client.StateManager.IsAutoDisabled() {
-			disconnectedCount++
-		}
-	}
 
-	m.logger.Debug("Performing health checks",
-		zap.Int("total_servers", len(allClients)),
-		zap.Int("servers_with_health_check", healthCheckCount),
-		zap.Int("disconnected_servers", disconnectedCount))
-
-	for id, client := range allClients {
 		// Skip if disabled or auto-disabled
 		if client.Config.IsDisabled() {
 			continue
@@ -1389,41 +1387,17 @@ func (m *Manager) performHealthChecks() {
 			continue
 		}
 
-		// Check connection status - reconnect ALL disconnected servers, not just HealthCheck ones
+		// Check connection status - reconnect ALL disconnected servers
 		if !client.IsConnected() {
-			state := client.GetState()
-
 			// Check if we should retry based on backoff
 			if !client.ShouldRetry() {
 				m.logger.Debug("Health check: Skipping reconnection (backoff not elapsed)",
 					zap.String("id", id),
 					zap.String("name", client.Config.Name),
-					zap.String("state", state.String()))
+					zap.String("state", client.GetState().String()))
 				continue
 			}
-
-			m.logger.Info("Health check: Server not connected, attempting reconnection",
-				zap.String("id", id),
-				zap.String("name", client.Config.Name),
-				zap.String("state", state.String()),
-				zap.Bool("health_check_enabled", client.Config.HealthCheck))
-
-			// Attempt to reconnect with per-server or default timeout
-			effectiveTimeout := client.Config.GetConnectionTimeout()
-			ctx, cancel := context.WithTimeout(context.Background(), effectiveTimeout)
-			err := client.Connect(ctx)
-			cancel()
-
-			if err != nil {
-				m.logger.Warn("Health check: Failed to reconnect server",
-					zap.String("id", id),
-					zap.String("name", client.Config.Name),
-					zap.Error(err))
-			} else {
-				m.logger.Info("Health check: Successfully reconnected server",
-					zap.String("id", id),
-					zap.String("name", client.Config.Name))
-			}
+			toReconnect = append(toReconnect, reconnectJob{id: id, client: client})
 		} else if client.Config.HealthCheck {
 			// Only log healthy status for servers with explicit health check
 			m.logger.Debug("Health check: Server is healthy",
@@ -1431,4 +1405,79 @@ func (m *Manager) performHealthChecks() {
 				zap.String("name", client.Config.Name))
 		}
 	}
+
+	m.logger.Debug("Performing health checks",
+		zap.Int("total_servers", len(allClients)),
+		zap.Int("servers_with_health_check", healthCheckCount),
+		zap.Int("disconnected_servers", len(toReconnect)))
+
+	if len(toReconnect) == 0 {
+		return
+	}
+
+	// Use parallel reconnection with worker pool
+	// Use MaxConcurrentConnections from globalConfig (default 20)
+	maxWorkers := 20
+	if m.globalConfig != nil && m.globalConfig.MaxConcurrentConnections > 0 {
+		maxWorkers = m.globalConfig.MaxConcurrentConnections
+	}
+	if maxWorkers > len(toReconnect) {
+		maxWorkers = len(toReconnect)
+	}
+
+	m.logger.Info("Health check: Starting parallel reconnection",
+		zap.Int("servers_to_reconnect", len(toReconnect)),
+		zap.Int("max_workers", maxWorkers))
+
+	// Create job channel and wait group
+	jobChan := make(chan reconnectJob, len(toReconnect))
+	var wg sync.WaitGroup
+
+	// Start workers
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for job := range jobChan {
+				state := job.client.GetState()
+				m.logger.Info("Health check: Server not connected, attempting reconnection",
+					zap.Int("worker_id", workerID),
+					zap.String("id", job.id),
+					zap.String("name", job.client.Config.Name),
+					zap.String("state", state.String()),
+					zap.Bool("health_check_enabled", job.client.Config.HealthCheck))
+
+				// Attempt to reconnect with per-server or default timeout
+				effectiveTimeout := job.client.Config.GetConnectionTimeout()
+				ctx, cancel := context.WithTimeout(context.Background(), effectiveTimeout)
+				err := job.client.Connect(ctx)
+				cancel()
+
+				if err != nil {
+					m.logger.Warn("Health check: Failed to reconnect server",
+						zap.Int("worker_id", workerID),
+						zap.String("id", job.id),
+						zap.String("name", job.client.Config.Name),
+						zap.Error(err))
+				} else {
+					m.logger.Info("Health check: Successfully reconnected server",
+						zap.Int("worker_id", workerID),
+						zap.String("id", job.id),
+						zap.String("name", job.client.Config.Name))
+				}
+			}
+		}(i)
+	}
+
+	// Send all jobs to workers
+	for _, job := range toReconnect {
+		jobChan <- job
+	}
+	close(jobChan)
+
+	// Wait for all workers to complete
+	wg.Wait()
+
+	m.logger.Info("Health check: Parallel reconnection completed",
+		zap.Int("servers_attempted", len(toReconnect)))
 }
