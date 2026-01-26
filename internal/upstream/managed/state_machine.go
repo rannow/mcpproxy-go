@@ -22,8 +22,17 @@ type StateMachine struct {
 	serverName   string
 
 	// Auto-disable tracking
-	consecutiveFailures int
+	consecutiveFailures  int
 	autoDisableThreshold int
+
+	// Startup mode flag - when true, auto-disable is suspended
+	// This ensures servers are only auto-disabled after ALL waves complete
+	startupModeActive bool
+
+	// PersistAutoDisableToConfig controls whether auto-disable state is saved to config file.
+	// When false (default), auto-disable state is only stored in database.
+	// When true, auto-disable state is written to both database AND config file.
+	persistAutoDisableToConfig bool
 }
 
 // validTransitions defines allowed state transitions.
@@ -67,18 +76,22 @@ var validTransitions = map[types.ServerState][]types.ServerState{
 }
 
 // NewStateMachine creates a new state machine for managing server states.
+// persistAutoDisableToConfig controls whether auto-disable state is saved to config file.
+// When false (default), auto-disable state is only stored in database.
 func NewStateMachine(
 	stateManager *types.StateManager,
 	storage *storage.Manager,
 	eventBus *events.Bus,
 	serverName string,
+	persistAutoDisableToConfig bool,
 ) *StateMachine {
 	return &StateMachine{
-		stateManager:         stateManager,
-		storage:              storage,
-		eventBus:             eventBus,
-		serverName:           serverName,
-		autoDisableThreshold: types.DefaultAutoDisableThreshold, // HIGH-003: Use consolidated constant
+		stateManager:               stateManager,
+		storage:                    storage,
+		eventBus:                   eventBus,
+		serverName:                 serverName,
+		autoDisableThreshold:       types.DefaultAutoDisableThreshold, // HIGH-003: Use consolidated constant
+		persistAutoDisableToConfig: persistAutoDisableToConfig,
 	}
 }
 
@@ -87,6 +100,22 @@ func (sm *StateMachine) SetAutoDisableThreshold(threshold int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.autoDisableThreshold = threshold
+}
+
+// SetStartupMode enables or disables startup mode.
+// When startup mode is active, auto-disable is suspended to ensure servers
+// are only auto-disabled after ALL waves complete in the connection scheduler.
+func (sm *StateMachine) SetStartupMode(active bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.startupModeActive = active
+}
+
+// IsStartupModeActive returns whether startup mode is currently active.
+func (sm *StateMachine) IsStartupModeActive() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.startupModeActive
 }
 
 // CanTransitionTo checks if a transition from current state to newState is valid.
@@ -194,8 +223,9 @@ func (sm *StateMachine) HandleConnectionFailure() error {
 
 	sm.consecutiveFailures++
 
-	// Check if threshold reached
-	if sm.consecutiveFailures >= sm.autoDisableThreshold {
+	// Check if threshold reached - but only trigger auto-disable if NOT in startup mode
+	// During startup, we count failures but defer auto-disable until all waves complete
+	if !sm.startupModeActive && sm.consecutiveFailures >= sm.autoDisableThreshold {
 		// Transition to auto-disabled
 		if err := sm.stateManager.TransitionServerState(types.StateAutoDisabled); err != nil {
 			return fmt.Errorf("failed to auto-disable server: %w", err)
@@ -274,22 +304,44 @@ func (sm *StateMachine) persistStateLocked(state types.ServerState) error {
 }
 
 // persistAutoDisableLocked persists auto-disable state to storage (must be called with lock held).
-// This uses the full two-phase commit that updates BOTH database AND config file
+// Depending on persistAutoDisableToConfig flag:
+// - When true: uses two-phase commit that updates BOTH database AND config file
+// - When false (default): only updates database, keeping servers as "active" in config file
 func (sm *StateMachine) persistAutoDisableLocked() error {
 	if sm.storage == nil {
 		return nil // No storage configured, skip persistence
 	}
 
-	// Build reason string with failure count for debugging
-	reason := fmt.Sprintf("Auto-disabled after %d consecutive connection failures", sm.autoDisableThreshold)
+	if sm.persistAutoDisableToConfig {
+		// Use UpdateServerState which handles two-phase commit (DB + config)
+		// This ensures both database and config file are updated atomically
+		reason := fmt.Sprintf("Auto-disabled after %d consecutive connection failures", sm.autoDisableThreshold)
+		if err := sm.storage.UpdateServerState(sm.serverName, reason); err != nil {
+			return fmt.Errorf("failed to persist auto-disable state: %w", err)
+		}
+		// Note: Event emission is handled by storage.UpdateServerState via events.ServerAutoDisabled
+	} else {
+		// Only update database, keep config file unchanged
+		// This allows servers to remain "active" in config while being auto-disabled at runtime
+		if err := sm.storage.UpdateUpstreamServerState(sm.serverName, "auto_disabled"); err != nil {
+			return fmt.Errorf("failed to persist auto-disable state to database: %w", err)
+		}
 
-	// Use UpdateServerState which handles two-phase commit (DB + config)
-	// This ensures both database and config file are updated atomically
-	if err := sm.storage.UpdateServerState(sm.serverName, reason); err != nil {
-		return fmt.Errorf("failed to persist auto-disable state: %w", err)
+		// Emit event manually since UpdateUpstreamServerState doesn't emit events
+		if sm.eventBus != nil {
+			sm.eventBus.Publish(events.Event{
+				Type:       events.ServerAutoDisabled,
+				ServerName: sm.serverName,
+				NewState:   "auto_disabled",
+				Data: map[string]interface{}{
+					"reason":                "consecutive_failures",
+					"threshold":             sm.autoDisableThreshold,
+					"persist_to_config":     false,
+					"config_state_unchanged": true,
+				},
+			})
+		}
 	}
-
-	// Note: Event emission is handled by storage.UpdateServerState via events.ServerAutoDisabled
 
 	return nil
 }

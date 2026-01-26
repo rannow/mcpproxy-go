@@ -8,25 +8,31 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/upstream/managed"
 )
 
-// ConnectionScheduler manages startup connections using a worker pool pattern.
-// It maintains a constant number of active connection workers and processes
-// servers from a queue system, with failed servers retried after all others.
+// Wave timeout configuration: exponential backoff 20s, 40s, 80s, 160s, 320s
+var waveTimeouts = []time.Duration{
+	20 * time.Second,
+	40 * time.Second,
+	80 * time.Second,
+	160 * time.Second,
+	320 * time.Second,
+}
+
+// ConnectionScheduler manages startup connections using a wave-based approach.
+// Each wave processes ALL servers with a specific timeout before moving to the next wave.
+// Wave 1: All servers with 10s timeout
+// Wave 2: Failed servers with 20s timeout
+// Wave 3: Failed servers with 40s timeout
+// Wave 4: Failed servers with 80s timeout
+// Wave 5: Failed servers with 160s timeout
 type ConnectionScheduler struct {
 	manager     *Manager
 	workerCount int
 	logger      *zap.Logger
 
-	// Channels for job distribution
-	primaryQueue chan *connectionJob
-	retryQueue   chan *connectionJob
-	results      chan *connectionResult
-
 	// Synchronization
-	wg     sync.WaitGroup
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -34,18 +40,12 @@ type ConnectionScheduler struct {
 	totalAttempts int64
 	successful    int64
 	failed        int64
-	retrying      int64
-
-	// Configuration
-	maxRetries int
 }
 
 // connectionJob represents a server connection task
 type connectionJob struct {
-	id      string
-	client  *managed.Client
-	isRetry bool
-	attempt int
+	id     string
+	client *managed.Client
 }
 
 // connectionResult represents the outcome of a connection attempt
@@ -65,251 +65,261 @@ func NewConnectionScheduler(manager *Manager, workerCount int, logger *zap.Logge
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &ConnectionScheduler{
-		manager:      manager,
-		workerCount:  workerCount,
-		logger:       logger,
-		primaryQueue: make(chan *connectionJob, 100), // Buffer for primary queue
-		retryQueue:   make(chan *connectionJob, 100), // Buffer for retry queue
-		results:      make(chan *connectionResult, 100),
-		ctx:          ctx,
-		cancel:       cancel,
-		maxRetries:   config.MaxConnectionRetries,
+		manager:     manager,
+		workerCount: workerCount,
+		logger:      logger,
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
-// Start begins the connection scheduling process for all eligible clients
+// Start begins the wave-based connection scheduling process for all eligible clients
 func (s *ConnectionScheduler) Start(clients map[string]*managed.Client) *SchedulerResult {
-	startTime := time.Now()
-	s.logger.Info("Starting connection scheduler",
+	overallStartTime := time.Now()
+	s.logger.Info("═══════════════════════════════════════════════════════════════")
+	s.logger.Info("STARTUP: Connection scheduler starting",
 		zap.Int("worker_count", s.workerCount),
-		zap.Int("total_clients", len(clients)))
+		zap.Int("total_clients", len(clients)),
+		zap.Int("max_waves", len(waveTimeouts)))
 
-	// Count eligible clients and queue them
-	var eligibleCount int
+	// Collect eligible clients
+	var eligibleJobs []*connectionJob
 	for id, client := range clients {
 		if !client.Config.ShouldConnectOnStartup() {
-			s.logger.Debug("Skipping server (not configured for startup connect)",
+			s.logger.Debug("STARTUP: Skipping server (not configured for startup connect)",
 				zap.String("server", id))
 			continue
 		}
 		if client.IsConnected() {
-			s.logger.Debug("Skipping server (already connected)",
+			s.logger.Debug("STARTUP: Skipping server (already connected)",
 				zap.String("server", id))
 			continue
 		}
 
-		eligibleCount++
-		s.primaryQueue <- &connectionJob{
-			id:      id,
-			client:  client,
-			isRetry: false,
-			attempt: 1,
-		}
+		eligibleJobs = append(eligibleJobs, &connectionJob{
+			id:     id,
+			client: client,
+		})
 	}
 
-	if eligibleCount == 0 {
-		s.logger.Info("No eligible clients for connection")
+	if len(eligibleJobs) == 0 {
+		s.logger.Info("STARTUP: No eligible clients for connection")
 		return &SchedulerResult{
-			Duration:    time.Since(startTime),
-			TotalJobs:   0,
-			Successful:  0,
-			Failed:      0,
-			Retried:     0,
+			Duration:   time.Since(overallStartTime),
+			TotalJobs:  0,
+			Successful: 0,
+			Failed:     0,
+			Retried:    0,
 		}
 	}
 
-	s.logger.Info("Queued clients for connection",
-		zap.Int("eligible_count", eligibleCount))
+	s.logger.Info("STARTUP: Eligible clients collected",
+		zap.Int("eligible_count", len(eligibleJobs)))
 
-	// Start workers
-	for i := 0; i < s.workerCount; i++ {
-		s.wg.Add(1)
-		go s.worker(i)
+	// Process waves
+	pendingJobs := eligibleJobs
+	var totalRetried int
+
+	// Collect timing data across all waves
+	var allConnectionTimes []time.Duration
+	var successConnectionTimes []time.Duration
+
+	for wave := 0; wave < len(waveTimeouts) && len(pendingJobs) > 0; wave++ {
+		timeout := waveTimeouts[wave]
+		waveStartTime := time.Now()
+
+		s.logger.Info("───────────────────────────────────────────────────────────────")
+		s.logger.Info("STARTUP: Starting wave",
+			zap.Int("wave", wave+1),
+			zap.Int("max_waves", len(waveTimeouts)),
+			zap.Duration("timeout", timeout),
+			zap.Int("servers_to_process", len(pendingJobs)))
+
+		// Process this wave
+		waveResult := s.processWave(wave+1, pendingJobs, timeout)
+
+		// Collect timing data
+		allConnectionTimes = append(allConnectionTimes, waveResult.allTimes...)
+		successConnectionTimes = append(successConnectionTimes, waveResult.successTimes...)
+
+		waveElapsed := time.Since(waveStartTime)
+		successCount := len(pendingJobs) - len(waveResult.failedJobs)
+
+		s.logger.Info("STARTUP: Wave completed",
+			zap.Int("wave", wave+1),
+			zap.Duration("wave_duration", waveElapsed),
+			zap.Int("successful", successCount),
+			zap.Int("failed", len(waveResult.failedJobs)),
+			zap.Int("remaining_waves", len(waveTimeouts)-wave-1))
+
+		// Failed jobs become pending for next wave
+		if len(waveResult.failedJobs) > 0 && wave < len(waveTimeouts)-1 {
+			totalRetried += len(waveResult.failedJobs)
+			s.logger.Info("STARTUP: Servers queued for next wave",
+				zap.Int("count", len(waveResult.failedJobs)),
+				zap.Duration("next_timeout", waveTimeouts[wave+1]))
+		}
+
+		pendingJobs = waveResult.failedJobs
 	}
 
-	// Start result collector
-	done := make(chan struct{})
-	go s.collectResults(eligibleCount, done)
+	// Mark any remaining as finally failed
+	for _, job := range pendingJobs {
+		atomic.AddInt64(&s.failed, 1)
+		s.logger.Error("STARTUP: Max retries exceeded",
+			zap.String("server", job.id),
+			zap.Int("attempts", len(waveTimeouts)))
+	}
 
-	// Wait for all jobs to complete
-	<-done
+	overallDuration := time.Since(overallStartTime)
 
-	// Signal workers to stop
-	s.cancel()
-	s.wg.Wait()
+	// Calculate timing metrics
+	minAll, maxAll, avgAll := calculateTimingMetrics(allConnectionTimes)
+	minSuccess, maxSuccess, avgSuccess := calculateTimingMetrics(successConnectionTimes)
 
 	result := &SchedulerResult{
-		Duration:    time.Since(startTime),
-		TotalJobs:   eligibleCount,
-		Successful:  int(atomic.LoadInt64(&s.successful)),
-		Failed:      int(atomic.LoadInt64(&s.failed)),
-		Retried:     int(atomic.LoadInt64(&s.retrying)),
+		Duration:       overallDuration,
+		TotalJobs:      len(eligibleJobs),
+		Successful:     int(atomic.LoadInt64(&s.successful)),
+		Failed:         int(atomic.LoadInt64(&s.failed)),
+		Retried:        totalRetried,
+		MinConnectTime: minAll,
+		MaxConnectTime: maxAll,
+		AvgConnectTime: avgAll,
+		SuccessMinTime: minSuccess,
+		SuccessMaxTime: maxSuccess,
+		SuccessAvgTime: avgSuccess,
 	}
 
-	s.logger.Info("Connection scheduler completed",
-		zap.Duration("duration", result.Duration),
+	s.logger.Info("═══════════════════════════════════════════════════════════════")
+	s.logger.Info("STARTUP: Connection scheduler completed",
+		zap.Duration("total_duration", result.Duration),
+		zap.Int("total_servers", result.TotalJobs),
 		zap.Int("successful", result.Successful),
 		zap.Int("failed", result.Failed),
-		zap.Int("retried", result.Retried))
+		zap.Int("total_retried", result.Retried))
+	if len(allConnectionTimes) > 0 {
+		s.logger.Info("STARTUP: Connection timing metrics (all attempts)",
+			zap.Duration("min", result.MinConnectTime),
+			zap.Duration("max", result.MaxConnectTime),
+			zap.Duration("avg", result.AvgConnectTime))
+	}
+	if len(successConnectionTimes) > 0 {
+		s.logger.Info("STARTUP: Connection timing metrics (successful only)",
+			zap.Duration("min", result.SuccessMinTime),
+			zap.Duration("max", result.SuccessMaxTime),
+			zap.Duration("avg", result.SuccessAvgTime))
+	}
+	s.logger.Info("═══════════════════════════════════════════════════════════════")
 
 	return result
 }
 
-// worker processes jobs from the queues
-func (s *ConnectionScheduler) worker(id int) {
-	defer s.wg.Done()
-
-	s.logger.Debug("Worker started", zap.Int("worker_id", id))
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			s.logger.Debug("Worker stopping", zap.Int("worker_id", id))
-			return
-
-		case job := <-s.primaryQueue:
-			s.processJob(id, job)
-
-		default:
-			// Primary queue empty, try retry queue
-			select {
-			case <-s.ctx.Done():
-				return
-			case job := <-s.primaryQueue:
-				// Check primary queue again with higher priority
-				s.processJob(id, job)
-			case job := <-s.retryQueue:
-				s.processJob(id, job)
-			case <-time.After(100 * time.Millisecond):
-				// Brief wait before checking again
-			}
-		}
-	}
+// waveResults contains the outcome of a single wave
+type waveResults struct {
+	failedJobs     []*connectionJob
+	allTimes       []time.Duration
+	successTimes   []time.Duration
 }
 
-// processJob handles a single connection job
-func (s *ConnectionScheduler) processJob(workerID int, job *connectionJob) {
-	atomic.AddInt64(&s.totalAttempts, 1)
-
-	// Get individual timeout for this server
-	timeout := job.client.Config.GetConnectionTimeout()
-	if timeout <= 0 {
-		timeout = 30 * time.Second // Default timeout
+// processWave processes all jobs in parallel with the specified timeout
+// Returns the list of jobs that failed and timing metrics
+func (s *ConnectionScheduler) processWave(waveNum int, jobs []*connectionJob, timeout time.Duration) *waveResults {
+	if len(jobs) == 0 {
+		return &waveResults{}
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, timeout)
-	defer cancel()
+	// Create channels for job distribution and results
+	jobChan := make(chan *connectionJob, len(jobs))
+	resultChan := make(chan *connectionResult, len(jobs))
 
-	s.logger.Debug("Worker starting connection",
-		zap.Int("worker_id", workerID),
-		zap.String("server", job.id),
-		zap.Int("attempt", job.attempt),
-		zap.Bool("is_retry", job.isRetry),
-		zap.Duration("timeout", timeout))
+	// Queue all jobs
+	for _, job := range jobs {
+		jobChan <- job
+	}
+	close(jobChan)
 
-	startTime := time.Now()
-	err := job.client.Connect(ctx)
-	elapsed := time.Since(startTime)
-
-	result := &connectionResult{
-		job:     job,
-		success: err == nil,
-		err:     err,
-		elapsed: elapsed,
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < s.workerCount; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			s.waveWorker(workerID, waveNum, timeout, jobChan, resultChan)
+		}(i)
 	}
 
-	if err != nil {
-		s.logger.Warn("Connection failed",
-			zap.Int("worker_id", workerID),
-			zap.String("server", job.id),
-			zap.Int("attempt", job.attempt),
-			zap.Duration("elapsed", elapsed),
-			zap.Error(err))
+	// Wait for all workers to finish
+	wg.Wait()
+	close(resultChan)
 
-		// Queue for retry if under max retries
-		if job.attempt < s.maxRetries {
-			job.attempt++
-			job.isRetry = true
-			atomic.AddInt64(&s.retrying, 1)
+	// Collect results with timing metrics
+	results := &waveResults{
+		allTimes:     make([]time.Duration, 0, len(jobs)),
+		successTimes: make([]time.Duration, 0),
+	}
 
-			// Non-blocking send to retry queue
-			select {
-			case s.retryQueue <- job:
-				s.logger.Debug("Queued for retry",
-					zap.String("server", job.id),
-					zap.Int("next_attempt", job.attempt))
-			default:
-				s.logger.Warn("Retry queue full, dropping retry",
-					zap.String("server", job.id))
-				atomic.AddInt64(&s.failed, 1)
-			}
+	for result := range resultChan {
+		results.allTimes = append(results.allTimes, result.elapsed)
+		if !result.success {
+			results.failedJobs = append(results.failedJobs, result.job)
 		} else {
-			atomic.AddInt64(&s.failed, 1)
-			s.logger.Error("Max retries exceeded",
-				zap.String("server", job.id),
-				zap.Int("attempts", job.attempt))
+			results.successTimes = append(results.successTimes, result.elapsed)
 		}
-	} else {
-		atomic.AddInt64(&s.successful, 1)
-		s.logger.Info("Connection successful",
-			zap.Int("worker_id", workerID),
-			zap.String("server", job.id),
-			zap.Duration("elapsed", elapsed))
 	}
 
-	// Send result
-	select {
-	case s.results <- result:
-	default:
-		// Results channel full, log but continue
-		s.logger.Debug("Results channel full, dropping result",
-			zap.String("server", job.id))
-	}
+	return results
 }
 
-// collectResults monitors results and determines completion
-func (s *ConnectionScheduler) collectResults(totalJobs int, done chan<- struct{}) {
-	defer close(done)
+// waveWorker processes jobs from the channel with the specified timeout
+func (s *ConnectionScheduler) waveWorker(workerID, waveNum int, timeout time.Duration, jobs <-chan *connectionJob, results chan<- *connectionResult) {
+	for job := range jobs {
+		atomic.AddInt64(&s.totalAttempts, 1)
 
-	processed := 0
-	timeout := time.NewTimer(5 * time.Minute) // Overall timeout
-	defer timeout.Stop()
+		ctx, cancel := context.WithTimeout(s.ctx, timeout)
 
-	for {
-		select {
-		case <-timeout.C:
-			s.logger.Warn("Scheduler timeout reached",
-				zap.Int("processed", processed),
-				zap.Int("total", totalJobs))
-			return
+		s.logger.Debug("STARTUP: Worker starting connection",
+			zap.Int("worker_id", workerID),
+			zap.Int("wave", waveNum),
+			zap.String("server", job.id),
+			zap.Duration("timeout", timeout))
 
-		case result := <-s.results:
-			if result.success || result.job.attempt >= s.maxRetries {
-				processed++
-				s.logger.Debug("Job completed",
-					zap.String("server", result.job.id),
-					zap.Bool("success", result.success),
-					zap.Int("processed", processed),
-					zap.Int("total", totalJobs))
-			}
+		startTime := time.Now()
+		err := job.client.Connect(ctx)
+		elapsed := time.Since(startTime)
+		cancel()
 
-			// Check if all jobs are done
-			if processed >= totalJobs {
-				s.logger.Debug("All jobs processed",
-					zap.Int("processed", processed))
-				return
-			}
-
-		case <-s.ctx.Done():
-			return
+		result := &connectionResult{
+			job:     job,
+			success: err == nil,
+			err:     err,
+			elapsed: elapsed,
 		}
+
+		if err != nil {
+			s.logger.Warn("STARTUP: Connection failed",
+				zap.Int("worker_id", workerID),
+				zap.Int("wave", waveNum),
+				zap.String("server", job.id),
+				zap.Duration("elapsed", elapsed),
+				zap.Duration("timeout", timeout),
+				zap.Error(err))
+		} else {
+			atomic.AddInt64(&s.successful, 1)
+			s.logger.Info("STARTUP: Connection successful",
+				zap.Int("worker_id", workerID),
+				zap.Int("wave", waveNum),
+				zap.String("server", job.id),
+				zap.Duration("elapsed", elapsed))
+		}
+
+		results <- result
 	}
 }
 
 // Stop cancels all pending operations
 func (s *ConnectionScheduler) Stop() {
 	s.cancel()
-	s.wg.Wait()
 }
 
 // SchedulerResult contains the outcome of a scheduling run
@@ -319,6 +329,39 @@ type SchedulerResult struct {
 	Successful int
 	Failed     int
 	Retried    int
+
+	// Connection timing metrics
+	MinConnectTime time.Duration
+	MaxConnectTime time.Duration
+	AvgConnectTime time.Duration
+	// Separate metrics for successful vs failed connections
+	SuccessMinTime time.Duration
+	SuccessMaxTime time.Duration
+	SuccessAvgTime time.Duration
+}
+
+// calculateTimingMetrics computes min, max, and average from a slice of durations
+func calculateTimingMetrics(times []time.Duration) (min, max, avg time.Duration) {
+	if len(times) == 0 {
+		return 0, 0, 0
+	}
+
+	min = times[0]
+	max = times[0]
+	var total time.Duration
+
+	for _, t := range times {
+		if t < min {
+			min = t
+		}
+		if t > max {
+			max = t
+		}
+		total += t
+	}
+
+	avg = total / time.Duration(len(times))
+	return min, max, avg
 }
 
 // GetMetrics returns current scheduler metrics
@@ -326,5 +369,5 @@ func (s *ConnectionScheduler) GetMetrics() (total, successful, failed, retrying 
 	return atomic.LoadInt64(&s.totalAttempts),
 		atomic.LoadInt64(&s.successful),
 		atomic.LoadInt64(&s.failed),
-		atomic.LoadInt64(&s.retrying)
+		0 // No longer tracking retrying as separate metric
 }

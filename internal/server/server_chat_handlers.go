@@ -344,14 +344,21 @@ func (s *Server) handleChatCallTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Construct full tool name with server prefix
-	fullToolName := fmt.Sprintf("%s:%s", request.ServerName, request.ToolName)
-
 	// MED-002: Use centralized timeout to prevent hanging API requests
 	ctx, cancel := context.WithTimeout(r.Context(), config.ToolCallTimeout)
 	defer cancel()
 
-	result, err := s.upstreamManager.CallTool(ctx, fullToolName, request.Arguments)
+	var result interface{}
+	var err error
+
+	// Route MCPProxy internal tools to the built-in handler instead of upstream manager
+	if request.ServerName == "MCPProxy" {
+		result, err = s.mcpProxy.CallBuiltInTool(ctx, request.ToolName, request.Arguments)
+	} else {
+		// Construct full tool name with server prefix for upstream servers
+		fullToolName := fmt.Sprintf("%s:%s", request.ServerName, request.ToolName)
+		result, err = s.upstreamManager.CallTool(ctx, fullToolName, request.Arguments)
+	}
 	if err != nil {
 		// Check if it was a timeout error for better error messaging
 		errorMsg := fmt.Sprintf("Failed to call tool: %v", err)

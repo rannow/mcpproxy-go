@@ -60,24 +60,32 @@
       ],
       "priority": 3
     },
-    "mcpproxy": {
-      "type": "streamable-http",
-      "url": "http://localhost:8080/mcp",
-      "description": "Local mcpproxy-go server for upstream MCP server management and HTTP streaming",
+    "serena": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server"
+      ],
+      "description": "AI coding agent with semantic code understanding, project management, and intelligent code navigation",
       "capabilities": [
-        "upstream-management",
-        "http-streaming",
-        "server-aggregation",
-        "local-coordination"
+        "semantic-code-analysis",
+        "code-navigation",
+        "project-management",
+        "code-refactoring",
+        "intelligent-search"
       ],
       "priority": 4
     }
   },
   "metadata": {
-    "version": "2.0.0",
-    "lastUpdated": "2025-11-23",
+    "version": "2.0.1",
+    "lastUpdated": "2026-01-20",
     "totalServers": 4,
     "activeServers": 4,
+    "notes": "MCPProxy moved to user-level config (~/.mcp.json)",
     "description": "Consolidated MCP configuration for mcpproxy-go with all available servers activated",
     "optimizations": [
       "Removed duplicate server definitions",
@@ -87,6 +95,7 @@
       "Maintained hooks and permissions integration"
     ],
     "changes": [
+      "Added Serena MCP server for semantic code understanding and AI coding assistance",
       "Added ruv-swarm server (previously referenced but not configured)",
       "Consolidated .mcp.json and mcp.json configurations",
       "Enhanced server metadata with capabilities and priorities",

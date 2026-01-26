@@ -1755,9 +1755,10 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 		s.logger.Info("Triggering direct connection after enable",
 			zap.String("server", serverName))
 
-		// Clear any user-stopped flag on the client so it can reconnect
+		// Clear any user-stopped flag and auto-disable state on the client so it can reconnect
 		if client, exists := s.upstreamManager.GetClient(serverName); exists {
 			client.StateManager.SetUserStopped(false)
+			client.StateManager.ResetAutoDisable() // Bug 3 fix: Clear autoDisabled, reason, and consecutiveFailures
 		}
 
 		// Use AddServer which handles the connection attempt

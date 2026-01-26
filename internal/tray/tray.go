@@ -280,10 +280,12 @@ func (a *App) Run(ctx context.Context) error {
 	a.ctx, a.cancel = context.WithCancel(ctx)
 	defer a.cancel()
 
-	// Initialize config file watcher
-	if err := a.initConfigWatcher(); err != nil {
-		a.logger.Warn("Failed to initialize config file watcher", zap.Error(err))
-	}
+	// Config file watcher DISABLED - was causing unwanted reconnections on config changes
+	// To re-enable, uncomment the following:
+	// if err := a.initConfigWatcher(); err != nil {
+	// 	a.logger.Warn("Failed to initialize config file watcher", zap.Error(err))
+	// }
+	a.logger.Info("Config file watcher disabled - use manual 'Reload Config' from tray menu")
 
 	// Start background auto-update checker (daily)
 	go func() {
@@ -299,10 +301,10 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Start config file watcher
-	if a.configWatcher != nil {
-		go a.watchConfigFile()
-	}
+	// Config file watcher DISABLED - use manual 'Reload Config' from tray menu
+	// if a.configWatcher != nil {
+	// 	go a.watchConfigFile()
+	// }
 
 	// Listen for real-time status updates
 	if a.server != nil {
@@ -494,7 +496,7 @@ func (a *App) onReady() {
 	// --- Initialize Managers ---
 	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.disabledServersMenu, a.autoDisabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
-	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig())
+	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig(), a.configPath)
 
 	// Initialize event-based synchronization
 	if eventBus := a.server.GetEventBus(); eventBus != nil {
@@ -878,14 +880,13 @@ func (a *App) updateServerCountDisplay(totalServers int) {
 func (a *App) updateServerCountFromConfig() {
 	a.logger.Debug("updateServerCountFromConfig called")
 	
-	// Try to load config from default location
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		a.logger.Warnf("Failed to get home directory: %v", err)
+	// Use the actual config path from the App
+	if a.configPath == "" {
+		a.logger.Warnf("Config path not set, cannot load server count")
 		return
 	}
 
-	configPath := filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
+	configPath := a.configPath
 	a.logger.Debugf("Loading config from: %s", configPath)
 	
 	cfg, err := config.LoadFromFile(configPath)

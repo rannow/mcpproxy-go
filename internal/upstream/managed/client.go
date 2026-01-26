@@ -654,16 +654,37 @@ func (mc *Client) checkAndHandleAutoDisable() {
 	// First, persist to storage before updating state machine
 	// This ensures the state survives application restart
 	if mc.storageManager != nil {
-		if err := mc.storageManager.UpdateServerState(mc.Config.Name, reason); err != nil {
-			mc.logger.Error("Failed to persist auto-disable state to storage",
+		// Check config flag to determine persistence behavior
+		// When PersistAutoDisableToConfig is false (default): only update DB, keep config unchanged
+		// When true: use two-phase commit (DB + config)
+		if mc.globalConfig != nil && !mc.globalConfig.PersistAutoDisableToConfig {
+			// Only update database, keep config file unchanged
+			// This allows servers to remain "active" in config while being auto-disabled at runtime
+			if err := mc.storageManager.UpdateUpstreamServerState(mc.Config.Name, "auto_disabled"); err != nil {
+				mc.logger.Error("Failed to persist auto-disable state to database",
+					zap.String("server", mc.Config.Name),
+					zap.Error(err))
+				// Don't continue if storage update fails - we want persistence or nothing
+				return
+			}
+			mc.logger.Info("Persisted auto-disable state to database only (config unchanged)",
 				zap.String("server", mc.Config.Name),
-				zap.Error(err))
-			// Don't continue if storage update fails - we want persistence or nothing
-			return
+				zap.String("reason", reason),
+				zap.Bool("persist_to_config", false))
+		} else {
+			// Original behavior: use two-phase commit (DB + config)
+			if err := mc.storageManager.UpdateServerState(mc.Config.Name, reason); err != nil {
+				mc.logger.Error("Failed to persist auto-disable state to storage",
+					zap.String("server", mc.Config.Name),
+					zap.Error(err))
+				// Don't continue if storage update fails - we want persistence or nothing
+				return
+			}
+			mc.logger.Info("Persisted auto-disable state to storage (DB + config)",
+				zap.String("server", mc.Config.Name),
+				zap.String("reason", reason),
+				zap.Bool("persist_to_config", true))
 		}
-		mc.logger.Info("Persisted auto-disable state to storage",
-			zap.String("server", mc.Config.Name),
-			zap.String("reason", reason))
 	}
 
 	// Now update state machine (after persistence succeeds)

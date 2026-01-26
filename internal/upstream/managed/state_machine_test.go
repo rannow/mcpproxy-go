@@ -16,7 +16,7 @@ func TestNewStateMachine(t *testing.T) {
 	stateManager.SetServerInfo("test-server", "1.0.0")
 	eventBus := events.NewBus()
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 
 	assert.NotNil(t, sm)
 	assert.Equal(t, "test-server", sm.serverName)
@@ -25,7 +25,7 @@ func TestNewStateMachine(t *testing.T) {
 
 func TestStateMachine_SetAutoDisableThreshold(t *testing.T) {
 	stateManager := types.NewStateManager()
-	sm := NewStateMachine(stateManager, nil, nil, "test")
+	sm := NewStateMachine(stateManager, nil, nil, "test", false)
 
 	sm.SetAutoDisableThreshold(5)
 	assert.Equal(t, 5, sm.autoDisableThreshold)
@@ -74,7 +74,7 @@ func TestStateMachine_CanTransitionTo(t *testing.T) {
 			stateManager := types.NewStateManager()
 			stateManager.SetServerState(tt.currentState)
 
-			sm := NewStateMachine(stateManager, nil, nil, "test")
+			sm := NewStateMachine(stateManager, nil, nil, "test", false)
 			canTransition := sm.CanTransitionTo(tt.newState)
 
 			assert.Equal(t, tt.canTransition, canTransition,
@@ -89,7 +89,7 @@ func TestStateMachine_TransitionTo(t *testing.T) {
 	stateManager.SetServerInfo("test-server", "1.0.0")
 	eventBus := events.NewBus()
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 
 	// Valid transition
 	err := sm.TransitionTo(types.StateDisabledConfig)
@@ -113,7 +113,7 @@ func TestStateMachine_TransitionTo_ResetsFailuresOnActive(t *testing.T) {
 	stateManager := types.NewStateManager()
 	stateManager.SetServerInfo("test-server", "1.0.0")
 
-	sm := NewStateMachine(stateManager, nil, nil, "test-server")
+	sm := NewStateMachine(stateManager, nil, nil, "test-server", false)
 
 	// Transition to disabled first
 	err := sm.TransitionTo(types.StateDisabledConfig)
@@ -133,7 +133,7 @@ func TestStateMachine_HandleConnectionFailure(t *testing.T) {
 	stateManager.SetServerInfo("test-server", "1.0.0")
 	eventBus := events.NewBus()
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 	sm.SetAutoDisableThreshold(3)
 
 	// Initial state is active
@@ -162,7 +162,7 @@ func TestStateMachine_HandleConnectionFailure_OnlyWhenActiveOrLazy(t *testing.T)
 	stateManager := types.NewStateManager()
 	stateManager.SetServerInfo("test-server", "1.0.0")
 
-	sm := NewStateMachine(stateManager, nil, nil, "test-server")
+	sm := NewStateMachine(stateManager, nil, nil, "test-server", false)
 	sm.SetAutoDisableThreshold(1) // Low threshold for quick test
 
 	// Set to disabled state
@@ -188,7 +188,7 @@ func TestStateMachine_HandleConnectionFailure_LazyLoading(t *testing.T) {
 	stateManager.SetServerInfo("test-server", "1.0.0")
 	eventBus := events.NewBus()
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 	sm.SetAutoDisableThreshold(2)
 
 	// Set to lazy_loading state
@@ -205,7 +205,7 @@ func TestStateMachine_HandleConnectionFailure_LazyLoading(t *testing.T) {
 
 func TestStateMachine_ResetFailures(t *testing.T) {
 	stateManager := types.NewStateManager()
-	sm := NewStateMachine(stateManager, nil, nil, "test")
+	sm := NewStateMachine(stateManager, nil, nil, "test", false)
 
 	sm.consecutiveFailures = 5
 	sm.ResetFailures()
@@ -215,7 +215,7 @@ func TestStateMachine_ResetFailures(t *testing.T) {
 
 func TestStateMachine_GetConsecutiveFailures(t *testing.T) {
 	stateManager := types.NewStateManager()
-	sm := NewStateMachine(stateManager, nil, nil, "test")
+	sm := NewStateMachine(stateManager, nil, nil, "test", false)
 
 	assert.Equal(t, 0, sm.GetConsecutiveFailures())
 
@@ -228,7 +228,7 @@ func TestStateMachine_EnterLazyLoading(t *testing.T) {
 	stateManager.SetServerInfo("test-server", "1.0.0")
 	eventBus := events.NewBus()
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 
 	// Enter lazy loading from active
 	err := sm.EnterLazyLoading()
@@ -241,7 +241,7 @@ func TestStateMachine_ExitLazyLoading(t *testing.T) {
 	stateManager.SetServerInfo("test-server", "1.0.0")
 	eventBus := events.NewBus()
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 
 	// Set to lazy loading first
 	stateManager.SetServerState(types.StateLazyLoading)
@@ -256,7 +256,7 @@ func TestStateMachine_ExitLazyLoading_Error(t *testing.T) {
 	stateManager := types.NewStateManager()
 	stateManager.SetServerInfo("test-server", "1.0.0")
 
-	sm := NewStateMachine(stateManager, nil, nil, "test-server")
+	sm := NewStateMachine(stateManager, nil, nil, "test-server", false)
 
 	// Try to exit lazy loading when not in that state
 	err := sm.ExitLazyLoading()
@@ -270,7 +270,7 @@ func TestStateMachine_ThreadSafety(t *testing.T) {
 	stateManager.SetServerInfo("test-server", "1.0.0")
 	eventBus := events.NewBus()
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 
 	// Concurrent transitions
 	done := make(chan bool)
@@ -312,7 +312,7 @@ func TestStateMachine_EventBusIntegration(t *testing.T) {
 	eventBus := events.NewBus()
 	stateManager.SetEventBus(eventBus)
 
-	sm := NewStateMachine(stateManager, nil, eventBus, "test-server")
+	sm := NewStateMachine(stateManager, nil, eventBus, "test-server", false)
 
 	// Subscribe to events
 	eventChan := eventBus.Subscribe(events.ServerStateChanged)

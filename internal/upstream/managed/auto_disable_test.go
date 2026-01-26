@@ -99,7 +99,8 @@ func TestAutoDisablePersistence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "auto_disabled", record.ServerState, "Server state should be auto_disabled in database")
 
-	// Verify persistence in config file
+	// Verify config file remains unchanged (default: PersistAutoDisableToConfig=false)
+	// With the new behavior, auto-disable is only saved to database, not config file
 	reloadedCfg, err := config.LoadFromFile(configPath)
 	require.NoError(t, err)
 
@@ -107,7 +108,7 @@ func TestAutoDisablePersistence(t *testing.T) {
 	for _, srv := range reloadedCfg.Servers {
 		if srv.Name == "test-server" {
 			found = true
-			assert.Equal(t, "auto_disabled", srv.StartupMode, "Server startup mode should be auto_disabled in config file")
+			assert.Equal(t, "active", srv.StartupMode, "Server startup mode should remain 'active' in config file (DB-only persistence)")
 			break
 		}
 	}
@@ -358,8 +359,9 @@ func TestRestartPersistence(t *testing.T) {
 		}
 		require.NotNil(t, reloadedServer, "Server should exist in reloaded config")
 
-		// Verify auto-disable persisted in config
-		assert.Equal(t, "auto_disabled", reloadedServer.StartupMode, "Server should be auto_disabled after restart")
+		// Verify config file remains 'active' (default: PersistAutoDisableToConfig=false)
+		// Auto-disable state is tracked in database, not config file
+		assert.Equal(t, "active", reloadedServer.StartupMode, "Server should remain 'active' in config file (DB-only persistence)")
 
 		// Initialize new storage manager
 		storageManager2, err := storage.NewManager(tempDir, logger.Sugar())
@@ -480,7 +482,7 @@ func TestRuntimeAutoDisableViaStateChangeCallback(t *testing.T) {
 	for _, srv := range reloadedCfg.Servers {
 		if srv.Name == "test-server" {
 			found = true
-			assert.Equal(t, "auto_disabled", srv.StartupMode, "Server startup mode should be auto_disabled in config file")
+			assert.Equal(t, "active", srv.StartupMode, "Server startup mode should remain 'active' in config file (DB-only persistence)")
 			break
 		}
 	}

@@ -105,6 +105,11 @@ type Config struct {
 	// Auto-disable threshold - number of consecutive failures before auto-disabling (default: 3)
 	AutoDisableThreshold int `json:"auto_disable_threshold,omitempty" mapstructure:"auto-disable-threshold"`
 
+	// PersistAutoDisableToConfig controls whether auto-disable state is saved to config file.
+	// When false (default), auto-disable state is only stored in database, keeping servers as "active" in config.
+	// When true, auto-disable state is written to both database AND config file.
+	PersistAutoDisableToConfig bool `json:"persist_auto_disable_to_config,omitempty" mapstructure:"persist-auto-disable-to-config"`
+
 	// Semantic search configuration
 	SemanticSearch *SemanticSearchConfig `json:"semantic_search,omitempty" mapstructure:"semantic-search"`
 }

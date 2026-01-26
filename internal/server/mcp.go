@@ -2300,6 +2300,10 @@ func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, a
 		return p.handleListRegistries(ctx, request)
 	case operationSearchServers:
 		return p.handleSearchServers(ctx, request)
+	case "groups":
+		return p.handleGroupsToolMCP(ctx, request)
+	case "list_available_groups":
+		return p.handleListAvailableGroups(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown built-in tool: %s", toolName)
 	}

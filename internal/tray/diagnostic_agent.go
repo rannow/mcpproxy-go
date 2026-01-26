@@ -18,8 +18,9 @@ import (
 
 // DiagnosticAgent analyzes MCP server connection issues using AI
 type DiagnosticAgent struct {
-	logger    *zap.Logger
-	llmClient LLMClient
+	logger     *zap.Logger
+	llmClient  LLMClient
+	configPath string // Path to the actual config file
 }
 
 // DiagnosticReport contains the analysis results
@@ -57,10 +58,11 @@ type RepositoryAnalysis struct {
 }
 
 // NewDiagnosticAgent creates a new diagnostic agent with AI capabilities
-func NewDiagnosticAgent(logger *zap.Logger, llmConfig *config.LLMConfig) *DiagnosticAgent {
+func NewDiagnosticAgent(logger *zap.Logger, llmConfig *config.LLMConfig, configPath string) *DiagnosticAgent {
 	return &DiagnosticAgent{
-		logger:    logger,
-		llmClient: NewLLMClientFromConfig(llmConfig),
+		logger:     logger,
+		llmClient:  NewLLMClientFromConfig(llmConfig),
+		configPath: configPath,
 	}
 }
 
@@ -181,12 +183,17 @@ func (d *DiagnosticAgent) DiagnoseServer(serverName string) (*DiagnosticReport, 
 
 // loadServerConfig loads the server configuration
 func (d *DiagnosticAgent) loadServerConfig(serverName string) (*config.Config, *config.ServerConfig, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, nil, err
+	// Use the actual config path instead of hardcoded default
+	configPath := d.configPath
+	if configPath == "" {
+		// Fallback to default if not set (for backward compatibility)
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, nil, err
+		}
+		configPath = filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
+		d.logger.Warn("Using fallback config path, configPath not set in DiagnosticAgent")
 	}
-
-	configPath := filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
 	cfg, err := config.LoadFromFile(configPath)
 	if err != nil {
 		return nil, nil, err
