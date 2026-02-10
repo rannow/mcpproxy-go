@@ -8,30 +8,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// ServerInterface defines the interface for server control (stub version)
-type ServerInterface interface {
-	IsRunning() bool
-	GetListenAddress() string
-	GetUpstreamStats() map[string]interface{}
-	StartServer(ctx context.Context) error
-	StopServer() error
-	GetStatus() interface{}
-	StatusChannel() <-chan interface{}
-
-	// Quarantine management methods
-	GetQuarantinedServers() ([]map[string]interface{}, error)
-	UnquarantineServer(serverName string) error
-
-	// Server management methods for tray menu
-	EnableServer(serverName string, enabled bool) error
-	QuarantineServer(serverName string, quarantined bool) error
-	GetAllServers() ([]map[string]interface{}, error)
-
-	// Config management for file watching
-	ReloadConfiguration() error
-	GetConfigPath() string
-	GetLogDir() string
-}
+// ServerInterface is now defined in interfaces.go (shared across all build configurations)
+// In headless builds, the stub uses the common ServerInterface from interfaces.go
 
 // App represents the system tray application (stub version)
 type App struct {

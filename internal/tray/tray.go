@@ -34,6 +34,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/upstream/types"
 	// "mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
 
@@ -86,50 +87,7 @@ type GitHubRelease struct {
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
 }
-
-// ServerInterface defines the interface for server control
-type ServerInterface interface {
-	IsRunning() bool
-	GetListenAddress() string
-	GetUpstreamStats() map[string]interface{}
-	StartServer(ctx context.Context) error
-	StopServer() error
-	GetStatus() interface{}            // Returns server status for display
-	StatusChannel() <-chan interface{} // Channel for status updates
-
-	// Quarantine management methods
-	GetQuarantinedServers() ([]map[string]interface{}, error)
-	UnquarantineServer(serverName string) error
-
-	// Server management methods for tray menu
-	EnableServer(serverName string, enabled bool) error
-	QuarantineServer(serverName string, quarantined bool) error
-	StopUpstreamServer(serverName string) error   // Stop individual upstream server (sets Stopped=true)
-	UnstopUpstreamServer(serverName string) error // Unstop individual upstream server (sets Stopped=false)
-	GetAllServers() ([]map[string]interface{}, error)
-	GetServerTools(serverName string) ([]map[string]interface{}, error)
-
-	// Config management for file watching
-	ReloadConfiguration() error
-	ShouldSkipConfigReload() bool // Check if config change was programmatic (skip reload)
-	GetConfigPath() string
-	GetLogDir() string
-	GetGitHubURL() string
-	GetLLMConfig() *config.LLMConfig
-
-	// OAuth control
-	TriggerOAuthLogin(serverName string) error
-
-	// Startup script control
-	StartStartupScript(ctx context.Context) error
-	StopStartupScript() error
-	RestartStartupScript(ctx context.Context) error
-	GetStartupScriptStatus() map[string]interface{}
-
-	// Event bus for event-driven synchronization
-	GetEventBus() *events.EventBus
-}
-
+// ServerInterface is now defined in interfaces.go (shared across all build configurations)
 // App represents the system tray application
 type App struct {
 	server    ServerInterface
@@ -333,6 +291,71 @@ func (a *App) Run(ctx context.Context) error {
 		}()
 	}
 
+	// Listen for GlobalStatus change events for real-time tray title updates
+	if a.server != nil {
+		go func() {
+			a.logger.Debug("Waiting for core menu items before processing GlobalStatus events...")
+			// Wait for menu items to be initialized using the flag
+			for !a.coreMenusReady {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					time.Sleep(100 * time.Millisecond) // Check every 100ms
+				}
+			}
+
+			a.logger.Debug("Core menu items ready, subscribing to GlobalStatus events")
+			if eventBus := a.server.GetEventBus(); eventBus != nil {
+				globalStatusCh := eventBus.Subscribe(events.EventGlobalStatusChange)
+				a.logger.Info("Subscribed to EventGlobalStatusChange for tray title updates")
+
+				for {
+					select {
+					case event := <-globalStatusCh:
+						if data, ok := event.Data.(events.GlobalStatusChangeData); ok {
+							globalStatus := types.GlobalStatus(data.NewStatus)
+							a.logger.Debug("GlobalStatus event received",
+								zap.String("old_status", data.OldStatus),
+								zap.String("new_status", data.NewStatus))
+
+							// Update tray title based on GlobalStatus
+							switch globalStatus {
+							case types.StatusStopped:
+								systray.SetTitle("MCPProxy: Stopped")
+								a.logger.Debug("Updated tray title to: Stopped")
+							case types.StatusStarting:
+								systray.SetTitle("MCPProxy: Starting...")
+								a.logger.Debug("Updated tray title to: Starting")
+							case types.StatusTesting:
+								systray.SetTitle("MCPProxy: Testing...")
+								a.logger.Debug("Updated tray title to: Testing")
+							case types.StatusRunning:
+								systray.SetTitle("MCPProxy: Running")
+								a.logger.Debug("Updated tray title to: Running")
+							case types.StatusStopping:
+								systray.SetTitle("MCPProxy: Stopping...")
+								a.logger.Debug("Updated tray title to: Stopping")
+							default:
+								systray.SetTitle("MCPProxy")
+								a.logger.Debug("Updated tray title to: MCPProxy (default)",
+									zap.String("unknown_status", data.NewStatus))
+							}
+						} else {
+							a.logger.Warn("Received GlobalStatus event with invalid data type",
+								zap.String("event_type", string(event.Type)))
+						}
+					case <-ctx.Done():
+						a.logger.Debug("GlobalStatus event subscription stopped")
+						return
+					}
+				}
+			} else {
+				a.logger.Warn("EventBus not available, GlobalStatus events will not update tray title")
+			}
+		}()
+	}
+
 	// Monitor context cancellation and quit systray when needed
 	go func() {
 		<-ctx.Done()
@@ -496,7 +519,7 @@ func (a *App) onReady() {
 	// --- Initialize Managers ---
 	a.menuManager = NewMenuManager(a.connectedServersMenu, a.disconnectedServersMenu, a.sleepingServersMenu, a.disabledServersMenu, a.autoDisabledServersMenu, a.quarantineMenu, nil, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
-	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig(), a.configPath)
+	a.diagnosticAgent = NewDiagnosticAgent(a.logger.Desugar(), a.server.GetLLMConfig(), a.configPath, a.server)
 
 	// Initialize event-based synchronization
 	if eventBus := a.server.GetEventBus(); eventBus != nil {
@@ -543,6 +566,7 @@ func (a *App) onReady() {
     reloadConfigItem := systray.AddMenuItem("🔄 Reload Config", "")
     openLogsItem := systray.AddMenuItem("Open logs dir", "")
     githubItem := systray.AddMenuItem("🔗 GitHub Repository", "")
+    testServersItem := systray.AddMenuItem("⚡ Test Untested Servers", "Measure startup times for intelligent timeouts")
     // Startup script submenu
     startupMenu := systray.AddMenuItem("🚀 Startup Script", "Manage startup script")
     startupStatusItem := startupMenu.AddSubMenuItem("Status: Loading...", "")
@@ -620,6 +644,16 @@ func (a *App) onReady() {
 				a.openLogsDir()
             case <-githubItem.ClickedCh:
 				a.openGitHubRepository()
+            case <-testServersItem.ClickedCh:
+				a.logger.Info("Testing untested servers from menu")
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				err := a.diagnosticAgent.TestUntestedServers(ctx, a.server.GetManager())
+				cancel()
+				if err != nil {
+					a.logger.Errorw("Failed to test servers", "error", err)
+				} else {
+					a.logger.Info("Server testing completed successfully")
+				}
             case <-startupStartItem.ClickedCh:
                 if a.server != nil { _ = a.server.StartStartupScript(a.ctx) }
                 refreshStartup()
@@ -794,6 +828,40 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Check appState FIRST - "starting" and "stopping" should show even if server isn't fully running yet
 	listenAddr, _ := status["listen_addr"].(string)
 
+	// Extract and handle GlobalStatus for tray title updates
+	globalStatusStr, _ := status["global_status"].(string)
+	if globalStatusStr != "" {
+		globalStatus := types.GlobalStatus(globalStatusStr)
+
+		// Update tray title based on GlobalStatus
+		switch globalStatus {
+		case types.StatusStopped:
+			systray.SetTitle("MCPProxy: Stopped")
+			a.logger.Debug("Set tray title to stopped state")
+		case types.StatusStarting:
+			systray.SetTitle("MCPProxy: Starting...")
+			a.logger.Debug("Set tray title to starting state")
+		case types.StatusTesting:
+			systray.SetTitle("MCPProxy: Testing...")
+			a.logger.Debug("Set tray title to testing state")
+		case types.StatusRunning:
+			systray.SetTitle("MCPProxy: Running")
+			a.logger.Debug("Set tray title to running state")
+		case types.StatusStopping:
+			systray.SetTitle("MCPProxy: Stopping...")
+			a.logger.Debug("Set tray title to stopping state")
+		default:
+			// Fallback to basic status
+			if actuallyRunning {
+				systray.SetTitle("MCPProxy: Running")
+			} else {
+				systray.SetTitle("MCPProxy: Stopped")
+			}
+			a.logger.Debug("Set tray title with fallback logic", zap.String("global_status", globalStatusStr))
+		}
+	}
+
+	// Update status menu item based on appState (for backward compatibility)
 	switch appState {
 	case "starting":
 		a.statusItem.SetTitle("Status: Starting...")
