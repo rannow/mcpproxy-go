@@ -57,6 +57,16 @@ type Client struct {
 	intentionalMu         sync.RWMutex
 }
 
+// GetName returns the server name for this client
+func (mc *Client) GetName() string {
+	return mc.Config.Name
+}
+
+// GetStateManager returns the state manager for this client
+func (mc *Client) GetStateManager() *types.StateManager {
+	return mc.StateManager
+}
+
 // NewClient creates a new managed client with state management
 func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB) (*Client, error) {
 	// Create core client

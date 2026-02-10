@@ -20,6 +20,9 @@ const (
 	// Application state events
 	AppStateChanged EventType = "app_state_changed"
 
+	// Global status events
+	EventGlobalStatusChange EventType = "global_status_changed"
+
 	// HIGH-006: Legacy event type names - kept for backward compatibility
 	// These are actively used throughout the codebase and should be migrated
 	// to the canonical names above in a future refactoring phase.
@@ -67,6 +70,12 @@ type AppStateChangeData struct {
 // ConfigChangeData contains data for config change events
 type ConfigChangeData struct {
 	Action string `json:"action"` // "created", "updated", "deleted"
+}
+
+// GlobalStatusChangeData contains data for global status change events
+type GlobalStatusChangeData struct {
+	OldStatus string `json:"old_status"`
+	NewStatus string `json:"new_status"`
 }
 
 // Event represents a single event in the system

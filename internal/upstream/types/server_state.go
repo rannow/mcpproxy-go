@@ -53,6 +53,9 @@ const (
 	StateAutoDisabled ServerState = "auto_disabled"
 	// StateLazyLoading - server enabled but doesn't start on boot (lazy loaded)
 	StateLazyLoading ServerState = "lazy_loading"
+
+	// StateSleep - server is in sleep mode due to inactivity
+	StateSleep ServerState = "sleep"
 )
 
 // String returns the string representation of the server state (technical/API format)
@@ -75,6 +78,8 @@ func (s ServerState) DisplayString() string {
 		return "Auto-Disabled"
 	case StateLazyLoading:
 		return "Lazy Loading"
+	case StateSleep:
+		return "Sleep"
 	default:
 		return "Unknown"
 	}
@@ -86,7 +91,7 @@ func (s ServerState) IsStable() bool {
 	switch s {
 	case StateActive, StateDisabledConfig, StateLazyLoading:
 		return true
-	case StateQuarantined, StateAutoDisabled:
+	case StateQuarantined, StateAutoDisabled, StateSleep:
 		return false // These can be cleared/changed
 	default:
 		return false
@@ -111,10 +116,11 @@ func ValidateServerState(state string) error {
 		string(StateQuarantined):    true,
 		string(StateAutoDisabled):   true,
 		string(StateLazyLoading):    true,
+		string(StateSleep):          true,
 	}
 
 	if !validStates[state] {
-		return fmt.Errorf("invalid server state: %s (must be one of: active, disabled, quarantined, auto_disabled, lazy_loading)", state)
+		return fmt.Errorf("invalid server state: %s (must be one of: active, disabled, quarantined, auto_disabled, lazy_loading, sleep)", state)
 	}
 
 	return nil

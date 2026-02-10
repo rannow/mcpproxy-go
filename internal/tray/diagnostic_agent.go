@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/upstream"
 	"go.uber.org/zap"
 )
 
@@ -20,7 +22,8 @@ import (
 type DiagnosticAgent struct {
 	logger     *zap.Logger
 	llmClient  LLMClient
-	configPath string // Path to the actual config file
+	configPath string         // Path to the actual config file
+	server     ServerInterface // For group assignment and config persistence
 }
 
 // DiagnosticReport contains the analysis results
@@ -58,11 +61,12 @@ type RepositoryAnalysis struct {
 }
 
 // NewDiagnosticAgent creates a new diagnostic agent with AI capabilities
-func NewDiagnosticAgent(logger *zap.Logger, llmConfig *config.LLMConfig, configPath string) *DiagnosticAgent {
+func NewDiagnosticAgent(logger *zap.Logger, llmConfig *config.LLMConfig, configPath string, server ServerInterface) *DiagnosticAgent {
 	return &DiagnosticAgent{
 		logger:     logger,
 		llmClient:  NewLLMClientFromConfig(llmConfig),
 		configPath: configPath,
+		server:     server,
 	}
 }
 
@@ -235,14 +239,7 @@ func (d *DiagnosticAgent) analyzeConfiguration(server *config.ServerConfig) Conf
 		}
 	}
 
-	// Check for common configuration issues
-	if server.Protocol == "stdio" && strings.Contains(server.Command, "npx") {
-		analysis.Suggestions = append(analysis.Suggestions, "Consider using 'npx -y' to auto-install packages")
-	}
-
-	if server.Protocol == "stdio" && strings.Contains(server.Command, "uvx") {
-		analysis.Suggestions = append(analysis.Suggestions, "Ensure uvx is installed: 'pip install uv'")
-	}
+	// Pattern-based suggestions removed - AI analysis handles all recommendations
 
 	return analysis
 }
@@ -684,4 +681,130 @@ func (d *DiagnosticAgent) fetchDocumentation(repoURL string) (string, error) {
 	}
 
 	return string(body), nil
+}
+
+// TestUntestedServers measures startup times for servers that haven't been tested yet
+// This enables intelligent timeout calculation based on actual performance data
+func (d *DiagnosticAgent) TestUntestedServers(ctx context.Context, manager *upstream.Manager) error {
+	d.logger.Info("Starting startup time measurement for untested servers")
+
+	clients := manager.GetAllClients()
+	storageMgr := manager.GetStorageManager()
+	startupConfig := manager.GetGlobalConfig().Startup
+
+	var tested, failed int
+
+	for name, client := range clients {
+		serverConfig, err := storageMgr.GetUpstreamServer(name)
+		if err != nil {
+			d.logger.Warn("Failed to get server config",
+				zap.String("server", name), zap.Error(err))
+			continue
+		}
+
+		// Skip already tested servers
+		if serverConfig.StartupTested {
+			continue
+		}
+
+		// Skip disabled servers
+		if serverConfig.StartupMode == "disabled" ||
+		   serverConfig.StartupMode == "quarantined" ||
+		   serverConfig.StartupMode == "auto_disabled" {
+			continue
+		}
+
+		// Measure startup time
+		startTime := time.Now()
+		timeout := startupConfig.DefaultTimeout()
+		connectCtx, cancel := context.WithTimeout(ctx, timeout)
+
+		err = client.Connect(connectCtx)
+		duration := time.Since(startTime)
+		cancel()
+
+		if err != nil {
+			d.logger.Warn("Failed to measure startup time",
+				zap.String("server", name),
+				zap.Duration("attempted_duration", duration),
+				zap.Error(err))
+			failed++
+			client.Disconnect()
+			continue
+		}
+
+		// Update database with measured startup time
+		serverConfig.StartupTested = true
+		serverConfig.StartupTimeMs = int(duration.Milliseconds())
+
+		err = storageMgr.SaveUpstreamServer(serverConfig)
+		if err != nil {
+			d.logger.Error("Failed to save startup time",
+				zap.String("server", name),
+				zap.Duration("measured_time", duration),
+				zap.Error(err))
+			failed++
+			client.Disconnect()
+			continue
+		}
+
+		d.logger.Info("Successfully measured startup time",
+			zap.String("server", name),
+			zap.Duration("startup_time", duration))
+		tested++
+
+		// Clean disconnect and delay before next test
+		client.Disconnect()
+		time.Sleep(startupConfig.InterServerDelay())
+	}
+
+	d.logger.Info("Startup testing complete",
+		zap.Int("servers_tested", tested),
+		zap.Int("servers_failed", failed))
+
+	return nil
+}
+
+// CheckMissingBinaries detects stdio servers whose binaries don't exist.
+// Returns list of server names with missing executables.
+func (d *DiagnosticAgent) CheckMissingBinaries(manager *upstream.Manager) ([]string, error) {
+	d.logger.Info("Checking for servers with missing binaries")
+
+	var missingBinaries []string
+	clients := manager.GetAllClients()
+	storageMgr := manager.GetStorageManager()
+
+	for name := range clients {
+		serverConfig, err := storageMgr.GetUpstreamServer(name)
+		if err != nil {
+			d.logger.Warn("Failed to get server config",
+				zap.String("server", name), zap.Error(err))
+			continue
+		}
+
+		// Only check stdio protocol servers (have local Command)
+		if serverConfig.Protocol != "stdio" {
+			continue
+		}
+
+		// Skip if no command specified
+		if serverConfig.Command == "" {
+			continue
+		}
+
+		// Check if command exists in PATH
+		_, err = exec.LookPath(serverConfig.Command)
+		if err != nil {
+			d.logger.Info("Binary not found",
+				zap.String("server", name),
+				zap.String("command", serverConfig.Command))
+			missingBinaries = append(missingBinaries, name)
+		}
+	}
+
+	d.logger.Info("Missing binary check complete",
+		zap.Int("servers_checked", len(clients)),
+		zap.Int("missing_binaries", len(missingBinaries)))
+
+	return missingBinaries, nil
 }

@@ -2,6 +2,8 @@ package storage
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +18,7 @@ import (
 // Manager provides a unified interface for storage operations
 type Manager struct {
 	db           *BoltDB
+	dataDir      string // Needed for DeleteAndReinitialize to reconstruct db path
 	configLoader *config.Loader
 	eventBus     *events.Bus
 	mu           sync.RWMutex
@@ -30,8 +33,9 @@ func NewManager(dataDir string, logger *zap.SugaredLogger) (*Manager, error) {
 	}
 
 	return &Manager{
-		db:     db,
-		logger: logger,
+		db:      db,
+		dataDir: dataDir,
+		logger:  logger,
 	}, nil
 }
 
@@ -43,6 +47,41 @@ func (m *Manager) Close() error {
 	if m.db != nil {
 		return m.db.Close()
 	}
+	return nil
+}
+
+// DeleteAndReinitialize closes the database, deletes the file, and creates a fresh database.
+// This is used during config reload to ensure a completely fresh state.
+func (m *Manager) DeleteAndReinitialize() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.logger.Info("DeleteAndReinitialize: starting database reset")
+
+	// Close existing database connection
+	if m.db != nil {
+		if err := m.db.Close(); err != nil {
+			return fmt.Errorf("failed to close database: %w", err)
+		}
+		m.logger.Info("DeleteAndReinitialize: closed existing database")
+	}
+
+	// Delete database file from filesystem
+	dbPath := filepath.Join(m.dataDir, "config.db")
+	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete database file: %w", err)
+	}
+	m.logger.Infow("DeleteAndReinitialize: deleted database file", "path", dbPath)
+
+	// Create fresh database with initialized buckets
+	newDB, err := NewBoltDB(m.dataDir, m.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create fresh database: %w", err)
+	}
+
+	m.db = newDB
+	m.logger.Info("DeleteAndReinitialize: created fresh database successfully")
+
 	return nil
 }
 
@@ -683,6 +722,25 @@ func (m *Manager) ClearAutoDisable(name string) error {
 		"server_state", "active")
 
 	return nil
+}
+
+// DeleteServerFromConfig removes a server from the config file
+func (m *Manager) DeleteServerFromConfig(serverName string) error {
+	if m.configLoader == nil {
+		return fmt.Errorf("config loader not available")
+	}
+
+	return m.configLoader.UpdateConfigAtomic(func(cfg *config.Config) (*config.Config, error) {
+		for i, server := range cfg.Servers {
+			if server.Name == serverName {
+				cfg.Servers = append(cfg.Servers[:i], cfg.Servers[i+1:]...)
+				m.logger.Info("Removed server from config file",
+					zap.String("server", serverName))
+				break
+			}
+		}
+		return cfg, nil
+	})
 }
 
 // UpdateUpstreamServerState updates ONLY the database server_state WITHOUT changing config startup_mode

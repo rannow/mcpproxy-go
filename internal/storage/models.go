@@ -58,6 +58,10 @@ type UpstreamRecord struct {
 	// Auto-disable threshold (number of failures before auto-disabling)
 	AutoDisableThreshold int    `json:"auto_disable_threshold,omitempty"`
 
+	// Startup testing fields - track measured startup times for intelligent timeout calculation
+	StartupTested  bool `json:"startup_tested,omitempty"`   // True if server startup has been measured
+	StartupTimeMs  int  `json:"startup_time_ms,omitempty"`  // Measured startup time in milliseconds
+
 	// Server state (persisted runtime state, NOT the config-level startup_mode)
 	// IMPORTANT: This is the DATABASE representation of server state
 	// Config layer uses "startup_mode", but database uses "server_state" for clarity

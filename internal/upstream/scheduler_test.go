@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/upstream/managed"
 )
 
@@ -32,10 +31,9 @@ func TestNewConnectionScheduler(t *testing.T) {
 			scheduler := NewConnectionScheduler(nil, tt.workerCount, logger)
 			assert.NotNil(t, scheduler)
 			assert.Equal(t, tt.expectedWorkers, scheduler.workerCount)
-			assert.NotNil(t, scheduler.primaryQueue)
-			assert.NotNil(t, scheduler.retryQueue)
-			assert.NotNil(t, scheduler.results)
-			assert.Equal(t, config.MaxConnectionRetries, scheduler.maxRetries)
+			// Verify context is initialized
+			assert.NotNil(t, scheduler.ctx)
+			assert.NotNil(t, scheduler.cancel)
 		})
 	}
 }
@@ -81,19 +79,19 @@ func TestSchedulerMetrics(t *testing.T) {
 	assert.Equal(t, int64(0), total)
 	assert.Equal(t, int64(0), successful)
 	assert.Equal(t, int64(0), failed)
-	assert.Equal(t, int64(0), retrying)
+	assert.Equal(t, int64(0), retrying) // Always 0 - no longer tracked
 
 	// Manually increment metrics
 	atomic.AddInt64(&scheduler.totalAttempts, 5)
 	atomic.AddInt64(&scheduler.successful, 3)
 	atomic.AddInt64(&scheduler.failed, 1)
-	atomic.AddInt64(&scheduler.retrying, 1)
+	// Note: retrying is no longer tracked as separate metric
 
 	total, successful, failed, retrying = scheduler.GetMetrics()
 	assert.Equal(t, int64(5), total)
 	assert.Equal(t, int64(3), successful)
 	assert.Equal(t, int64(1), failed)
-	assert.Equal(t, int64(1), retrying)
+	assert.Equal(t, int64(0), retrying) // Always 0 - no longer tracked
 }
 
 // TestSchedulerStop tests graceful shutdown
@@ -101,16 +99,7 @@ func TestSchedulerStop(t *testing.T) {
 	logger := zap.NewNop()
 	scheduler := NewConnectionScheduler(nil, 10, logger)
 
-	// Start workers manually
-	for i := 0; i < 3; i++ {
-		scheduler.wg.Add(1)
-		go scheduler.worker(i)
-	}
-
-	// Give workers time to start
-	time.Sleep(50 * time.Millisecond)
-
-	// Stop should complete without hanging
+	// Stop should cancel the context
 	done := make(chan struct{})
 	go func() {
 		scheduler.Stop()
@@ -123,34 +112,31 @@ func TestSchedulerStop(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Scheduler stop timed out")
 	}
+
+	// Verify context was cancelled
+	select {
+	case <-scheduler.ctx.Done():
+		// Expected - context is cancelled
+	default:
+		t.Fatal("Context should be cancelled after Stop()")
+	}
 }
 
 // TestConnectionJob tests job struct
 func TestConnectionJob(t *testing.T) {
 	job := &connectionJob{
-		id:      "test-server",
-		client:  nil,
-		isRetry: false,
-		attempt: 1,
+		id:     "test-server",
+		client: nil,
 	}
 
 	assert.Equal(t, "test-server", job.id)
-	assert.False(t, job.isRetry)
-	assert.Equal(t, 1, job.attempt)
-
-	// Simulate retry
-	job.attempt++
-	job.isRetry = true
-
-	assert.True(t, job.isRetry)
-	assert.Equal(t, 2, job.attempt)
+	assert.Nil(t, job.client)
 }
 
 // TestConnectionResult tests result struct
 func TestConnectionResult(t *testing.T) {
 	job := &connectionJob{
-		id:      "test-server",
-		attempt: 1,
+		id: "test-server",
 	}
 
 	result := &connectionResult{
@@ -166,19 +152,17 @@ func TestConnectionResult(t *testing.T) {
 	assert.Equal(t, "test-server", result.job.id)
 }
 
-// TestSchedulerQueueCapacity tests buffer sizes
-func TestSchedulerQueueCapacity(t *testing.T) {
+// TestSchedulerFields tests scheduler struct fields
+func TestSchedulerFields(t *testing.T) {
 	logger := zap.NewNop()
 	scheduler := NewConnectionScheduler(nil, 10, logger)
 
-	// Primary queue should have buffer of 100
-	assert.Equal(t, 100, cap(scheduler.primaryQueue))
-
-	// Retry queue should have buffer of 100
-	assert.Equal(t, 100, cap(scheduler.retryQueue))
-
-	// Results channel should have buffer of 100
-	assert.Equal(t, 100, cap(scheduler.results))
+	// Verify scheduler is properly initialized
+	assert.NotNil(t, scheduler)
+	assert.Equal(t, 10, scheduler.workerCount)
+	assert.NotNil(t, scheduler.logger)
+	assert.NotNil(t, scheduler.ctx)
+	assert.NotNil(t, scheduler.cancel)
 }
 
 // TestSchedulerContextCancellation tests context handling
@@ -228,10 +212,10 @@ func TestWorkerCountBehavior(t *testing.T) {
 	}
 }
 
-// TestMaxRetriesFromConfig tests that maxRetries uses config value
-func TestMaxRetriesFromConfig(t *testing.T) {
+// TestSchedulerWorkerCount tests that workerCount is properly set
+func TestSchedulerWorkerCount(t *testing.T) {
 	scheduler := NewConnectionScheduler(nil, 10, zap.NewNop())
-	assert.Equal(t, config.MaxConnectionRetries, scheduler.maxRetries)
+	assert.Equal(t, 10, scheduler.workerCount)
 }
 
 // TestSchedulerWithEmptyMap tests Start with empty but non-nil map

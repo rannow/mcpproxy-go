@@ -112,6 +112,9 @@ type Config struct {
 
 	// Semantic search configuration
 	SemanticSearch *SemanticSearchConfig `json:"semantic_search,omitempty" mapstructure:"semantic-search"`
+
+	// Startup timing configuration
+	Startup *StartupConfig `json:"startup,omitempty" mapstructure:"startup"`
 }
 
 // SemanticSearchConfig represents semantic search configuration
@@ -221,6 +224,10 @@ type ServerConfig struct {
 
 	// Auto-disable state - persisted across restarts
 	AutoDisableReason         string    `json:"auto_disable_reason,omitempty" mapstructure:"auto_disable_reason"` // Reason for auto-disable
+
+	// Startup timing - measured by diagnostic agent
+	StartupTested  bool `json:"startup_tested,omitempty" mapstructure:"startup_tested"`     // Whether startup time has been measured
+	StartupTimeMs  int  `json:"startup_time_ms,omitempty" mapstructure:"startup_time_ms"`   // Measured startup time in milliseconds
 
 	// NOTE: "Stopped" field has been REMOVED - it was runtime-only state that should NOT be persisted
 	// Use StateManager.IsUserStopped() / SetUserStopped() for runtime-only stopped state
@@ -656,6 +663,9 @@ func DefaultConfig() *Config {
 			OllamaURL:   "http://localhost:11434", // Default Ollama endpoint
 		},
 
+		// Default startup timing configuration
+		Startup: func() *StartupConfig { c := DefaultStartupConfig(); return &c }(),
+
 		// Default semantic search configuration
 		SemanticSearch: &SemanticSearchConfig{
 			Enabled:       false, // Disabled by default (opt-in)
@@ -695,6 +705,14 @@ func (c *Config) Validate() error {
 	// Ensure DockerIsolation config is not nil
 	if c.DockerIsolation == nil {
 		c.DockerIsolation = DefaultDockerIsolationConfig()
+	}
+
+	// Ensure Startup config is not nil and validate it
+	if c.Startup == nil {
+		s := DefaultStartupConfig()
+		c.Startup = &s
+	} else {
+		c.Startup.Validate()
 	}
 
 	// Ensure Logging config is not nil

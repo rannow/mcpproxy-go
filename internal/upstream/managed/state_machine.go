@@ -45,6 +45,7 @@ var validTransitions = map[types.ServerState][]types.ServerState{
 		types.StateQuarantined,
 		types.StateAutoDisabled,
 		types.StateLazyLoading,
+		types.StateSleep,
 	},
 
 	// Disabled can transition back to active or lazy_loading
@@ -72,6 +73,11 @@ var validTransitions = map[types.ServerState][]types.ServerState{
 		types.StateDisabledConfig,
 		types.StateQuarantined,    // Can quarantine lazy server
 		types.StateAutoDisabled,   // Can auto-disable if failures occur
+	},
+
+	// Sleep can wake up to active
+	types.StateSleep: {
+		types.StateActive,
 	},
 }
 
@@ -276,6 +282,8 @@ func (sm *StateMachine) persistStateLocked(state types.ServerState) error {
 		stateStr = "auto_disabled"
 	case types.StateLazyLoading:
 		stateStr = "lazy_loading"
+	case types.StateSleep:
+		stateStr = "sleep"
 	default:
 		stateStr = "active" // Default fallback
 	}

@@ -1204,6 +1204,11 @@ func (s *Server) Shutdown() error {
 
 	s.logger.Info("Shutting down MCP proxy server using coordinated shutdown...")
 
+	// Stop inactivity monitor
+	if s.upstreamManager != nil {
+		s.upstreamManager.StopInactivityMonitor()
+	}
+
 	// Use shutdown coordinator for ordered shutdown with timeouts
 	ctx := context.Background()
 	err := s.shutdownCoordinator.Shutdown(ctx)
@@ -1231,6 +1236,11 @@ func (s *Server) ShutdownWithContext(ctx context.Context) error {
 
 	s.logger.Info("Shutting down MCP proxy server using coordinated shutdown...")
 
+	// Stop inactivity monitor
+	if s.upstreamManager != nil {
+		s.upstreamManager.StopInactivityMonitor()
+	}
+
 	return s.shutdownCoordinator.Shutdown(ctx)
 }
 
@@ -1256,6 +1266,11 @@ func (s *Server) IsRunning() bool {
 // GetEventBus returns the event bus for subscribing to events
 func (s *Server) GetEventBus() *events.EventBus {
 	return s.eventBus
+}
+
+// GetManager returns the upstream manager for diagnostic operations
+func (s *Server) GetManager() *upstream.Manager {
+	return s.upstreamManager
 }
 
 // setupEventBridge connects StateManager callbacks to the EventBus
@@ -1913,6 +1928,29 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }
 
+// DeleteServer removes a server from runtime and optionally from config
+func (s *Server) DeleteServer(serverName string, deleteFromConfig bool) error {
+	s.logger.Info("Request to delete server",
+		zap.String("server", serverName),
+		zap.Bool("delete_from_config", deleteFromConfig))
+
+	// Delegate to upstream manager which handles:
+	// - Runtime cleanup (disconnect, remove from clients)
+	// - Storage cleanup (BoltDB)
+	// - Config file cleanup (optional)
+	// - Event publishing
+	if err := s.upstreamManager.DeleteServer(serverName, deleteFromConfig); err != nil {
+		s.logger.Error("Failed to delete server", zap.Error(err))
+		return fmt.Errorf("failed to delete server '%s': %w", serverName, err)
+	}
+
+	s.logger.Info("Successfully deleted server",
+		zap.String("server", serverName),
+		zap.Bool("deleted_from_config", deleteFromConfig))
+
+	return nil
+}
+
 // StopUpstreamServer temporarily stops a server using runtime-only userStopped flag
 // IMPORTANT: This is a runtime-only state change (NOT persisted to config/database)
 // When app restarts, servers will return to their original startup_mode
@@ -2174,6 +2212,11 @@ func (s *Server) StopServer() error {
 	// Notify about server stopping
 	s.logger.Info("STOPSERVER - Server is running, proceeding with stop")
 	_ = s.logger.Sync()
+
+	// Stop inactivity monitor
+	if s.upstreamManager != nil {
+		s.upstreamManager.StopInactivityMonitor()
+	}
 
 	// Disconnect upstream servers FIRST to ensure Docker containers are cleaned up
 	// Do this before canceling contexts to avoid interruption
@@ -2908,6 +2951,7 @@ func (s *Server) initGroupsFromConfig() {
 	// Ensure default groups exist if no groups in config
 	if len(groups) == 0 {
 		s.logger.Debug("[GROUPS DEBUG] No groups loaded, creating defaults")
+		groups["To Check"] = &Group{Name: "To Check", Description: "Servers with missing binaries or validation issues", Color: "#FFA500", Icon: "🔍"}
 		groups["AWS Services"] = &Group{Name: "AWS Services", Color: "#ff9900"}
 		groups["Development"] = &Group{Name: "Development", Color: "#28a745"}
 		groups["Production"] = &Group{Name: "Production", Color: "#dc3545"}
@@ -3016,28 +3060,16 @@ func (s *Server) deleteGroup(name string) {
 	delete(groups, name)
 }
 
-// ReloadConfiguration reloads the configuration from disk
+// ReloadConfiguration reloads the configuration from disk with database reset.
+// This delegates to upstream.Manager.ReloadConfiguration() which performs:
+//  1. DisconnectAll() - sets StatusStopping, then StatusStopped
+//  2. DeleteAndReinitialize() - deletes database for fresh state
+//  3. Update global config
+//  4. ConnectAll() - sets StatusStarting, then StatusRunning
 func (s *Server) ReloadConfiguration() error {
-	s.logger.Info("Reloading configuration from disk - full restart of all servers")
+	s.logger.Info("Reloading configuration from disk")
 
-	// Step 1: Disconnect all upstream servers cleanly before reloading
-	s.logger.Info("Disconnecting all upstream servers before config reload")
-	if err := s.upstreamManager.DisconnectAll(); err != nil {
-		s.logger.Warn("Some servers failed to disconnect cleanly before reload", zap.Error(err))
-	}
-
-	// Store old config for comparison
-	oldServerCount := len(s.config.Servers)
-
-	// Preserve current server-group assignments before config reload
-	assignmentsMutex.RLock()
-	savedAssignments := make(map[string]string)
-	for serverName, groupName := range serverGroupAssignments {
-		savedAssignments[serverName] = groupName
-	}
-	assignmentsMutex.RUnlock()
-
-	// Step 2: Load fresh configuration from file
+	// Load fresh configuration from file
 	s.mu.RLock()
 	dataDir := s.config.DataDir
 	s.mu.RUnlock()
@@ -3048,78 +3080,18 @@ func (s *Server) ReloadConfiguration() error {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 
-	// Update internal config with write lock to prevent race conditions
+	// Delegate to upstream manager (handles disconnect, DB delete, reconnect)
+	ctx := context.Background()
+	if err := s.upstreamManager.ReloadConfiguration(ctx, newConfig); err != nil {
+		return fmt.Errorf("failed to reload configuration: %w", err)
+	}
+
+	// Update server's internal config reference
 	s.mu.Lock()
 	s.config = newConfig
 	s.mu.Unlock()
 
-	// Migrate legacy names to IDs after reload
-	s.migrateLegacyGroupNamesToIDs()
-
-	// NOTE: Do not restore preserved assignments here. We want the file to be authoritative
-	// on reload (including clearing assignments where group_id == 0). The assignments map
-	// will be rebuilt from s.config by loadConfiguredServers -> initServerGroupAssignments.
-	//
-	// Previously we restored savedAssignments here, which could mask file changes.
-
-	s.logger.Debug("Preserved assignments snapshot (not restored)",
-		zap.Int("preserved_assignments", len(savedAssignments)))
-
-	// Sync database with config file - remove servers not in config
-	s.logger.Debug("Syncing database with config file")
-	if err := s.storageManager.SyncServersWithConfig(); err != nil {
-		s.logger.Warn("Failed to sync database with config file during reload",
-			zap.Error(err))
-	}
-
-	// Reload configured servers (this is where the comprehensive sync happens)
-	s.logger.Debug("About to call loadConfiguredServers")
-	if err := s.loadConfiguredServers(); err != nil {
-		s.logger.Error("loadConfiguredServers failed", zap.Error(err))
-		return fmt.Errorf("failed to reload servers: %w", err)
-	}
-	s.logger.Debug("loadConfiguredServers completed successfully")
-
-	// Step 3: Trigger immediate reconnection for all servers with fresh configuration
-	s.logger.Debug("Starting goroutine for full server restart after config reload")
-	go func() {
-		s.mu.RLock()
-		ctx := s.appCtx // Use application context instead of server context
-		s.mu.RUnlock()
-
-		s.logger.Debug("Inside reconnection goroutine", zap.Bool("ctx_is_nil", ctx == nil))
-		if ctx == nil {
-			s.logger.Error("Application context is nil, cannot trigger reconnection")
-			return
-		}
-
-		s.logger.Info("Starting fresh connections for all servers after config reload")
-
-		// Connect all servers that should be connected with fresh state
-		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-
-		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
-			s.logger.Warn("Some servers failed to reconnect after config reload", zap.Error(err))
-		} else {
-			s.logger.Info("All servers successfully restarted with fresh configuration")
-		}
-
-		// NOTE: Removed automatic tool re-indexing after config reload
-		// Tools will be loaded based on:
-		// 1. StartOnBoot flag for individual servers
-		// 2. EnableLazyLoading global setting
-		// 3. Manual reload requests from tray UI
-		// 4. Server-specific health checks (if configured)
-		s.logger.Info("Config reload complete - tool loading will follow lazy loading policy")
-	}()
-
-	s.logger.Info("Configuration reload completed",
-		zap.String("path", configPath),
-		zap.Int("old_server_count", oldServerCount),
-		zap.Int("new_server_count", len(newConfig.Servers)),
-		zap.Int("server_delta", len(newConfig.Servers)-oldServerCount))
-
+	s.logger.Info("Configuration reload complete")
 	return nil
 }
 
