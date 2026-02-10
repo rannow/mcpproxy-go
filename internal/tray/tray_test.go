@@ -8,6 +8,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/events"
+	"mcpproxy-go/internal/upstream"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -196,6 +197,31 @@ func (m *MockServerInterface) GetStartupScriptStatus() map[string]interface{} {
 }
 
 func (m *MockServerInterface) GetEventBus() *events.EventBus {
+	return nil
+}
+
+func (m *MockServerInterface) GetManager() *upstream.Manager {
+	return nil
+}
+
+func (m *MockServerInterface) DeleteServer(serverName string, deleteFromConfig bool) error {
+	// Remove from allServers
+	for i, server := range m.allServers {
+		if name, ok := server["name"].(string); ok && name == serverName {
+			m.allServers = append(m.allServers[:i], m.allServers[i+1:]...)
+			break
+		}
+	}
+
+	// Remove from quarantinedServers
+	for i, server := range m.quarantinedServers {
+		if name, ok := server["name"].(string); ok && name == serverName {
+			m.quarantinedServers = append(m.quarantinedServers[:i], m.quarantinedServers[i+1:]...)
+			break
+		}
+	}
+
+	_ = deleteFromConfig // Suppress unused parameter warning
 	return nil
 }
 
